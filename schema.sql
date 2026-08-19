@@ -1,0 +1,68 @@
+-- email-soft product layer.
+-- The mail mirror (mail_accounts, mail_mailboxes, mail_messages,
+-- mail_message_mailboxes, mail_bodies, mail_sync_state) is created and owned
+-- by neutron-mail's own schema migration. Read from it; never write to it or
+-- alter it here.
+
+CREATE TABLE IF NOT EXISTS users (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  email text NOT NULL UNIQUE,
+  display_name text NOT NULL DEFAULT '',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Per-sender Screener decision. One decision covers all future mail from the
+-- sender: allowed senders route straight to their bucket, unknown senders
+-- land in the Screener.
+CREATE TABLE IF NOT EXISTS hey_senders (
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  sender_key text NOT NULL,
+  allowed boolean NOT NULL DEFAULT false,
+  route text NOT NULL DEFAULT 'screener'
+    CHECK (route IN ('screener','imbox','paper_trail','feed','blocked')),
+  first_seen timestamptz NOT NULL DEFAULT now(),
+  decided_at timestamptz,
+  PRIMARY KEY (user_id, sender_key)
+);
+
+-- Per-message classification layered on top of the mirror. message identity
+-- references neutron-mail's stable message ids/fingerprints.
+CREATE TABLE IF NOT EXISTS hey_messages (
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  message_id text NOT NULL,
+  bucket text NOT NULL DEFAULT 'screener'
+    CHECK (bucket IN ('screener','imbox','paper_trail','feed','set_aside','later','dropped')),
+  read_at timestamptz,
+  set_aside_until timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, message_id)
+);
+
+-- Connected mailboxes. Credentials (app passwords until OAuth in Phase 1b)
+-- are AES-256-GCM sealed with SECRET_KEY. mirror_account_id is the row this
+-- product created in mail_accounts; the mirror is derived state owned by
+-- neutron-mail, dropped wholesale when an account is disconnected.
+CREATE TABLE IF NOT EXISTS email_accounts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  mirror_account_id text NOT NULL UNIQUE,
+  provider text NOT NULL CHECK (provider IN ('imap','jmap','gmail','graph')),
+  address text NOT NULL,
+  label text NOT NULL DEFAULT '',
+  username text NOT NULL DEFAULT '',
+  host text NOT NULL DEFAULT '',
+  port integer NOT NULL DEFAULT 0,
+  smtp_host text NOT NULL DEFAULT '',
+  smtp_port integer NOT NULL DEFAULT 587,
+  cred_ciphertext text NOT NULL,
+  backfill_days integer NOT NULL DEFAULT 90,
+  sync_enabled boolean NOT NULL DEFAULT true,
+  last_sync_at timestamptz,
+  last_error text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS email_accounts_user ON email_accounts (user_id);
+
+-- Phase 2+ tables (aliases, calendar, contacts, campaigns) land in later
+-- migrations, only when their phase ships. See SPEC.md sections 6.2-6.5.

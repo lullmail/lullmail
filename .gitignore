@@ -1,0 +1,11 @@
+.DS_Store
+.env
+dashboard/node_modules/
+dashboard/dist/
+/email-soft
+/output/
+
+# Dev-only workspace into the live Neutron checkout; deploy vendoring is
+# NEUTRON_BUGS.md N4 / TASKS D2. Not committable: clones without the sibling
+# would fail every build.
+go.work
