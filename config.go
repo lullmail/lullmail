@@ -14,9 +14,17 @@ type Config struct {
 }
 
 func loadConfig() *Config {
+	// PORT wins: teploy injects the container port the yml declares, as a
+	// bare number; ListenAndServe wants host:port.
+	addr := envOr("ADDR", ":8080")
+	if p := osGetenv("PORT"); p != "" {
+		if !strings.Contains(p, ":") {
+			p = ":" + p
+		}
+		addr = p
+	}
 	return &Config{
-		// PORT wins: teploy injects the container port the yml declares.
-		Addr:        envOr("PORT", envOr("ADDR", ":8080")),
+		Addr:        addr,
 		DatabaseURL: os.Getenv("DATABASE_URL"),
 		SecretKey:   strings.TrimSpace(os.Getenv("SECRET_KEY")),
 		APIToken:    strings.TrimSpace(os.Getenv("EMAILSOFT_TOKEN")),
