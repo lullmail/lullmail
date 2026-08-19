@@ -19,17 +19,18 @@ export default function Layout(props: { children?: ComponentChildren }) {
     <div class="shell">
       <script dangerouslySetInnerHTML={{ __html: themeInit }} />
       <aside class="sidebar">
-        <a href="/" class="brand">email-soft</a>
+        <a href="/today" class="brand">email-soft</a>
         <nav>
+          <div class="nav-label">Today</div>
           <a href="/today" data-nav="today" class="nav-today">Today</a>
-          <div class="nav-sep"></div>
+          <div class="nav-label">Mailbox</div>
           <a href="/" data-nav="imbox">Imbox</a>
           <a href="/screener" data-nav="screener">Screener</a>
           <a href="/feed" data-nav="feed">Feed</a>
           <a href="/paper-trail" data-nav="paper_trail">Paper Trail</a>
           <a href="/set-aside" data-nav="set_aside">Set Aside</a>
           <a href="/later" data-nav="later">Later</a>
-          <div class="nav-sep"></div>
+          <div class="nav-label">People</div>
           <a href="/people" data-nav="people">People</a>
         </nav>
         <nav class="sidebar-bottom">
@@ -42,6 +43,7 @@ export default function Layout(props: { children?: ComponentChildren }) {
       </aside>
       <div class="list-col">
         <header class="topbar">
+          <span class="topbar-brand">email-soft</span>
           <span id="sync-note" class="sync-note"></span>
           <div class="searchwrap">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
@@ -49,6 +51,7 @@ export default function Layout(props: { children?: ComponentChildren }) {
             <span class="kbd">/</span>
           </div>
           <div class="topbar-right">
+            <a href="/" class="to-mailbox" id="to-mailbox">Mailbox →</a>
             <button id="shortcuts-btn" class="btn-ghost btn-sm kbd-hint" type="button" title="Keyboard shortcuts">
               <span class="kbd">?</span>
             </button>
@@ -60,8 +63,8 @@ export default function Layout(props: { children?: ComponentChildren }) {
       <aside class="reader" id="reader">
         <div class="reader-empty">
           <div class="reader-empty-mark">✉</div>
-          <div class="reader-empty-big">Pick a thread</div>
-          <div class="reader-empty-sub">It opens here, beside the list.</div>
+          <div class="reader-empty-big">Nothing open</div>
+          <div class="reader-empty-sub">Pick a thread — j / k to move, Enter to open.</div>
         </div>
       </aside>
       <div id="overlay" class="overlay" hidden></div>

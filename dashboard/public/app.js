@@ -1080,6 +1080,9 @@
   function boot() {
     if (!token() || !view) return;
     applyThemeIcons();
+    // Today is a standalone surface: no sidebar, centered, its own topbar.
+    var shell = document.querySelector(".shell");
+    if (shell && view.dataset.page === "today") shell.classList.add("mode-today");
     var page = view.dataset.page;
     if (page === "today") loadToday();
     else if (page === "people") loadPeople();
