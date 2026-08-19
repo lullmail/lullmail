@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -370,7 +371,9 @@ func firstSenderName(fromJSON string) string {
 	return addrs[0].Email
 }
 
-// handleThread returns one thread: messages with their hey state.
+// handleThread returns one thread: messages with their hey state. Bodies are
+// lazy upstream — any message without one is fetched on demand here (bounded
+// per request), so opening a thread always shows content.
 func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 	uid, err := a.userID(r.Context())
 	if err != nil {
@@ -380,7 +383,7 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 	thread := r.PathValue("thread")
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT m.id, m.account_id, m.subject, m.from_addrs, m.to_addrs, m.received_at,
-		       COALESCE(h.bucket,''), COALESCE(b.text_body,''), COALESCE(b.html_body,'')
+		       COALESCE(h.bucket,''), b.text_body, b.html_body, b.parts, b.fetched_at
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
@@ -394,33 +397,47 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type msgRow struct {
-		ID         string `json:"id"`
-		Account    string `json:"account"`
-		Subject    string `json:"subject"`
-		From       string `json:"from"`
-		To         string `json:"to"`
-		ReceivedAt string `json:"received_at"`
-		Bucket     string `json:"bucket"`
-		Body       string `json:"body"`
-		HTML       string `json:"html,omitempty"`
+		ID          string       `json:"id"`
+		Account     string       `json:"account"`
+		Subject     string       `json:"subject"`
+		From        string       `json:"from"`
+		To          string       `json:"to"`
+		ReceivedAt  string       `json:"received_at"`
+		Bucket      string       `json:"bucket"`
+		Body        string       `json:"body"`
+		HTML        string       `json:"html,omitempty"`
+		Attachments []attachment `json:"attachments,omitempty"`
 	}
 	out := []msgRow{}
+	type ref struct {
+		idx      int
+		id, acct string
+	}
+	var refs []ref
 	for rows.Next() {
 		var row msgRow
-		var fromJSON, toJSON string
+		var fromJSON, toJSON, parts sql.NullString
+		var textBody, htmlBody sql.NullString
+		var fetched sql.NullTime
 		var received sql.NullTime
 		if err := rows.Scan(&row.ID, &row.Account, &row.Subject, &fromJSON, &toJSON,
-			&received, &row.Bucket, &row.Body, &row.HTML); err != nil {
+			&received, &row.Bucket, &textBody, &htmlBody, &parts, &fetched); err != nil {
 			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
 			return
 		}
-		row.From = firstSenderName(fromJSON)
+		row.Body = textBody.String
+		row.HTML = htmlBody.String
+		row.Attachments = parseAttachments(parts)
+		row.From = firstSenderName(fromJSON.String)
 		var to []mail.Address
-		if json.Unmarshal([]byte(toJSON), &to) == nil && len(to) > 0 {
+		if json.Unmarshal([]byte(toJSON.String), &to) == nil && len(to) > 0 {
 			row.To = to[0].Email
 		}
 		if received.Valid {
 			row.ReceivedAt = received.Time.Format(time.RFC3339)
+		}
+		if !fetched.Valid {
+			refs = append(refs, ref{len(out), row.ID, row.Account})
 		}
 		out = append(out, row)
 	}
@@ -428,7 +445,178 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusNotFound, "Not Found", "no such thread")
 		return
 	}
+
+	// On-demand body fetch for messages the sync never fetched. Bounded to
+	// keep one huge thread from turning into a mailbox download.
+	//
+	// Upstream gap (NEUTRON_BUGS N6): imap Adapter.Body assumes a mailbox
+	// is already selected — true mid-sync, false on a fresh dial, so their
+	// own HTTP body endpoint fails the same way on GreenMail-class
+	// servers. Workaround: resolve the message's mailbox and run a
+	// cursor-only Sync (a SELECT plus usually-empty delta) before Body.
+	if len(refs) > 0 {
+		adapters := map[string]mail.Adapter{}
+		releases := map[string]func(){}
+		defer func() {
+			for _, rel := range releases {
+				rel()
+			}
+		}()
+		limit := 6
+		for i, rf := range refs {
+			if i >= limit {
+				break
+			}
+			var boxID string
+			a.db.QueryRowContext(r.Context(),
+				`SELECT mailbox_id FROM mail_message_mailboxes WHERE account_id = $1 AND message_id = $2 LIMIT 1`,
+				rf.acct, rf.id).Scan(&boxID)
+			if boxID == "" {
+				continue
+			}
+			ad, ok := adapters[rf.acct]
+			if !ok {
+				cred, err := a.Token(r.Context(), mail.AccountID(rf.acct))
+				if err != nil {
+					a.log.Error("body fetch: token", "err", err)
+					continue
+				}
+				resolve := newResolver()
+				var release func()
+				ad, release, err = resolve(r.Context(), mail.AccountID(rf.acct), cred)
+				if err != nil {
+					a.log.Error("body fetch: dial", "err", err)
+					continue
+				}
+				adapters[rf.acct] = ad
+				releases[rf.acct] = release
+			}
+			if cur, err := a.store.Cursor(r.Context(), mail.AccountID(rf.acct), mail.MailboxID(boxID)); err == nil {
+				if _, err := ad.Sync(r.Context(), mail.MailboxID(boxID), cur); err != nil {
+					a.log.Error("body fetch: select", "err", err)
+					continue
+				}
+			}
+			b, err := a.eng.Body(r.Context(), mail.AccountID(rf.acct), mail.MessageID(rf.id), ad)
+			if err != nil {
+				a.log.Error("body fetch: engine", "msg", rf.id, "err", err)
+				continue
+			}
+			out[rf.idx].Body = b.Text
+			out[rf.idx].HTML = b.HTML
+			if atts := b.Attachments(); len(atts) > 0 {
+				list := []attachment{}
+				for _, p := range atts {
+					list = append(list, attachment{
+						PartID: p.PartID, Filename: p.Filename,
+						Type: p.Type, Size: p.Size,
+					})
+				}
+				out[rf.idx].Attachments = list
+			}
+		}
+	}
 	writeJSON(w, out)
+}
+
+type attachment struct {
+	PartID   string `json:"part_id"`
+	Filename string `json:"filename"`
+	Type     string `json:"type"`
+	Size     int64  `json:"size"`
+}
+
+// handleAttachment streams one attachment's decoded content. Same
+// select-before-fetch workaround as the body path (NEUTRON_BUGS N6).
+func (a *App) handleAttachment(w http.ResponseWriter, r *http.Request) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	msgID := r.PathValue("message")
+	partID := r.PathValue("part")
+	var acct string
+	err = a.db.QueryRowContext(r.Context(), `
+		SELECT m.account_id FROM mail_messages m
+		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+		WHERE m.id = $2`, uid, msgID).Scan(&acct)
+	if err != nil {
+		writeProblem(w, http.StatusNotFound, "Not Found", "no such message")
+		return
+	}
+	cred, err := a.Token(r.Context(), mail.AccountID(acct))
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Credential Failed", err.Error())
+		return
+	}
+	resolve := newResolver()
+	ad, release, err := resolve(r.Context(), mail.AccountID(acct), cred)
+	if err != nil {
+		writeProblem(w, http.StatusBadGateway, "Connect Failed", err.Error())
+		return
+	}
+	defer release()
+
+	var boxID string
+	a.db.QueryRowContext(r.Context(),
+		`SELECT mailbox_id FROM mail_message_mailboxes WHERE account_id = $1 AND message_id = $2 LIMIT 1`,
+		acct, msgID).Scan(&boxID)
+	if boxID == "" {
+		writeProblem(w, http.StatusNotFound, "Not Found", "message has no mailbox")
+		return
+	}
+	if cur, err := a.store.Cursor(r.Context(), mail.AccountID(acct), mail.MailboxID(boxID)); err == nil {
+		if _, err := ad.Sync(r.Context(), mail.MailboxID(boxID), cur); err != nil {
+			writeProblem(w, http.StatusBadGateway, "Select Failed", err.Error())
+			return
+		}
+	}
+	rc, err := ad.Attachment(r.Context(), mail.MessageID(msgID), partID)
+	if err != nil {
+		writeProblem(w, http.StatusNotFound, "Not Found", "part not found")
+		return
+	}
+	defer rc.Close()
+
+	// Filename from the stored parts list; harmless fallback if absent.
+	var partsRaw sql.NullString
+	filename := "attachment"
+	if a.db.QueryRowContext(r.Context(),
+		`SELECT parts FROM mail_bodies WHERE account_id = $1 AND message_id = $2`, acct, msgID).Scan(&partsRaw) == nil && partsRaw.Valid {
+		var raw []mail.BodyPart
+		if json.Unmarshal([]byte(partsRaw.String), &raw) == nil {
+			for _, p := range raw {
+				if p.PartID == partID && p.Filename != "" {
+					filename = p.Filename
+				}
+			}
+		}
+	}
+	w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ReplaceAll(filename, `"`, "")+`"`)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	io.Copy(w, rc)
+}
+
+// parseAttachments reads the parts JSON the engine stores with bodies.
+func parseAttachments(parts sql.NullString) []attachment {
+	if !parts.Valid || parts.String == "" {
+		return nil
+	}
+	var raw []mail.BodyPart
+	if err := json.Unmarshal([]byte(parts.String), &raw); err != nil {
+		return nil
+	}
+	var out []attachment
+	for _, p := range raw {
+		if p.IsAttachment() {
+			out = append(out, attachment{
+				PartID: p.PartID, Filename: p.Filename,
+				Type: p.Type, Size: p.Size,
+			})
+		}
+	}
+	return out
 }
 
 // handleMessageAction applies a user action to one message: mark read, move

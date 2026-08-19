@@ -13,7 +13,6 @@ import (
 	"net/http"
 
 	"github.com/neutron-build/neutron/mail"
-	"github.com/neutron-build/neutron/mail/dialer"
 )
 
 type accountJSON struct {
@@ -132,7 +131,7 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 
 	// Validate before storing: dial and list mailboxes. A typo'd host must
 	// not become a credential row that fails on every scheduler tick.
-	resolve := dialer.New()
+	resolve := newResolver()
 	adapter, release, err := resolve(r.Context(), "verify", cred)
 	if err != nil {
 		writeProblem(w, http.StatusBadGateway, "Connect Failed", err.Error())
@@ -299,7 +298,7 @@ func (a *App) syncAccount(ctx context.Context, acct mail.AccountID) {
 		a.log.Error("sync: credential lookup failed", "account", acct, "err", err)
 		return
 	}
-	resolve := dialer.New()
+	resolve := newResolver()
 	adapter, release, err := resolve(ctx, acct, cred)
 	if err != nil {
 		a.db.ExecContext(ctx, `UPDATE email_accounts SET last_error = $1 WHERE mirror_account_id = $2`, err.Error(), string(acct))

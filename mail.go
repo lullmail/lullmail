@@ -14,7 +14,6 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/neutron-build/neutron/mail"
-	"github.com/neutron-build/neutron/mail/dialer"
 )
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -73,14 +72,14 @@ func connectApp(cfg *Config) *App {
 		sendq: newSendQueue(),
 	}
 	app.svc = mail.NewService(store, app.eng)
-	app.svc.Resolve = dialer.New()
+	app.svc.Resolve = newResolver()
 	app.svc.Senders = func(acct mail.AccountID) (*mail.Sender, mail.Address, bool) {
 		return app.SMTPFor(context.Background(), acct)
 	}
 
 	app.sched = mail.NewScheduler(store, app.eng, nil, slog.Default())
 	app.sched.Tokens = app
-	app.sched.Resolve = dialer.New()
+	app.sched.Resolve = newResolver()
 
 	if err := app.ensureUser(ctx); err != nil {
 		log.Printf("app: user bootstrap failed (continuing): %v", err)
@@ -128,6 +127,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	api.HandleFunc("GET /buckets/{bucket}", a.handleBucket)
 	api.HandleFunc("GET /threads/{thread}", a.handleThread)
 	api.HandleFunc("POST /messages/{message}/action", a.handleMessageAction)
+	api.HandleFunc("GET /messages/{message}/attachment/{part}", a.handleAttachment)
 	api.HandleFunc("POST /send", a.handleSend)
 	api.HandleFunc("DELETE /outbox/{id}", a.handleUndoSend)
 	api.HandleFunc("POST /classify", func(w http.ResponseWriter, r *http.Request) {

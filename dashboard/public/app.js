@@ -401,9 +401,29 @@
       block.appendChild(mh);
       var body = el("div", "thread-msg-body");
       if (m.html) {
-        body.appendChild(htmlFrame(m.html));
+        var rendered = htmlFrame(m.html, false);
+        if (rendered.blocked > 0) {
+          var notice = el("div", "img-notice");
+          var shield = el("span", "img-shield", "\u26E8");
+          notice.appendChild(shield);
+          notice.appendChild(el("span", null,
+            rendered.blocked + (rendered.blocked === 1 ? " image blocked — " : " images blocked — ") +
+            "loading them may notify the sender"));
+          var loadBtn = el("button", "btn-outline btn-sm", "Load images");
+          loadBtn.type = "button";
+          loadBtn.addEventListener("click", function () {
+            var fresh = htmlFrame(m.html, true);
+            body.innerHTML = "";
+            body.appendChild(fresh.frame);
+          });
+          notice.appendChild(loadBtn);
+          body.appendChild(notice);
+        }
+        body.appendChild(rendered.frame);
+        if ((m.attachments || []).length) body.appendChild(attachmentRow(m));
       } else {
         body.appendChild(textBody(m.body || "(body not fetched yet — sync in progress)"));
+        if ((m.attachments || []).length) body.appendChild(attachmentRow(m));
       }
       block.appendChild(body);
       stream.appendChild(block);
@@ -433,11 +453,32 @@
   }
 
   // ---- message body rendering: HTML in a sandboxed, theme-injected iframe;
-  // plain text with quoted replies collapsed behind a toggle ----
+  // plain text with quoted replies collapsed behind a toggle.
+  // Remote images are stripped by default (spy pixels) — the user opts in
+  // per message with "Load images". ----
   function cssVar(name) {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   }
-  function htmlFrame(html) {
+  var BLOCKED_PLACEHOLDER =
+    "<div style='display:flex;align-items:center;justify-content:center;border:1.5px dashed " +
+    "var(--line-strong,#ccc);border-radius:8px;color:var(--ink-3,#999);font:12px sans-serif;" +
+    "padding:14px'>image blocked</div>";
+  function rewriteImages(html, allow) {
+    var count = 0;
+    if (allow) return { html: html, blocked: 0 };
+    // Remote sources only: data: and cid: stay (cid is inline by provider).
+    var out = html.replace(/(<img\b[^>]*\bsrc=)(["'])https?:\/\/[^"']*\2/gi, function (m) {
+      count++;
+      return m;
+    });
+    // Replace the src'd img wholesale with the placeholder (keeps alt text out of the way).
+    out = html.replace(/<img\b[^>]*\bsrc=(["'])https?:\/\/[^"']*\1[^>]*>/gi, function () {
+      return BLOCKED_PLACEHOLDER;
+    });
+    return { html: out, blocked: count };
+  }
+  function htmlFrame(html, allowImages) {
+    var rw = rewriteImages(html, allowImages);
     var frame = document.createElement("iframe");
     frame.className = "mail-frame";
     frame.setAttribute("sandbox", "allow-same-origin allow-popups allow-popups-to-escape-sandbox");
@@ -453,7 +494,7 @@
       "margin:8px 0;padding:2px 12px;color:" + cssVar("--ink-2") + ";}" +
       "pre{white-space:pre-wrap;}" +
       "table{max-width:100%;}" +
-      "</style></head><body>" + html + "</body></html>";
+      "</style></head><body>" + rw.html + "</body></html>";
     frame.srcdoc = doc;
     frame.addEventListener("load", function () {
       try {
@@ -461,7 +502,7 @@
         frame.style.height = Math.min(Math.max(h + 12, 40), 600) + "px";
       } catch (e) { frame.style.height = "300px"; }
     });
-    return frame;
+    return { frame: frame, blocked: rw.blocked };
   }
 
   function textBody(text) {
@@ -497,6 +538,46 @@
       }
     });
     return wrap;
+  }
+
+  function fmtBytes(n) {
+    if (!n) return "";
+    if (n < 1024) return n + " B";
+    if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+    return (n / 1048576).toFixed(1) + " MB";
+  }
+  function attachmentRow(m) {
+    var row = el("div", "attach-row");
+    m.attachments.forEach(function (a) {
+      var link = el("a", "attach-chip");
+      link.href = "/api/messages/" + encodeURIComponent(m.id) + "/attachment/" + encodeURIComponent(a.part_id);
+      link.setAttribute("download", a.filename || "");
+      // Bearer-token API needs the header; fetch as blob and save manually.
+      link.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        fetch(link.href, { headers: { "Authorization": "Bearer " + token() } })
+          .then(function (r) {
+            if (!r.ok) throw new Error(r.status);
+            return r.blob();
+          })
+          .then(function (blob) {
+            var url = URL.createObjectURL(blob);
+            var s = document.createElement("a");
+            s.href = url;
+            s.download = a.filename || "attachment";
+            s.click();
+            setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+          })
+          .catch(function () { showToast("Download failed"); });
+      });
+      var icon = el("span", "attach-icon");
+      icon.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>';
+      link.appendChild(icon);
+      link.appendChild(el("span", "attach-name", a.filename || "attachment"));
+      if (a.size) link.appendChild(el("span", "attach-size", fmtBytes(a.size)));
+      row.appendChild(link);
+    });
+    return row;
   }
 
   function clearReader() {
