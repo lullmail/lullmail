@@ -5,3 +5,4 @@ mail-engine/cmd
 output
 .DS_Store
 .env
+email-soft

@@ -12,13 +12,13 @@ COPY mail-engine/go.mod mail-engine/go.sum ./mail-engine/
 RUN go mod download
 COPY . .
 COPY --from=dashboard /src/dashboard/dist ./dashboard/dist
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /email-soft .
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /email-soft-bin .
 
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates tzdata
 RUN addgroup -S es && adduser -S -G es es
 WORKDIR /app
-COPY --from=build /src/email-soft /app/email-soft
+COPY --from=build /email-soft-bin /app/email-soft
 USER es
 EXPOSE 8080
 ENTRYPOINT ["/app/email-soft"]
