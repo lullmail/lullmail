@@ -14,11 +14,13 @@ import { MoreMenu } from "./ui/MoreMenu";
 type NavItem = [string, string, string, keyof typeof COUNTABLE | null];
 const COUNTABLE = { imbox: 1, screener: 1, feed: 1, snoozed: 1 } as const;
 
-// Four words. Receipts is deliberately absent: nobody browses receipts, they
-// search them — it lives in the palette and on Today. The Screener joins only
-// while senders are waiting, because it is a queue you empty, not a place.
+// Four words, plus the Board experiment while it is under test. Receipts is
+// deliberately absent: nobody browses receipts, they search them — it lives
+// in the palette and on Today. The Screener joins only while senders are
+// waiting, because it is a queue you empty, not a place.
 const NAV: NavItem[] = [
   ["/today", "today", "Today", null],
+  ["/board", "board", "Board", null],
   ["/", "imbox", "Imbox", "imbox"],
   ["/reading", "feed", "Reading", "feed"],
   ["/snoozed", "snoozed", "Snoozed", "snoozed"],

@@ -34,6 +34,7 @@ export function Sidebar() {
     <aside class="sidebar">
       <nav>
         <Item href="/today" nav="today" label="Today" here={here} />
+        <Item href="/board" nav="board" label="Board" here={here} />
 
         <div class="side-label">Mailbox</div>
         {MAILBOX.map(([href, nav, label, key]) => (

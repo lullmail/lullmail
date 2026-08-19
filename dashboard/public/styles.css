@@ -830,3 +830,83 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
   .screener-btns { padding-left: 0; }
   .topline-acts .label { display: none; }
 }
+
+/* ============================================================ Board */
+
+/* Three columns of one person's mail-derived state. Columns get equal room;
+   cards stay borderless like the Today digest — the column rule is the only
+   chrome. Cards are tighter than digest cards because a column is narrower. */
+.board { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--sp-6); align-items: start; }
+.board-col { min-width: 0; }
+.board-col-head {
+  display: flex; align-items: baseline; gap: var(--sp-2);
+  padding-bottom: var(--sp-2); border-bottom: 2px solid var(--ink);
+}
+.board-col-title { font-size: var(--t-md); font-weight: 700; letter-spacing: -0.01em; }
+.board-col-count { font-size: var(--t-sm); color: var(--ink-3); font-weight: 660; }
+.board-col-sub { font-size: var(--t-sm); color: var(--ink-3); margin-top: 4px; }
+.board-col-empty {
+  font-size: var(--t-base); color: var(--ink-3); padding: var(--sp-4) 0;
+  border-top: 1px solid var(--line); margin-top: var(--sp-2);
+}
+
+.board-card {
+  padding: var(--sp-3) var(--sp-2) var(--sp-3) var(--rail);
+  margin: 0 calc(var(--sp-2) * -1);
+  border-radius: var(--r-md);
+  border-top: 1px solid var(--line);
+  transition: background 0.1s ease;
+}
+.board-card:first-of-type { border-top: none; }
+.board-card.cursor { background: var(--hover); box-shadow: inset 2px 0 0 var(--accent); }
+.board-card-top { display: flex; align-items: baseline; gap: var(--sp-2); }
+.board-card-who { font-size: var(--t-base); font-weight: 680; color: var(--ink-2); }
+.board-card-date { margin-left: auto; font-size: var(--t-sm); color: var(--ink-3); flex: none; }
+.board-card-subject {
+  font-family: var(--serif); font-size: var(--t-lg); font-weight: 640;
+  letter-spacing: -0.014em; line-height: 1.3; margin-top: 2px;
+}
+.board-card-preview {
+  font-size: var(--t-base); color: var(--ink-3); margin-top: 4px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.board-card-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--sp-2); }
+
+.board-card.wait, .board-card.snoozed { cursor: pointer; color: var(--ink-2); }
+.board-card.wait:hover, .board-card.snoozed:hover { background: var(--hover); color: var(--ink); }
+
+.board-head-row { display: flex; justify-content: flex-end; margin-bottom: var(--sp-2); }
+
+.board-note-composer { width: 100%; }
+.board-note-input {
+  width: 100%; border: 1.5px solid var(--line-strong); border-radius: var(--r-md);
+  padding: var(--sp-2) var(--sp-3); font: inherit; font-size: var(--t-md);
+  background: var(--panel); color: var(--ink);
+}
+.board-note-input:focus { border-color: var(--accent); outline: none; }
+
+.done-pile { margin-top: var(--sp-7); border-top: 1px solid var(--line); padding-top: var(--sp-3); }
+.done-pile-head {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: var(--t-base); font-weight: 660; color: var(--ink-3);
+}
+.done-pile-head:hover { color: var(--ink); }
+.done-pile-note { font-weight: 500; text-decoration: underline; text-underline-offset: 3px; }
+.done-row {
+  display: flex; align-items: baseline; gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--rail);
+  margin: 0 calc(var(--sp-2) * -1);
+  border-top: 1px solid var(--line); border-radius: var(--r-md);
+}
+.done-what {
+  font-family: var(--serif); font-size: var(--t-md); color: var(--ink-3);
+  flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.done-acts { display: flex; gap: 6px; flex: none; }
+
+/* The board needs three columns' worth of room; below that it stacks rather
+   than squeezes, same deal as the Classic layout. */
+@media (max-width: 1079px) {
+  .board { grid-template-columns: 1fr; }
+}
+EOF echo appended

@@ -7,7 +7,7 @@
 import { signal } from "@preact/signals";
 import type { ListBucket } from "./types";
 
-export type PageKind = "today" | "bucket" | "screener" | "people" | "accounts" | "search";
+export type PageKind = "today" | "board" | "bucket" | "screener" | "people" | "accounts" | "search";
 
 export interface Route {
   kind: PageKind;
@@ -20,6 +20,7 @@ export interface Route {
 const ROUTES: Record<string, Route> = {
   "/": { kind: "bucket", bucket: "imbox", nav: "imbox", title: "Imbox" },
   "/today": { kind: "today", nav: "today", title: "Today" },
+  "/board": { kind: "board", nav: "board", title: "Board" },
   "/screener": { kind: "screener", nav: "screener", title: "The Screener" },
   "/reading": { kind: "bucket", bucket: "feed", nav: "feed", title: "Reading" },
   "/receipts": { kind: "bucket", bucket: "paper_trail", nav: "paper_trail", title: "Receipts" },

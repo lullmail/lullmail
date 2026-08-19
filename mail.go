@@ -102,6 +102,12 @@ func (a *App) startBackground() {
 				if err := a.classifyUser(ctx, uid); err != nil {
 					a.log.Error("classify failed", "err", err)
 				}
+				// Dated snoozes whose day has come return to the Imbox; the
+				// board and briefing also sweep on demand so a just-arrived
+				// return never waits on the tick.
+				if err := a.sweepSnoozed(ctx, uid); err != nil {
+					a.log.Error("sweep failed", "err", err)
+				}
 			}
 			<-t.C
 		}
@@ -124,6 +130,11 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	api.HandleFunc("GET /counts", a.handleCounts)
 	api.HandleFunc("GET /search", a.handleSearch)
 	api.HandleFunc("GET /briefing", a.handleBriefing)
+	api.HandleFunc("GET /board", a.handleBoard)
+	api.HandleFunc("POST /board/pin", a.handleBoardPin)
+	api.HandleFunc("POST /board/cards", a.handleBoardCard)
+	api.HandleFunc("POST /board/cards/{id}/done", a.handleBoardCardDone)
+	api.HandleFunc("POST /board/unpin", a.handleBoardUnpin)
 	api.HandleFunc("GET /people", a.handlePeople)
 	api.HandleFunc("GET /recent", a.handleRecent)
 	api.HandleFunc("GET /folder", a.handleFolder)

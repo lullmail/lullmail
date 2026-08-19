@@ -1,6 +1,6 @@
 import { useState } from "preact/hooks";
 import { closeReader, openCompose, reader } from "../lib/store";
-import { BUCKET_LABEL, markDone, markRead, moveTo, snooze } from "../lib/actions";
+import { BUCKET_LABEL, markDone, markRead, moveTo, pinThreads, snooze } from "../lib/actions";
 import type { Bucket, ListBucket, Message, Row } from "../lib/types";
 import { countOf, fmtFull, splitFrom } from "../lib/fmt";
 import { Avatar } from "../ui/bits";
@@ -70,6 +70,9 @@ function Bar({ row }: { row: Row }) {
         </button>
         <button class="btn btn-ghost" type="button" onClick={() => markDone([row])}>
           <Icon name="check" size={14} /> Done <span class="kbd">e</span>
+        </button>
+        <button class="btn btn-ghost" type="button" onClick={() => pinThreads([row])}>
+          <Icon name="pin" size={14} /> Pin <span class="kbd">p</span>
         </button>
 
         <div style={{ position: "relative" }}>

@@ -29,6 +29,8 @@ const PATHS: Record<string, JSX.Element> = {
   classic: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16M15 4v16" /></>,
   document: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M8 9h8M8 13h8M8 17h5" /></>,
   undo: <><path d="M4 9h11a5 5 0 0 1 0 10h-6" /><path d="m8 5-4 4 4 4" /></>,
+  pin: <><path d="M12 17v4" /><path d="M7 4h10l-1.5 6.5 2.5 3v1.5H6V13l2.5-3z" /></>,
+  plus: <><path d="M12 5v14M5 12h14" /></>,
 };
 
 export type IconName = keyof typeof PATHS;

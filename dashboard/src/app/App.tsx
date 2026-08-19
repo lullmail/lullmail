@@ -14,6 +14,7 @@ import { Toast } from "./ui/Toast";
 import { Gate } from "./ui/Gate";
 import { ListSkeleton } from "./ui/bits";
 import { TodayView } from "./views/TodayView";
+import { BoardView } from "./views/BoardView";
 import { BucketView } from "./views/BucketView";
 import { ScreenerView } from "./views/ScreenerView";
 import { PeopleView } from "./views/PeopleView";
@@ -48,6 +49,7 @@ function CurrentView() {
   if (accountCount.value === 0 && route.kind !== "accounts") return <Welcome />;
   switch (route.kind) {
     case "today": return <TodayView />;
+    case "board": return <BoardView />;
     case "screener": return <ScreenerView />;
     case "people": return <PeopleView />;
     case "accounts": return <AccountsView />;

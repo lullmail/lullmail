@@ -64,5 +64,22 @@ CREATE TABLE IF NOT EXISTS email_accounts (
 
 CREATE INDEX IF NOT EXISTS email_accounts_user ON email_accounts (user_id);
 
+-- Board cards (branch experiment): pinned threads and manual notes laid over
+-- the briefing's derived columns. A pin never moves mail — it is a marker on
+-- top of whatever bucket the thread lives in, so it cannot fight the
+-- classifier or the sweep. thread_key NULL = a manual note card.
+CREATE TABLE IF NOT EXISTS board_cards (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  thread_key text,
+  title text NOT NULL DEFAULT '',
+  note text NOT NULL DEFAULT '',
+  done_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS board_cards_user ON board_cards (user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS board_cards_one_pin
+  ON board_cards (user_id, thread_key) WHERE thread_key IS NOT NULL;
+
 -- Phase 2+ tables (aliases, calendar, contacts, campaigns) land in later
 -- migrations, only when their phase ships. See SPEC.md sections 6.2-6.5.

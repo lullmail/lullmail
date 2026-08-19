@@ -19,6 +19,28 @@ export interface Row {
   preview: string;
   bucket?: string;
   thread_len?: number;
+  /** Present on Snoozed rows: when a dated snooze returns. */
+  snooze_until?: string;
+}
+
+/** A board card. Derived cards carry thread data only; pinned cards add
+    card_id; manual notes have card_id + manual and nothing else. */
+export interface BoardCard {
+  card_id?: string;
+  thread_id?: string;
+  message_id?: string;
+  subject: string;
+  from?: string;
+  received_at?: string;
+  preview?: string;
+  note?: string;
+  manual?: boolean;
+}
+
+export interface Board {
+  needs_you: BoardCard[];
+  waiting_on: BoardCard[];
+  done: BoardCard[];
 }
 
 export interface Attachment {

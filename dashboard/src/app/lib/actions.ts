@@ -5,7 +5,7 @@
 // silently relocated a thread with no way back. Each verb here captures the
 // state it replaced and hands it to the toast.
 import { api, ApiError } from "./api";
-import type { Bucket, Counts, ListBucket, Message, Row } from "./types";
+import type { BoardCard, Bucket, Counts, ListBucket, Message, Row } from "./types";
 import {
   closeReader, counts, list, reader, rememberListScroll, resetSelection, showError, showToast,
 } from "./store";
@@ -151,6 +151,85 @@ async function restore(before: { row: Row; from: Bucket }[]) {
     afterMutation();
   } catch (e) {
     fail(e, "Could not undo");
+  }
+}
+
+/* ---- board ---- */
+
+/** Pin = a marker, not a move: the mail stays in whatever bucket it is in. */
+export async function pinThreads(rows: Row[]) {
+  const threads = [...new Set(rows.map((r) => r.thread_id))];
+  if (!threads.length) return;
+  try {
+    const pinned: string[] = [];
+    for (const t of threads) {
+      const res = await api<BoardCard>("/board/pin", { body: { thread_id: t } });
+      if (res.card_id) pinned.push(res.card_id);
+    }
+    afterMutation();
+    showToast(describe(rows, "Pinned to the board"), () => removeCards(pinned, true));
+  } catch (e) {
+    fail(e, "Could not pin that");
+  }
+}
+
+export async function removeCard(card: BoardCard) {
+  if (!card.card_id) return;
+  try {
+    await api("/board/unpin", { body: { card_id: card.card_id } });
+    afterMutation();
+    showToast(card.manual ? "Note deleted" : "Unpinned", () => restoreCard(card));
+  } catch (e) {
+    fail(e, "Could not remove that");
+  }
+}
+
+async function removeCards(ids: string[], quiet = false) {
+  try {
+    for (const id of ids) await api("/board/unpin", { body: { card_id: id } });
+    afterMutation();
+    if (!quiet) showToast("Removed from the board");
+  } catch (e) {
+    fail(e, "Could not remove that");
+  }
+}
+
+async function restoreCard(card: BoardCard) {
+  try {
+    if (card.thread_id && !card.manual) {
+      await api("/board/pin", { body: { thread_id: card.thread_id } });
+    } else {
+      await api("/board/cards", { body: { title: card.subject, note: card.note || "" } });
+    }
+    afterMutation();
+  } catch (e) {
+    fail(e, "Could not restore that");
+  }
+}
+
+/** Done on a pinned card or note checks the card off; derived cards resolve
+    by reading (markDone) instead, because they are made of mail. */
+export async function setCardDone(card: BoardCard, done: boolean) {
+  if (!card.card_id) return;
+  try {
+    await api("/board/cards/" + encodeURIComponent(card.card_id) + "/done", {
+      body: { done },
+    });
+    afterMutation();
+    showToast(done ? "Done" : "Back on the board", () => setCardDone(card, !done));
+  } catch (e) {
+    fail(e, "Could not update that card");
+  }
+}
+
+export async function addCard(title: string, note: string): Promise<boolean> {
+  try {
+    await api("/board/cards", { body: { title, note } });
+    afterMutation();
+    return true;
+  } catch (e) {
+    fail(e, "Could not add that");
+    return false;
   }
 }
 

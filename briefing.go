@@ -9,6 +9,7 @@ package main
 // thread someone else started. Everything else stays a count.
 
 import (
+	"context"
 	"net/http"
 	"time"
 )
@@ -22,17 +23,17 @@ type briefThread struct {
 	Preview    string `json:"preview"`
 }
 
-func (a *App) handleBriefing(w http.ResponseWriter, r *http.Request) {
-	uid, err := a.userID(r.Context())
-	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
-		return
-	}
-
+// briefThreads computes the two derived card sets the Briefing and the Board
+// share. Rules are deliberately conservative — a briefing that says "2 things
+// need you" and is wrong once loses the user to Classic forever. "Needs you"
+// requires: Imbox bucket, unread, and the thread's latest message is from
+// someone else. "You're waiting" requires the user to have spoken last in a
+// thread someone else started.
+func (a *App) briefThreads(ctx context.Context, uid string) (needsYou, waiting []briefThread) {
 	// The user's own addresses, for whose-turn analysis.
 	myAddr := map[string]bool{}
 	{
-		rows, err := a.db.QueryContext(r.Context(),
+		rows, err := a.db.QueryContext(ctx,
 			`SELECT lower(address) FROM email_accounts WHERE user_id = $1`, uid)
 		if err == nil {
 			for rows.Next() {
@@ -45,7 +46,7 @@ func (a *App) handleBriefing(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Latest message of every Imbox thread the user owns.
-	rows, err := a.db.QueryContext(r.Context(), `
+	rows, err := a.db.QueryContext(ctx, `
 		SELECT DISTINCT ON (m.thread_id)
 		       m.thread_id, m.id, m.subject, m.from_addrs, m.received_at, m.preview
 		FROM mail_messages m
@@ -54,8 +55,7 @@ func (a *App) handleBriefing(w http.ResponseWriter, r *http.Request) {
 		WHERE h.bucket = 'imbox'
 		ORDER BY m.thread_id, m.received_at DESC NULLS LAST`, uid)
 	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
-		return
+		return nil, nil
 	}
 	defer rows.Close()
 
@@ -65,7 +65,7 @@ func (a *App) handleBriefing(w http.ResponseWriter, r *http.Request) {
 	readState := map[string]bool{} // message id -> read
 	spoke := map[string][2]bool{}  // thread -> {i_spoke, other_spoke}
 	{
-		r2, err := a.db.QueryContext(r.Context(), `
+		r2, err := a.db.QueryContext(ctx, `
 			SELECT m.thread_id,
 			       bool_or(lower(m.from_addrs::json->0->>'email') = ANY ($2)),
 			       bool_or(lower(m.from_addrs::json->0->>'email') <> ALL ($2))
@@ -82,7 +82,7 @@ func (a *App) handleBriefing(w http.ResponseWriter, r *http.Request) {
 			}
 			r2.Close()
 		}
-		r3, err := a.db.QueryContext(r.Context(), `
+		r3, err := a.db.QueryContext(ctx, `
 			SELECT h.message_id, h.read_at IS NOT NULL
 			FROM hey_messages h WHERE h.user_id = $1 AND h.bucket = 'imbox'`, uid)
 		if err == nil {
@@ -97,7 +97,6 @@ func (a *App) handleBriefing(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var needsYou, waiting []briefThread
 	for rows.Next() {
 		var bt briefThread
 		var fromJSON string
@@ -121,6 +120,20 @@ func (a *App) handleBriefing(w http.ResponseWriter, r *http.Request) {
 			waiting = append(waiting, bt)
 		}
 	}
+	return needsYou, waiting
+}
+
+func (a *App) handleBriefing(w http.ResponseWriter, r *http.Request) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	// Returned snoozes re-enter the picture before it is drawn.
+	if err := a.sweepSnoozed(r.Context(), uid); err != nil {
+		a.log.Error("briefing sweep failed", "err", err)
+	}
+	needsYou, waiting := a.briefThreads(r.Context(), uid)
 
 	// Feed + Paper Trail unread counts, screener total.
 	var feedN, paperN, screenerN int

@@ -5,12 +5,13 @@
 // one handler for the whole app: it reads the current list out of the store, so
 // every surface that publishes rows gets the same keys for free.
 import { cursor, checked, compose, list, noteKeyUse, openCompose, overlayOpen, palette, reader, resetSelection, shortcuts, toggleChecked, closeReader, targetRows, dismissToast, toast } from "./store";
-import { decide, markDone, moveTo, openThread, snooze } from "./actions";
+import { decide, markDone, moveTo, openThread, pinThreads, snooze } from "./actions";
 import { navigate } from "./router";
 import { splitFrom } from "./fmt";
 
 const GOTO: Record<string, string> = {
   t: "/today",
+  b: "/board",
   i: "/",
   s: "/screener",
   r: "/reading",
@@ -157,6 +158,7 @@ export function installKeys(): () => void {
       // rare — you change the sender's rule instead — so those lost their keys.
       case "s": ev.preventDefault(); learn(); snooze(rows, 3); return;
       case "i": ev.preventDefault(); learn(); moveTo(rows, "imbox"); return;
+      case "p": ev.preventDefault(); learn(); pinThreads(rows); return;
     }
   };
 
@@ -172,10 +174,11 @@ export const SHORTCUTS: [string, string][] = [
   ["e", "Done"],
   ["s", "Snooze for 3 days"],
   ["i", "Move to the Imbox"],
+  ["p", "Pin to the board"],
   ["r", "Reply"],
   ["c", "Compose"],
   ["1 2 3 0", "Screener: Imbox, Reading, Receipts, Block"],
-  ["g then t i r z s c p", "Go to Today, Imbox, Reading, Snoozed, Screener, Receipts, People"],
+  ["g then t b i r z s c p", "Go to Today, Board, Imbox, Reading, Snoozed, Screener, Receipts, People"],
   ["/ or ⌘K", "Search, browse, jump — one palette"],
   ["Esc", "Dismiss"],
   ["?", "This list"],

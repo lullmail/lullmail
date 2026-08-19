@@ -374,8 +374,9 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT m.thread_id, m.id, m.subject, m.from_addrs, m.received_at,
 		       h.read_at IS NOT NULL AS is_read, m.has_attachment, m.preview, h.bucket,
+		       h.set_aside_until,
 		       (SELECT count(*) FROM mail_messages t
-		          WHERE t.account_id = m.account_id AND t.thread_id = m.thread_id) AS thread_len
+	          WHERE t.account_id = m.account_id AND t.thread_id = m.thread_id) AS thread_len
 		FROM hey_messages h
 		JOIN mail_messages m ON m.id = h.message_id
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = h.user_id
@@ -395,30 +396,36 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type threadRow struct {
-		ThreadID   string `json:"thread_id"`
-		MessageID  string `json:"message_id"`
-		Subject    string `json:"subject"`
-		From       string `json:"from"`
-		ReceivedAt string `json:"received_at"`
-		Read       bool   `json:"read"`
-		Attachment bool   `json:"has_attachment"`
-		Preview    string `json:"preview"`
-		Bucket     string `json:"bucket"`
-		ThreadLen  int    `json:"thread_len"`
+		ThreadID    string `json:"thread_id"`
+		MessageID   string `json:"message_id"`
+		Subject     string `json:"subject"`
+		From        string `json:"from"`
+		ReceivedAt  string `json:"received_at"`
+		Read        bool   `json:"read"`
+		Attachment  bool   `json:"has_attachment"`
+		Preview     string `json:"preview"`
+		Bucket      string `json:"bucket"`
+		ThreadLen   int    `json:"thread_len"`
+		SnoozeUntil string `json:"snooze_until,omitempty"`
 	}
 	out := []threadRow{}
 	for rows.Next() {
 		var row threadRow
 		var fromJSON string
 		var received sql.NullTime
+		var snoozeUntil sql.NullTime
 		if err := rows.Scan(&row.ThreadID, &row.MessageID, &row.Subject, &fromJSON,
-			&received, &row.Read, &row.Attachment, &row.Preview, &row.Bucket, &row.ThreadLen); err != nil {
+			&received, &row.Read, &row.Attachment, &row.Preview, &row.Bucket,
+			&snoozeUntil, &row.ThreadLen); err != nil {
 			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
 			return
 		}
 		row.From = firstSenderName(fromJSON)
 		if received.Valid {
 			row.ReceivedAt = received.Time.Format(time.RFC3339)
+		}
+		if snoozeUntil.Valid {
+			row.SnoozeUntil = snoozeUntil.Time.Format(time.RFC3339)
 		}
 		out = append(out, row)
 	}
