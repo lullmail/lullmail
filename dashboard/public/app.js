@@ -417,6 +417,238 @@
     }
   }
 
+  // ---- the palette: summonable lists from anywhere (Today's chrome-free nav) ----
+  var palette = null, palState = { open: false, folder: null, items: [], sel: -1 };
+
+  function openPalette() {
+    if (!palette) buildPalette();
+    palState.open = true; palState.folder = null;
+    palette.hidden = false;
+    palState.input.value = "";
+    renderPaletteRoot();
+    setTimeout(function () { palState.input.focus(); }, 0);
+  }
+  function closePalette() {
+    palState.open = false;
+    if (palette) palette.hidden = true;
+  }
+  function buildPalette() {
+    palette = el("div", "palette-wrap");
+    palette.hidden = true;
+    var panel = el("div", "palette");
+    var inputRow = el("div", "palette-input-row");
+    var icon = el("span", "palette-search-icon");
+    icon.innerHTML = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>';
+    palState.input = document.createElement("input");
+    palState.input.type = "text";
+    palState.input.placeholder = "Search mail, jump to a list, browse folders…";
+    palState.input.className = "palette-input";
+    inputRow.appendChild(icon);
+    inputRow.appendChild(palState.input);
+    var esc = el("span", "kbd", "esc");
+    inputRow.appendChild(esc);
+    panel.appendChild(inputRow);
+    palState.body = el("div", "palette-body");
+    panel.appendChild(palState.body);
+    palette.appendChild(panel);
+
+    palette.addEventListener("click", function (ev) {
+      if (ev.target === palette) closePalette();
+    });
+    palState.input.addEventListener("input", function () {
+      palState.folder = null;
+      renderPaletteRoot(palState.input.value.trim());
+    });
+    document.body.appendChild(palette);
+  }
+
+  function palItem(kind, label, note, action, sub) {
+    return { kind: kind, label: label, note: note, action: action, sub: sub };
+  }
+
+  function renderPaletteRootInner(q) {
+    palState.sel = -1;
+    palState.items = [];
+    var body = palState.body;
+    body.innerHTML = "";
+
+    // Jumps are always offered, filtered by query.
+    var jumps = [
+      palItem("jump", "Today", "the briefing", function () { location.href = "/today"; }),
+      palItem("jump", "Imbox", "", function () { location.href = "/"; }),
+      palItem("jump", "Screener", "new senders", function () { location.href = "/screener"; }),
+      palItem("jump", "Feed", "", function () { location.href = "/feed"; }),
+      palItem("jump", "Paper Trail", "", function () { location.href = "/paper-trail"; }),
+      palItem("jump", "Set Aside", "", function () { location.href = "/set-aside"; }),
+      palItem("jump", "Later", "", function () { location.href = "/later"; }),
+      palItem("jump", "People", "the roster", function () { location.href = "/people"; }),
+      palItem("jump", "Accounts", "settings", function () { location.href = "/settings/accounts"; })
+    ];
+    var ql = (q || "").toLowerCase();
+    var shownJumps = ql ? jumps.filter(function (j) { return j.label.toLowerCase().indexOf(ql) >= 0; }) : jumps;
+
+    // Lists (provider folders) — loaded once per open.
+    var listsLoad = api("/mailboxes").catch(function () { return []; });
+
+    var recentLoad = ql ? Promise.resolve([])
+      : api("/recent").catch(function () { return []; });
+    var searchLoad = ql ? api("/search?q=" + encodeURIComponent(q)).catch(function () { return []; }) : Promise.resolve([]);
+
+    Promise.all([listsLoad, recentLoad, searchLoad]).then(function (res) {
+      if (!palState.open || palState.folder) return;
+      var lists = res[0] || [], recent = res[1] || [], hits = res[2] || [];
+
+      if (hits.length) {
+        body.appendChild(palSection("Results"));
+        hits.slice(0, 6).forEach(function (h) {
+          palState.items.push(palItem("mail", h.subject || "(no subject)",
+            splitFrom(h.from || "").email + " · " + fmtDate(h.received_at),
+            function () { closePalette(); openThread(h.thread_id, null, null); }));
+        });
+        palRenderItems(body);
+      }
+
+      if (shownJumps.length) {
+        body.appendChild(palSection(ql ? "Jump to" : "Go"));
+        palState.items.push.apply(palState.items, shownJumps);
+        palRenderItems(body);
+      }
+
+      if (lists.length) {
+        var shown = ql ? lists.filter(function (l) { return l.name.indexOf(ql) >= 0; }) : lists;
+        if (shown.length) {
+          body.appendChild(palSection("Lists — past mail, sent, trash"));
+          shown.forEach(function (l) {
+            palState.items.push(palItem("folder", folderLabel(l.name), l.role || "",
+              function () { renderFolder(l.name); }));
+          });
+          palRenderItems(body);
+        }
+      }
+
+      if (!ql && recent.length) {
+        body.appendChild(palSection("Recent"));
+        recent.slice(0, 8).forEach(function (t) {
+          palState.items.push(palItem("mail", t.subject || "(no subject)",
+            splitFrom(t.from || "").email + " · " + fmtDate(t.received_at),
+            function () { closePalette(); openThread(t.thread_id, null, null); }));
+        });
+        palRenderItems(body);
+      }
+      if (!body.childNodes.length) {
+        body.appendChild(el("div", "palette-empty", ql ? "Nothing matched." : "Nothing here yet."));
+      }
+    });
+  }
+
+  function folderLabel(name) {
+    var map = { sent: "Sent", trash: "Trash", junk: "Spam", drafts: "Drafts", archive: "Archive" };
+    return map[name] || name.charAt(0).toUpperCase() + name.slice(1);
+  }
+
+  function renderFolderInner(name) {
+    palState.folder = name;
+    palState.sel = -1;
+    palState.items = [];
+    var body = palState.body;
+    body.innerHTML = "";
+    var back = el("button", "palette-back");
+    back.type = "button";
+    back.innerHTML = "← All lists";
+    back.addEventListener("click", function () { palState.folder = null; palState.input.value = ""; renderPaletteRoot(); });
+    body.appendChild(back);
+    body.appendChild(palSection(folderLabel(name)));
+    body.appendChild(el("div", "palette-loading", "Loading…"));
+    api("/folder?name=" + encodeURIComponent(name)).then(function (rows) {
+      if (!palState.open || palState.folder !== name) return;
+      var sect = body.querySelector(".palette-section");
+      sect.textContent = folderLabel(name) + " — " + (rows || []).length + " threads";
+      var loading = body.querySelector(".palette-loading");
+      if (loading) loading.remove();
+      if (!rows || !rows.length) {
+        body.appendChild(el("div", "palette-empty", "Empty."));
+        return;
+      }
+      rows.forEach(function (t) {
+        palState.items.push(palItem("mail", t.subject || "(no subject)",
+          splitFrom(t.from || "").email + " · " + fmtDate(t.received_at),
+          function () { closePalette(); openThread(t.thread_id, null, null); }));
+      });
+      palRenderItems(body);
+    }).catch(function () {
+      var loading = body.querySelector(".palette-loading");
+      if (loading) loading.textContent = "Could not load folder.";
+    });
+  }
+  function renderFolder(name) { palState._rendered = 0; renderFolderInner(name); }
+
+  function palSection(title) {
+    return el("div", "palette-section", title);
+  }
+  function palRenderItems(body) {
+    var start = palState.items.length;
+    // items pushed before call — render only the new ones
+    for (var i = palState._rendered || 0; i < palState.items.length; i++) {
+      body.appendChild(palRow(palState.items[i], i));
+    }
+    palState._rendered = palState.items.length;
+  }
+  function palRow(item, idx) {
+    var row = el("div", "palette-row");
+    row.dataset.idx = idx;
+    var main = el("div", "palette-row-main");
+    main.appendChild(el("span", "palette-row-label", item.label));
+    row.appendChild(main);
+    if (item.note) row.appendChild(el("span", "palette-row-note", item.note));
+    row.appendChild(el("span", "palette-row-kind",
+      item.kind === "mail" ? "mail" : item.kind === "folder" ? "list" : ""));
+    row.addEventListener("click", function () { item.action(); });
+    row.addEventListener("mousemove", function () { palSelect(idx); });
+    return row;
+  }
+  function palSelect(idx) {
+    var rows = palette.querySelectorAll(".palette-row");
+    rows.forEach(function (r) { r.classList.remove("sel"); });
+    if (idx >= 0 && rows[idx]) {
+      rows[idx].classList.add("sel");
+      rows[idx].scrollIntoView({ block: "nearest" });
+    }
+    palState.sel = idx;
+  }
+  function renderPaletteRoot(q) { palState._rendered = 0; renderPaletteRootInner(q); }
+
+  var browseBtn = document.getElementById("browse-btn");
+  if (browseBtn) browseBtn.addEventListener("click", openPalette);
+
+  document.addEventListener("keydown", function (ev) {
+    if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "k") {
+      ev.preventDefault();
+      if (palState.open) closePalette(); else openPalette();
+      return;
+    }
+    if (!palState.open) return;
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      if (palState.folder) { palState.folder = null; palState.input.value = ""; renderPaletteRoot(); }
+      else closePalette();
+      return;
+    }
+    if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      ev.preventDefault();
+      var n = palState.items.length;
+      if (!n) return;
+      var next = ev.key === "ArrowDown"
+        ? (palState.sel + 1) % n
+        : (palState.sel <= 0 ? n - 1 : palState.sel - 1);
+      palSelect(next);
+      return;
+    }
+    if (ev.key === "Enter" && palState.sel >= 0 && palState.items[palState.sel]) {
+      ev.preventDefault();
+      palState.items[palState.sel].action();
+    }
+  });
+
   // ---- People: the roster ----
   function loadPeople() {
     refreshCounts();
@@ -1017,10 +1249,11 @@
     var panel = el("div", "panel shortcuts-panel");
     panel.appendChild(el("h2", "shortcuts-title", "Shortcuts"));
     var rows = [
+      ["⌘K", "Browse — search, lists, folders, recent"],
       ["j / k", "Move down / up"],
       ["Enter", "Open selected thread"],
       ["c", "Compose"],
-      ["/", "Search"],
+      ["/", "Search (mailbox)"],
       ["Esc", "Close panel / clear selection"],
       ["?", "This list"]
     ];

@@ -140,6 +140,123 @@ func (a *App) handleBriefing(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleRecent: latest message of the most recent threads, any bucket —
+// the palette's zero-query state and Today's "past mail" access.
+func (a *App) handleRecent(w http.ResponseWriter, r *http.Request) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	a.threadList(w, r, uid, `
+		SELECT DISTINCT ON (m.thread_id)
+		       m.thread_id, m.id, m.subject, m.from_addrs, m.received_at,
+		       COALESCE(h.read_at IS NOT NULL, false), m.preview, COALESCE(h.bucket,'')
+		FROM mail_messages m
+		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+		LEFT JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
+		ORDER BY m.thread_id, m.received_at DESC NULLS LAST
+		LIMIT 40`, uid)
+}
+
+// handleFolder: messages in a provider mailbox by name (Sent, Trash, ...)
+// across the user's accounts — the palette's folder browser.
+func (a *App) handleFolder(w http.ResponseWriter, r *http.Request) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		writeProblem(w, http.StatusUnprocessableEntity, "Missing Name", "name is required")
+		return
+	}
+	a.threadList(w, r, uid, `
+		SELECT DISTINCT ON (m.thread_id)
+		       m.thread_id, m.id, m.subject, m.from_addrs, m.received_at,
+		       COALESCE(h.read_at IS NOT NULL, false), m.preview, COALESCE(h.bucket,'')
+		FROM mail_message_mailboxes mm
+		JOIN mail_mailboxes mb ON mb.account_id = mm.account_id AND mb.id = mm.mailbox_id
+		JOIN mail_messages m ON m.account_id = mm.account_id AND m.id = mm.message_id
+		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+		LEFT JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
+		WHERE lower(mb.name) = lower($2)
+		ORDER BY m.thread_id, m.received_at DESC NULLS LAST
+		LIMIT 100`, uid, name)
+}
+
+// handleMailboxList: distinct provider mailbox names for the palette's
+// Lists section. INBOX is skipped — buckets already cover it.
+func (a *App) handleMailboxList(w http.ResponseWriter, r *http.Request) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	rows, err := a.db.QueryContext(r.Context(), `
+		SELECT DISTINCT ON (lower(mb.name)) lower(mb.name), mb.role
+		FROM mail_mailboxes mb
+		JOIN email_accounts ea ON ea.mirror_account_id = mb.account_id AND ea.user_id = $1
+		ORDER BY lower(mb.name)`, uid)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	defer rows.Close()
+	type mbx struct {
+		Name string  `json:"name"`
+		Role *string `json:"role,omitempty"`
+	}
+	out := []mbx{}
+	for rows.Next() {
+		var m mbx
+		if rows.Scan(&m.Name, &m.Role) == nil && m.Name != "inbox" {
+			out = append(out, m)
+		}
+	}
+	writeJSON(w, out)
+}
+
+// threadList runs a latest-per-thread query and writes the shared row shape.
+func (a *App) threadList(w http.ResponseWriter, r *http.Request, uid, query string, args ...any) {
+	rows, err := a.db.QueryContext(r.Context(), `
+		SELECT * FROM (`+query+`) t
+		ORDER BY t.received_at DESC NULLS LAST`, args...)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	defer rows.Close()
+
+	type rowOut struct {
+		ThreadID   string `json:"thread_id"`
+		MessageID  string `json:"message_id"`
+		Subject    string `json:"subject"`
+		From       string `json:"from"`
+		ReceivedAt string `json:"received_at"`
+		Read       bool   `json:"read"`
+		Preview    string `json:"preview"`
+		Bucket     string `json:"bucket"`
+	}
+	out := []rowOut{}
+	for rows.Next() {
+		var row rowOut
+		var fromJSON string
+		var received *time.Time
+		if err := rows.Scan(&row.ThreadID, &row.MessageID, &row.Subject, &fromJSON,
+			&received, &row.Read, &row.Preview, &row.Bucket); err != nil {
+			continue
+		}
+		row.From = firstSenderName(fromJSON)
+		if received != nil {
+			row.ReceivedAt = received.Format(time.RFC3339)
+		}
+		out = append(out, row)
+	}
+	writeJSON(w, out)
+}
+
 // handlePeople: the roster — every decided sender with activity stats.
 func (a *App) handlePeople(w http.ResponseWriter, r *http.Request) {
 	uid, err := a.userID(r.Context())

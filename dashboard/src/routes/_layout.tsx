@@ -51,6 +51,9 @@ export default function Layout(props: { children?: ComponentChildren }) {
             <span class="kbd">/</span>
           </div>
           <div class="topbar-right">
+            <button id="browse-btn" class="btn-ghost btn-sm browse-btn" type="button" title="Browse everything (Cmd+K)">
+              Browse <span class="kbd">⌘K</span>
+            </button>
             <a href="/" class="to-mailbox" id="to-mailbox">Mailbox →</a>
             <button id="shortcuts-btn" class="btn-ghost btn-sm kbd-hint" type="button" title="Keyboard shortcuts">
               <span class="kbd">?</span>
