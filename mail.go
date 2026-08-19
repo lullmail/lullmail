@@ -123,6 +123,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 
 	api.HandleFunc("GET /screener", a.handleScreener)
 	api.HandleFunc("GET /counts", a.handleCounts)
+	api.HandleFunc("GET /search", a.handleSearch)
 	api.HandleFunc("POST /screener/decide", a.handleDecide)
 	api.HandleFunc("GET /buckets/{bucket}", a.handleBucket)
 	api.HandleFunc("GET /threads/{thread}", a.handleThread)

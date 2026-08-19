@@ -111,6 +111,69 @@ func (a *App) handleCounts(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleSearch full-text-ish search over the mirror: subject, participants,
+// preview. Same row shape as bucket listings so the client reuses rendering.
+func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if q == "" {
+		writeJSON(w, []any{})
+		return
+	}
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	like := "%" + q + "%"
+	rows, err := a.db.QueryContext(r.Context(), `
+		SELECT m.thread_id, m.id, m.subject, m.from_addrs, m.received_at,
+		       h.read_at IS NOT NULL AS is_read, m.has_attachment, m.preview,
+		       COALESCE(h.bucket,''),
+		       (SELECT count(*) FROM mail_messages t
+		          WHERE t.account_id = m.account_id AND t.thread_id = m.thread_id) AS thread_len
+		FROM mail_messages m
+		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+		LEFT JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
+		WHERE m.subject ILIKE $2 OR m.from_addrs ILIKE $2 OR m.to_addrs ILIKE $2 OR m.preview ILIKE $2
+		ORDER BY m.received_at DESC NULLS LAST
+		LIMIT 60`, uid, like)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	defer rows.Close()
+
+	type rowOut struct {
+		ThreadID   string `json:"thread_id"`
+		MessageID  string `json:"message_id"`
+		Subject    string `json:"subject"`
+		From       string `json:"from"`
+		ReceivedAt string `json:"received_at"`
+		Read       bool   `json:"read"`
+		Attachment bool   `json:"has_attachment"`
+		Preview    string `json:"preview"`
+		Bucket     string `json:"bucket"`
+		ThreadLen  int    `json:"thread_len"`
+	}
+	out := []rowOut{}
+	for rows.Next() {
+		var row rowOut
+		var fromJSON string
+		var received sql.NullTime
+		if err := rows.Scan(&row.ThreadID, &row.MessageID, &row.Subject, &fromJSON,
+			&received, &row.Read, &row.Attachment, &row.Preview, &row.Bucket, &row.ThreadLen); err != nil {
+			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
+			return
+		}
+		row.From = firstSenderName(fromJSON)
+		if received.Valid {
+			row.ReceivedAt = received.Time.Format(time.RFC3339)
+		}
+		out = append(out, row)
+	}
+	writeJSON(w, out)
+}
+
 // handleScreener lists undecided senders, newest message first.
 func (a *App) handleScreener(w http.ResponseWriter, r *http.Request) {
 	uid, err := a.userID(r.Context())

@@ -39,6 +39,11 @@ export default function Layout(props: { children?: ComponentChildren }) {
       <div class="list-col">
         <header class="topbar">
           <span id="sync-note" class="sync-note"></span>
+          <div class="searchwrap">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
+            <input id="search" type="search" placeholder="Search the mail" autocomplete="off" />
+            <span class="kbd">/</span>
+          </div>
           <div class="topbar-right">
             <button id="shortcuts-btn" class="btn-ghost btn-sm kbd-hint" type="button" title="Keyboard shortcuts">
               <span class="kbd">?</span>

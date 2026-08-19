@@ -116,8 +116,9 @@
     var hue = hueFor(email || "?");
     var d = el("div", "avatar" + (size === "lg" ? " avatar-lg" : size === "sm" ? " avatar-sm" : ""));
     d.textContent = (name || email || "?").charAt(0).toUpperCase() || "?";
-    d.style.background = "hsl(" + hue + ", 62%, 92%)";
-    d.style.color = "hsl(" + hue + ", 45%, 34%)";
+    // Saturated fill, white initial — bold contact color is a HEY signature.
+    d.style.background = "hsl(" + hue + ", 62%, 47%)";
+    d.style.color = "#fff";
     return d;
   }
 
@@ -202,7 +203,7 @@
     rowEl.classList.add("bye");
     setTimeout(function () {
       api("/messages/" + encodeURIComponent(msgId) + "/action", { method: "POST", body: { action: action } })
-        .then(function () { loadBucket(view.dataset.bucket); });
+        .then(function () { reloadCurrent(); });
     }, 180);
   }
   function addHoverActions(item, row) {
@@ -232,6 +233,97 @@
     if (days < 7) return "This week";
     if (days < 31) return "This month";
     return "Earlier";
+  }
+
+  // ---- search ----
+  var searchInput = document.getElementById("search");
+  var searchTimer = null, searchQ = "";
+  if (searchInput) {
+    searchInput.addEventListener("input", function () {
+      clearTimeout(searchTimer);
+      var q = searchInput.value.trim();
+      searchTimer = setTimeout(function () {
+        if (q) { searchQ = q; loadSearch(q); }
+        else if (searchQ) {
+          searchQ = "";
+          var p = view.dataset.page;
+          if (p === "bucket") loadBucket(view.dataset.bucket);
+          else if (p === "screener") loadScreener();
+          else if (p === "accounts") loadAccounts();
+        }
+      }, 220);
+    });
+  }
+  function loadSearch(q) {
+    refreshCounts();
+    api("/search?q=" + encodeURIComponent(q)).then(function (rows) {
+      currentRows = rows || [];
+      selectedRow = -1;
+      view.innerHTML = "";
+      var head = bucketHead("Search", currentRows.length
+        ? currentRows.length + (currentRows.length === 1 ? " result" : " results") + " for \u201C" + q + "\u201D"
+        : "");
+      view.appendChild(head);
+      if (!currentRows.length) {
+        var w = el("div", "empty");
+        w.appendChild(el("div", "empty-big", "Nothing matched."));
+        w.appendChild(el("div", "empty-sub", "Try a sender, a subject, or a word from a preview."));
+        view.appendChild(w);
+        return;
+      }
+      var list = el("div", "msg-list");
+      currentRows.forEach(function (row, i) {
+        var item = buildRow(row, i, q);
+        list.appendChild(item);
+      });
+      view.appendChild(list);
+      if (wide()) clearReader();
+    }).catch(function (e) { if (e.message !== "unauthorized") showError(e.message); });
+  }
+  function markHit(text, q) {
+    var span = el("span", null);
+    var lower = text.toLowerCase(), needle = q.toLowerCase(), idx = lower.indexOf(needle);
+    if (idx < 0 || !q) { span.textContent = text; return span; }
+    span.appendChild(document.createTextNode(text.slice(0, idx)));
+    var mark = el("mark", "hit", text.slice(idx, idx + needle.length));
+    span.appendChild(mark);
+    span.appendChild(document.createTextNode(text.slice(idx + needle.length)));
+    return span;
+  }
+
+  // ---- row builder shared by buckets and search ----
+  function buildRow(row, i, q) {
+    var item = el("div", "msg-row row-in" + (row.read ? " read" : ""));
+    item.style.animationDelay = Math.min(i, 12) * 22 + "ms";
+    item.dataset.thread = row.thread_id;
+    var who = splitFrom(row.from || "");
+    item.appendChild(avatar(who.email, who.name));
+
+    var main = el("div", "row-main");
+    var top = el("div", "row-top");
+    top.appendChild(el("span", "row-sender", who.name || who.email));
+    var meta2 = el("span", "row-meta");
+    if (row.has_attachment) {
+      var chip = el("span", "chip");
+      chip.innerHTML = CLIP_SVG;
+      meta2.appendChild(chip);
+    }
+    if (row.thread_len > 1) meta2.appendChild(el("span", "chip", String(row.thread_len)));
+    meta2.appendChild(el("span", "row-date", fmtDate(row.received_at)));
+    top.appendChild(meta2);
+    main.appendChild(top);
+    var subj = el("div", "row-subject");
+    if (q) subj.appendChild(markHit(row.subject || "(no subject)", q));
+    else subj.textContent = row.subject || "(no subject)";
+    main.appendChild(subj);
+    if (row.preview) main.appendChild(el("div", "row-preview", row.preview));
+    item.appendChild(main);
+    addHoverActions(item, row);
+
+    item.addEventListener("click", function () {
+      openThread(row.thread_id, searchQ ? null : view.dataset.bucket, item);
+    });
+    return item;
   }
 
   // ---- bucket list ----
@@ -267,38 +359,19 @@
           rule.appendChild(el("span", null, label));
           list.appendChild(rule);
         }
-        var item = el("div", "msg-row row-in" + (row.read ? " read" : ""));
-        item.style.animationDelay = Math.min(i, 12) * 22 + "ms";
-        item.dataset.thread = row.thread_id;
-        var who = splitFrom(row.from || "");
-        item.appendChild(avatar(who.email, who.name));
-
-        var main = el("div", "row-main");
-        var top = el("div", "row-top");
-        top.appendChild(el("span", "row-sender", who.name || who.email));
-        var meta2 = el("span", "row-meta");
-        if (row.has_attachment) {
-          var chip = el("span", "chip");
-          chip.innerHTML = CLIP_SVG;
-          meta2.appendChild(chip);
-        }
-        if (row.thread_len > 1) meta2.appendChild(el("span", "chip", String(row.thread_len)));
-        meta2.appendChild(el("span", "row-date", fmtDate(row.received_at)));
-        top.appendChild(meta2);
-        main.appendChild(top);
-        main.appendChild(el("div", "row-subject", row.subject || "(no subject)"));
-        if (row.preview) main.appendChild(el("div", "row-preview", row.preview));
-        item.appendChild(main);
-        addHoverActions(item, row);
-
-        item.addEventListener("click", function () {
-          openThread(row.thread_id, name, item);
-        });
-        list.appendChild(item);
+        list.appendChild(buildRow(row, i));
       });
       view.appendChild(list);
       if (wide()) clearReader();
     }).catch(function (e) { if (e.message !== "unauthorized") showError(e.message); });
+  }
+
+  function reloadCurrent() {
+    if (searchQ) { loadSearch(searchQ); return; }
+    var p = view.dataset.page;
+    if (p === "bucket") loadBucket(view.dataset.bucket);
+    else if (p === "screener") loadScreener();
+    else if (p === "accounts") loadAccounts();
   }
 
   // ---- thread rendering (shared by overlay + reader pane) ----
@@ -345,7 +418,7 @@
       b.addEventListener("click", function () {
         api("/messages/" + encodeURIComponent(msgs[msgs.length - 1].id) + "/action",
           { method: "POST", body: { action: pair[1] } })
-          .then(function () { onClose(); loadBucket(bucket); });
+          .then(function () { onClose(); reloadCurrent(); });
       });
       actions.appendChild(b);
     });
@@ -450,7 +523,7 @@
       } else {
         overlay.innerHTML = "";
         var panel2 = el("div", "panel thread-panel");
-        renderThread(panel2, msgs, function () { overlay.hidden = true; loadBucket(bucket); }, bucket);
+        renderThread(panel2, msgs, function () { overlay.hidden = true; reloadCurrent(); }, bucket);
         overlay.appendChild(panel2);
         overlay.hidden = false;
       }
@@ -632,6 +705,7 @@
       ["j / k", "Move down / up"],
       ["Enter", "Open selected thread"],
       ["c", "Compose"],
+      ["/", "Search"],
       ["Esc", "Close panel / clear selection"],
       ["?", "This list"]
     ];
@@ -660,6 +734,7 @@
       return;
     }
     if (typing) return;
+    if (ev.key === "/") { ev.preventDefault(); if (searchInput) searchInput.focus(); return; }
     if (ev.key === "c") { ev.preventDefault(); compose(); return; }
     if (ev.key === "?") { ev.preventDefault(); shortcutsPanel(); return; }
     if (ev.key === "Escape" && wide()) {
@@ -682,7 +757,7 @@
     } else if (ev.key === "Enter" && selectedRow >= 0) {
       var row = currentRows[selectedRow];
       var rowEl = document.querySelectorAll(".msg-row")[selectedRow];
-      if (row) openThread(row.thread_id, view.dataset.bucket, rowEl);
+      if (row) openThread(row.thread_id, searchQ ? null : view.dataset.bucket, rowEl);
     }
   });
 
