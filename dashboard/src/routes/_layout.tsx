@@ -7,9 +7,17 @@ export function head() {
   };
 }
 
+// Pre-paint theme resolve (akiroo pattern): stored preference wins, else
+// system. Runs before any styled element paints, so no dark flash.
+const themeInit =
+  "(function(){try{var t=localStorage.getItem('es-theme');" +
+  "if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light';}" +
+  "document.documentElement.setAttribute('data-theme',t);}catch(e){}})();";
+
 export default function Layout(props: { children?: ComponentChildren }) {
   return (
     <div class="shell">
+      <script dangerouslySetInnerHTML={{ __html: themeInit }} />
       <aside class="sidebar">
         <a href="/" class="brand">email-soft</a>
         <nav>
@@ -22,15 +30,31 @@ export default function Layout(props: { children?: ComponentChildren }) {
         </nav>
         <nav class="sidebar-bottom">
           <a href="/settings/accounts" data-nav="accounts">Accounts</a>
+          <button id="theme-btn" class="sidebar-theme" type="button" title="Toggle theme" aria-label="Toggle theme">
+            <svg class="icon-moon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+            <svg class="icon-sun" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+          </button>
         </nav>
       </aside>
-      <div class="main">
+      <div class="list-col">
         <header class="topbar">
-          <button id="compose-btn" class="primary" type="button">Compose</button>
           <span id="sync-note" class="sync-note"></span>
+          <div class="topbar-right">
+            <button id="shortcuts-btn" class="btn-ghost btn-sm kbd-hint" type="button" title="Keyboard shortcuts">
+              <span class="kbd">?</span>
+            </button>
+            <button id="compose-btn" class="btn-primary" type="button">Compose</button>
+          </div>
         </header>
         {props.children}
       </div>
+      <aside class="reader" id="reader">
+        <div class="reader-empty">
+          <div class="reader-empty-mark">✉</div>
+          <div class="reader-empty-big">Pick a thread</div>
+          <div class="reader-empty-sub">It opens here, beside the list.</div>
+        </div>
+      </aside>
       <div id="overlay" class="overlay" hidden></div>
       <div id="toast" class="toast" hidden></div>
       <script src="/app.js" defer></script>

@@ -1,7 +1,8 @@
 // email-soft client. Static pages provide shells (#view[data-page]); this
-// file renders everything against the JSON API. Design language borrowed
-// deliberately from HEY: oversized subjects, color-coded senders, quiet
-// chrome, black-pill actions.
+// file renders everything against the JSON API.
+//
+// Design language: editorial serif subjects over a quiet sans chrome, light
+// and dark, split-pane reading on wide screens, keyboard-first.
 (function () {
   "use strict";
 
@@ -9,6 +10,29 @@
   var overlay = document.getElementById("overlay");
   var toast = document.getElementById("toast");
   var syncNote = document.getElementById("sync-note");
+  var reader = document.getElementById("reader");
+
+  var WIDE = window.matchMedia("(min-width: 1100px)");
+  function wide() { return WIDE.matches && reader; }
+
+  // ---- theme ----
+  var themeBtn = document.getElementById("theme-btn");
+  function applyThemeIcons() {
+    var t = document.documentElement.getAttribute("data-theme") || "light";
+    if (themeBtn) {
+      themeBtn.querySelector(".icon-moon").style.display = t === "dark" ? "none" : "";
+      themeBtn.querySelector(".icon-sun").style.display = t === "dark" ? "" : "none";
+    }
+  }
+  if (themeBtn) {
+    applyThemeIcons();
+    themeBtn.addEventListener("click", function () {
+      var cur = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", cur);
+      try { localStorage.setItem("es-theme", cur); } catch (e) {}
+      applyThemeIcons();
+    });
+  }
 
   // ---- token gate (dev auth v0) ----
   function token() { return localStorage.getItem("es_token") || ""; }
@@ -56,6 +80,11 @@
     }
     return d.toLocaleDateString([], { month: "short", day: "numeric" });
   }
+  function pop(node) {
+    node.classList.remove("pop");
+    void node.offsetWidth; // reflow so the animation restarts
+    node.classList.add("pop");
+  }
   function showToast(msg, actionLabel, actionFn, ms) {
     toast.hidden = false;
     toast.innerHTML = "";
@@ -70,11 +99,12 @@
     showToast._t = setTimeout(function () { toast.hidden = true; }, ms || 6000);
   }
 
-  // ---- contact colors: a stable hue per address (HEY contact colors) ----
+  // ---- contact colors: curated palette, stable per address ----
+  var HUES = [4, 24, 42, 88, 152, 172, 194, 218, 246, 276, 310, 340];
   function hueFor(s) {
     var h = 0;
-    for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360;
-    return h;
+    for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    return HUES[h % HUES.length];
   }
   function splitFrom(str) {
     var m = /^([^<]*)<(.+)>$/.exec(str || "");
@@ -86,25 +116,21 @@
     var hue = hueFor(email || "?");
     var d = el("div", "avatar" + (size === "lg" ? " avatar-lg" : size === "sm" ? " avatar-sm" : ""));
     d.textContent = (name || email || "?").charAt(0).toUpperCase() || "?";
-    d.style.background = "hsl(" + hue + ", 65%, 93%)";
-    d.style.color = "hsl(" + hue + ", 50%, 36%)";
+    d.style.background = "hsl(" + hue + ", 62%, 92%)";
+    d.style.color = "hsl(" + hue + ", 45%, 34%)";
     return d;
   }
-  function senderName(row) {
-    var who = splitFrom(row.from || "");
-    return who.name || who.email || "(unknown)";
-  }
 
-  var CLIP_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>';
+  var CLIP_SVG = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>';
 
   // ---- empty states, in the product's voice ----
   var EMPTY = {
-    imbox: ["All quiet.", "Nothing needs you right now."],
-    screener: ["Nobody's waiting.", "New senders will show up here first. Screen them once — they're sorted forever."],
+    imbox: ["All quiet.", "Nothing needs you right now. Enjoy it."],
+    screener: ["Nobody's waiting.", "New senders land here first. Screen them once — they're sorted forever."],
     feed: ["Feed's empty.", "Newsletters and periodic mail will gather here."],
-    paper_trail: ["No receipts.", "Receipts, notifications and confirmations will file themselves here."],
-    set_aside: ["Nothing set aside.", "Parking a thread here hides it until you want it back."],
-    later: ["Nothing for later.", "Threads you defer will wait here, out of the way."]
+    paper_trail: ["No receipts.", "Receipts, notifications and confirmations file themselves here."],
+    set_aside: ["Nothing set aside.", "Park a thread here and it stays out of sight until you want it."],
+    later: ["Nothing for later.", "Threads you defer wait here, out of the way."]
   };
   function emptyState(key) {
     var copy = EMPTY[key] || ["Nothing here.", ""];
@@ -112,6 +138,19 @@
     w.appendChild(el("div", "empty-big", copy[0]));
     if (copy[1]) w.appendChild(el("div", "empty-sub", copy[1]));
     return w;
+  }
+  function showError(msg) {
+    view.innerHTML = "";
+    var w = el("div", "empty");
+    w.appendChild(el("div", "empty-big", msg));
+    view.appendChild(w);
+  }
+
+  function bucketHead(title, sub) {
+    var h = el("div", "bucket-head");
+    h.appendChild(el("h1", "bucket-title", title));
+    if (sub) h.appendChild(el("div", "bucket-sub", sub));
+    return h;
   }
 
   // ---- nav badges ----
@@ -122,28 +161,63 @@
         var n = c[a.dataset.nav] || 0;
         var b = a.querySelector(".nav-count");
         if (n > 0) {
-          if (!b) { b = el("span", "nav-count"); a.appendChild(b); }
-          b.textContent = n > 99 ? "99+" : n;
+          if (!b) { b = el("span", "nav-count"); a.appendChild(b); b.textContent = n; }
+          else if (b.textContent !== String(n)) { b.textContent = n; }
+          pop(b);
         } else if (b) b.remove();
       });
     }).catch(function () {});
   }
 
+  // ---- date grouping ----
+  function dayLabel(iso) {
+    if (!iso) return "Earlier";
+    var d = new Date(iso), now = new Date();
+    var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    var that = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    var days = Math.round((today - that) / 86400000);
+    if (days <= 0) return "Today";
+    if (days === 1) return "Yesterday";
+    if (days < 7) return "This week";
+    if (days < 31) return "This month";
+    return "Earlier";
+  }
+
   // ---- bucket list ----
   var selectedRow = -1, currentRows = [];
+  var BUCKET_TITLES = {
+    imbox: ["Imbox", "The people you chose to hear from."],
+    feed: ["Feed", "Periodic mail worth scanning, not answering."],
+    paper_trail: ["Paper Trail", "Receipts, notifications, confirmations."],
+    set_aside: ["Set Aside", "Parked. It comes back when you say."],
+    later: ["Later", "Deferred, not deleted."]
+  };
   function loadBucket(name) {
     refreshCounts();
     api("/buckets/" + name).then(function (rows) {
       currentRows = rows || [];
       selectedRow = -1;
       view.innerHTML = "";
+      var meta = BUCKET_TITLES[name] || [name, ""];
+      view.appendChild(bucketHead(meta[0], currentRows.length
+        ? meta[1] : ""));
+
       if (!currentRows.length) {
         view.appendChild(emptyState(name));
         return;
       }
       var list = el("div", "msg-list");
-      currentRows.forEach(function (row) {
-        var item = el("div", "msg-row" + (row.read ? " read" : ""));
+      var lastLabel = "";
+      currentRows.forEach(function (row, i) {
+        var label = dayLabel(row.received_at);
+        if (label !== lastLabel) {
+          lastLabel = label;
+          var rule = el("div", "date-rule");
+          rule.appendChild(el("span", null, label));
+          list.appendChild(rule);
+        }
+        var item = el("div", "msg-row row-in" + (row.read ? " read" : ""));
+        item.style.animationDelay = Math.min(i, 12) * 22 + "ms";
         item.dataset.thread = row.thread_id;
         var who = splitFrom(row.from || "");
         item.appendChild(avatar(who.email, who.name));
@@ -151,91 +225,113 @@
         var main = el("div", "row-main");
         var top = el("div", "row-top");
         top.appendChild(el("span", "row-sender", who.name || who.email));
-        var meta = el("span", "row-meta");
+        var meta2 = el("span", "row-meta");
         if (row.has_attachment) {
           var chip = el("span", "chip");
           chip.innerHTML = CLIP_SVG;
-          meta.appendChild(chip);
+          meta2.appendChild(chip);
         }
-        if (row.thread_len > 1) meta.appendChild(el("span", "chip", String(row.thread_len)));
-        meta.appendChild(el("span", "row-date", fmtDate(row.received_at)));
-        top.appendChild(meta);
+        if (row.thread_len > 1) meta2.appendChild(el("span", "chip", String(row.thread_len)));
+        meta2.appendChild(el("span", "row-date", fmtDate(row.received_at)));
+        top.appendChild(meta2);
         main.appendChild(top);
         main.appendChild(el("div", "row-subject", row.subject || "(no subject)"));
         if (row.preview) main.appendChild(el("div", "row-preview", row.preview));
         item.appendChild(main);
 
-        item.addEventListener("click", function () { openThread(row.thread_id, name); });
+        item.addEventListener("click", function () {
+          openThread(row.thread_id, name, item);
+        });
         list.appendChild(item);
       });
       view.appendChild(list);
+      if (wide()) clearReader();
     }).catch(function (e) { if (e.message !== "unauthorized") showError(e.message); });
   }
-  function showError(msg) {
-    view.innerHTML = "";
-    view.appendChild(el("div", "empty empty-big", msg));
+
+  // ---- thread rendering (shared by overlay + reader pane) ----
+  function renderThread(panel, msgs, onClose, bucket) {
+    var head = el("div", "thread-head");
+    head.appendChild(el("h2", "thread-subject", msgs[msgs.length - 1].subject || "(no subject)"));
+    var close = el("button", "btn-ghost btn-sm", "Close");
+    close.type = "button";
+    close.addEventListener("click", onClose);
+    head.appendChild(close);
+    panel.appendChild(head);
+
+    var stream = el("div", "thread-stream");
+    msgs.forEach(function (m, i) {
+      var who = splitFrom(m.from || "");
+      var block = el("div", "thread-msg row-in");
+      block.style.animationDelay = Math.min(i, 8) * 30 + "ms";
+      var mh = el("div", "thread-msg-head");
+      var idrow = el("div", "thread-msg-id");
+      idrow.appendChild(avatar(who.email, who.name, "sm"));
+      var names = el("div", "thread-msg-names");
+      names.appendChild(el("span", "thread-msg-from", who.name || who.email));
+      names.appendChild(el("span", "thread-msg-to", "to " + (m.to || "you")));
+      idrow.appendChild(names);
+      mh.appendChild(idrow);
+      mh.appendChild(el("span", "thread-msg-date", fmtDate(m.received_at)));
+      block.appendChild(mh);
+      var body = el("div", "thread-msg-body");
+      body.textContent = m.body || "(body not fetched yet — sync in progress)";
+      block.appendChild(body);
+      stream.appendChild(block);
+    });
+    panel.appendChild(stream);
+
+    var actions = el("div", "thread-actions");
+    [["Set Aside", "set_aside"], ["Paper Trail", "paper_trail"], ["Feed", "feed"],
+     ["Later", "later"], ["Imbox", "imbox"]].forEach(function (pair) {
+      var b = el("button", "btn-ghost btn-sm", pair[0]);
+      b.type = "button";
+      b.addEventListener("click", function () {
+        api("/messages/" + encodeURIComponent(msgs[msgs.length - 1].id) + "/action",
+          { method: "POST", body: { action: pair[1] } })
+          .then(function () { onClose(); loadBucket(bucket); });
+      });
+      actions.appendChild(b);
+    });
+    var reply = el("button", "btn-primary btn-sm", "Reply");
+    reply.type = "button";
+    reply.addEventListener("click", function () {
+      var last = msgs[msgs.length - 1];
+      compose(splitFrom(last.from || "").email, "Re: " + (last.subject || ""), last.id);
+    });
+    actions.appendChild(reply);
+    panel.appendChild(actions);
   }
 
-  // ---- thread overlay ----
-  function openThread(threadId, bucket) {
+  function clearReader() {
+    if (!reader) return;
+    reader.innerHTML = "";
+    var empty = el("div", "reader-empty");
+    empty.appendChild(el("div", "reader-empty-mark", "\u2709"));
+    empty.appendChild(el("div", "reader-empty-big", "Pick a thread"));
+    empty.appendChild(el("div", "reader-empty-sub", "It opens here, beside the list."));
+    reader.appendChild(empty);
+  }
+
+  function openThread(threadId, bucket, rowEl) {
     api("/threads/" + encodeURIComponent(threadId)).then(function (msgs) {
-      overlay.innerHTML = "";
-      var panel = el("div", "panel thread-panel");
-
-      var head = el("div", "thread-head");
-      head.appendChild(el("h2", "thread-subject", msgs[msgs.length - 1].subject || "(no subject)"));
-      var close = el("button", "btn-ghost btn-sm", "Close");
-      close.type = "button";
-      close.addEventListener("click", function () { overlay.hidden = true; loadBucket(bucket); });
-      head.appendChild(close);
-      panel.appendChild(head);
-
-      var stream = el("div", "thread-stream");
-      msgs.forEach(function (m) {
-        var who = splitFrom(m.from || "");
-        var block = el("div", "thread-msg");
-        var mh = el("div", "thread-msg-head");
-        var idrow = el("div", "thread-msg-id");
-        idrow.appendChild(avatar(who.email, who.name, "sm"));
-        var names = el("div", "thread-msg-names");
-        names.appendChild(el("span", "thread-msg-from", who.name || who.email));
-        names.appendChild(el("span", "thread-msg-to", "to " + (m.to || "you")));
-        idrow.appendChild(names);
-        mh.appendChild(idrow);
-        mh.appendChild(el("span", "thread-msg-date", fmtDate(m.received_at)));
-        block.appendChild(mh);
-        var body = el("div", "thread-msg-body");
-        body.textContent = m.body || "(body not fetched yet — sync in progress)";
-        block.appendChild(body);
-        stream.appendChild(block);
-      });
-      panel.appendChild(stream);
-
-      var actions = el("div", "thread-actions");
-      [["Set Aside", "set_aside"], ["Paper Trail", "paper_trail"], ["Feed", "feed"],
-       ["Later", "later"], ["Imbox", "imbox"]].forEach(function (pair) {
-        var b = el("button", "btn-ghost btn-sm", pair[0]);
-        b.type = "button";
-        b.addEventListener("click", function () {
-          api("/messages/" + encodeURIComponent(msgs[msgs.length - 1].id) + "/action",
-            { method: "POST", body: { action: pair[1] } })
-            .then(function () { overlay.hidden = true; loadBucket(bucket); });
-        });
-        actions.appendChild(b);
-      });
-      var reply = el("button", "btn-primary btn-sm", "Reply");
-      reply.type = "button";
-      reply.addEventListener("click", function () {
-        var last = msgs[msgs.length - 1];
-        compose(splitFrom(last.from || "").email, "Re: " + (last.subject || ""), last.id);
-      });
-      actions.appendChild(reply);
-      panel.appendChild(actions);
-
-      overlay.appendChild(panel);
-      overlay.hidden = false;
-
       var last = msgs[msgs.length - 1];
+
+      if (wide()) {
+        document.querySelectorAll(".msg-row.sel").forEach(function (r) { r.classList.remove("sel"); });
+        if (rowEl) rowEl.classList.add("sel");
+        reader.innerHTML = "";
+        var panel = el("div", "panel reader-panel");
+        renderThread(panel, msgs, function () { clearReader(); }, bucket);
+        reader.appendChild(panel);
+      } else {
+        overlay.innerHTML = "";
+        var panel2 = el("div", "panel thread-panel");
+        renderThread(panel2, msgs, function () { overlay.hidden = true; loadBucket(bucket); }, bucket);
+        overlay.appendChild(panel2);
+        overlay.hidden = false;
+      }
+
       api("/messages/" + encodeURIComponent(last.id) + "/action", { method: "POST", body: { action: "read" } })
         .then(refreshCounts);
     }).catch(function (e) { showToast("Thread failed: " + e.message); });
@@ -246,20 +342,21 @@
     refreshCounts();
     api("/screener").then(function (rows) {
       view.innerHTML = "";
+      view.appendChild(bucketHead("The Screener",
+        "New senders wait here. Decide once — every message they ever send goes where you say."));
       if (!rows || !rows.length) {
         view.appendChild(emptyState("screener"));
         return;
       }
-      view.appendChild(el("div", "page-kicker", "The Screener"));
-      view.appendChild(el("p", "page-sub",
-        "New senders wait here. Decide once — every message they ever send goes where you say."));
-      rows.forEach(function (row) {
-        var card = el("div", "screener-card");
+      rows.forEach(function (row, i) {
+        var card = el("div", "screener-card row-in");
+        card.style.animationDelay = Math.min(i, 10) * 26 + "ms";
         var who = splitFrom(row.sender);
         var idrow = el("div", "screener-id");
         idrow.appendChild(avatar(who.email, who.name, "lg"));
         var idmain = el("div", "screener-idmain");
-        idmain.appendChild(el("div", "screener-sender", who.name === who.email ? who.email : who.name + "  ·  " + who.email));
+        idmain.appendChild(el("div", "screener-sender",
+          who.name === who.email ? who.email : who.name + "  ·  " + who.email));
         var sample = el("div", "screener-sample");
         sample.appendChild(el("span", "chip", row.waiting + " waiting"));
         if (row.sample_subject) sample.appendChild(el("span", "screener-subject", row.sample_subject));
@@ -268,14 +365,11 @@
         card.appendChild(idrow);
 
         var btns = el("div", "screener-btns");
-        var routes = [["Imbox", "imbox", "btn-primary"], ["Paper Trail", "paper_trail", "btn-outline"],
-          ["Feed", "feed", "btn-outline"]];
-        routes.forEach(function (r) {
+        [["Imbox", "imbox", "btn-primary"], ["Paper Trail", "paper_trail", "btn-outline"],
+         ["Feed", "feed", "btn-outline"]].forEach(function (r) {
           var b = el("button", r[2], r[0]);
           b.type = "button";
-          b.addEventListener("click", function () {
-            decide(row.sender, true, r[1]);
-          });
+          b.addEventListener("click", function () { decide(row.sender, true, r[1]); });
           btns.appendChild(b);
         });
         var block = el("button", "btn-danger-ghost", "Block");
@@ -297,8 +391,7 @@
   function loadAccounts() {
     api("/accounts").then(function (rows) {
       view.innerHTML = "";
-      view.appendChild(el("div", "page-kicker", "Accounts"));
-      view.appendChild(el("p", "page-sub", "Mailboxes this app mirrors. Credentials are sealed at rest."));
+      view.appendChild(bucketHead("Accounts", "Mailboxes this app mirrors. Credentials are sealed at rest."));
       var list = el("div", "accounts");
       (rows || []).forEach(function (acc) {
         var card = el("div", "account-card");
@@ -407,6 +500,30 @@
   }
   document.getElementById("compose-btn").addEventListener("click", function () { compose(); });
 
+  // ---- shortcuts palette ----
+  function shortcutsPanel() {
+    overlay.innerHTML = "";
+    var panel = el("div", "panel shortcuts-panel");
+    panel.appendChild(el("h2", "shortcuts-title", "Shortcuts"));
+    var rows = [
+      ["j / k", "Move down / up"],
+      ["Enter", "Open selected thread"],
+      ["c", "Compose"],
+      ["Esc", "Close panel / clear selection"],
+      ["?", "This list"]
+    ];
+    var grid = el("div", "shortcut-grid");
+    rows.forEach(function (r) {
+      var k = el("span", "kbd", r[0]);
+      var d = el("span", "shortcut-desc", r[1]);
+      grid.appendChild(k); grid.appendChild(d);
+    });
+    panel.appendChild(grid);
+    overlay.appendChild(panel);
+    overlay.hidden = false;
+  }
+  document.getElementById("shortcuts-btn").addEventListener("click", shortcutsPanel);
+
   // ---- backdrop + keyboard ----
   if (overlay) {
     overlay.addEventListener("click", function (ev) {
@@ -414,8 +531,17 @@
     });
   }
   document.addEventListener("keydown", function (ev) {
+    var typing = ev.target && ev.target.closest && ev.target.closest("input, textarea, select");
     if (overlay && !overlay.hidden) {
       if (ev.key === "Escape") overlay.hidden = true;
+      return;
+    }
+    if (typing) return;
+    if (ev.key === "c") { ev.preventDefault(); compose(); return; }
+    if (ev.key === "?") { ev.preventDefault(); shortcutsPanel(); return; }
+    if (ev.key === "Escape" && wide()) {
+      document.querySelectorAll(".msg-row.sel").forEach(function (r) { r.classList.remove("sel"); });
+      clearReader();
       return;
     }
     var page = view && view.dataset.page;
@@ -432,13 +558,15 @@
       rows[selectedRow].scrollIntoView({ block: "nearest" });
     } else if (ev.key === "Enter" && selectedRow >= 0) {
       var row = currentRows[selectedRow];
-      if (row) openThread(row.thread_id, view.dataset.bucket);
+      var rowEl = document.querySelectorAll(".msg-row")[selectedRow];
+      if (row) openThread(row.thread_id, view.dataset.bucket, rowEl);
     }
   });
 
   // ---- router ----
   function boot() {
     if (!token() || !view) return;
+    applyThemeIcons();
     var page = view.dataset.page;
     if (page === "bucket") loadBucket(view.dataset.bucket);
     else if (page === "screener") loadScreener();
