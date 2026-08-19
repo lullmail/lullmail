@@ -1,5 +1,7 @@
-// email-soft client. Static-preset pages provide shells (#view with a
-// data-page); everything else happens here against the JSON API.
+// email-soft client. Static pages provide shells (#view[data-page]); this
+// file renders everything against the JSON API. Design language borrowed
+// deliberately from HEY: oversized subjects, color-coded senders, quiet
+// chrome, black-pill actions.
 (function () {
   "use strict";
 
@@ -26,19 +28,18 @@
   function promptToken() {
     if (document.getElementById("token-gate")) return;
     view.innerHTML = "";
-    var g = document.createElement("div");
-    g.className = "gate";
+    var g = el("div", "gate");
     g.id = "token-gate";
-    g.innerHTML = '<h2>Access token</h2><p>Dev auth: enter the EMAILSOFT_TOKEN value.</p>' +
-      '<input id="token-input" type="password" placeholder="token" autocomplete="off">' +
-      '<button id="token-save" class="primary" type="button">Unlock</button>';
+    g.innerHTML = '<div class="gate-kicker">email-soft</div>' +
+      '<h2>Who goes there</h2>' +
+      '<input id="token-input" type="password" placeholder="access token" autocomplete="off">' +
+      '<button id="token-save" class="btn-primary" type="button">Let me in</button>';
     view.appendChild(g);
     document.getElementById("token-save").addEventListener("click", function () {
       localStorage.setItem("es_token", document.getElementById("token-input").value.trim());
       boot();
     });
   }
-  if (!token()) promptToken();
 
   // ---- helpers ----
   function el(tag, cls, text) {
@@ -51,7 +52,7 @@
     if (!iso) return "";
     var d = new Date(iso), now = new Date();
     if (d.toDateString() === now.toDateString()) {
-      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     }
     return d.toLocaleDateString([], { month: "short", day: "numeric" });
   }
@@ -60,7 +61,7 @@
     toast.innerHTML = "";
     toast.appendChild(el("span", null, msg));
     if (actionLabel) {
-      var b = el("button", "primary", actionLabel);
+      var b = el("button", "btn-primary btn-sm", actionLabel);
       b.type = "button";
       b.addEventListener("click", function () { actionFn(); toast.hidden = true; });
       toast.appendChild(b);
@@ -69,38 +70,110 @@
     showToast._t = setTimeout(function () { toast.hidden = true; }, ms || 6000);
   }
 
+  // ---- contact colors: a stable hue per address (HEY contact colors) ----
+  function hueFor(s) {
+    var h = 0;
+    for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360;
+    return h;
+  }
+  function splitFrom(str) {
+    var m = /^([^<]*)<(.+)>$/.exec(str || "");
+    if (m) return { name: m[1].trim(), email: m[2].trim() };
+    var s = (str || "").trim();
+    return { name: s, email: s };
+  }
+  function avatar(email, name, size) {
+    var hue = hueFor(email || "?");
+    var d = el("div", "avatar" + (size === "lg" ? " avatar-lg" : size === "sm" ? " avatar-sm" : ""));
+    d.textContent = (name || email || "?").charAt(0).toUpperCase() || "?";
+    d.style.background = "hsl(" + hue + ", 65%, 93%)";
+    d.style.color = "hsl(" + hue + ", 50%, 36%)";
+    return d;
+  }
+  function senderName(row) {
+    var who = splitFrom(row.from || "");
+    return who.name || who.email || "(unknown)";
+  }
+
+  var CLIP_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>';
+
+  // ---- empty states, in the product's voice ----
+  var EMPTY = {
+    imbox: ["All quiet.", "Nothing needs you right now."],
+    screener: ["Nobody's waiting.", "New senders will show up here first. Screen them once — they're sorted forever."],
+    feed: ["Feed's empty.", "Newsletters and periodic mail will gather here."],
+    paper_trail: ["No receipts.", "Receipts, notifications and confirmations will file themselves here."],
+    set_aside: ["Nothing set aside.", "Parking a thread here hides it until you want it back."],
+    later: ["Nothing for later.", "Threads you defer will wait here, out of the way."]
+  };
+  function emptyState(key) {
+    var copy = EMPTY[key] || ["Nothing here.", ""];
+    var w = el("div", "empty");
+    w.appendChild(el("div", "empty-big", copy[0]));
+    if (copy[1]) w.appendChild(el("div", "empty-sub", copy[1]));
+    return w;
+  }
+
+  // ---- nav badges ----
+  function refreshCounts() {
+    if (!token()) return;
+    api("/counts").then(function (c) {
+      document.querySelectorAll("[data-nav]").forEach(function (a) {
+        var n = c[a.dataset.nav] || 0;
+        var b = a.querySelector(".nav-count");
+        if (n > 0) {
+          if (!b) { b = el("span", "nav-count"); a.appendChild(b); }
+          b.textContent = n > 99 ? "99+" : n;
+        } else if (b) b.remove();
+      });
+    }).catch(function () {});
+  }
+
   // ---- bucket list ----
   var selectedRow = -1, currentRows = [];
   function loadBucket(name) {
+    refreshCounts();
     api("/buckets/" + name).then(function (rows) {
       currentRows = rows || [];
       selectedRow = -1;
       view.innerHTML = "";
-      if (!rows || !rows.length) {
-        view.appendChild(el("div", "empty", "Nothing here. Quiet is good."));
+      if (!currentRows.length) {
+        view.appendChild(emptyState(name));
         return;
       }
       var list = el("div", "msg-list");
-      rows.forEach(function (row) {
+      currentRows.forEach(function (row) {
         var item = el("div", "msg-row" + (row.read ? " read" : ""));
         item.dataset.thread = row.thread_id;
-        item.dataset.msg = row.message_id;
-        item.innerHTML =
-          '<div class="msg-from"></div>' +
-          '<div class="msg-mid"><div class="msg-subject"></div><div class="msg-preview"></div></div>' +
-          '<div class="msg-meta"><span class="msg-date"></span>' +
-          (row.has_attachment ? '<span class="attach">attach</span>' : "") +
-          (row.thread_len > 1 ? '<span class="threadlen">' + row.thread_len + "</span>" : "") +
-          "</div>";
-        item.querySelector(".msg-from").textContent = row.from || "(unknown)";
-        item.querySelector(".msg-subject").textContent = row.subject || "(no subject)";
-        item.querySelector(".msg-preview").textContent = row.preview || "";
-        item.querySelector(".msg-date").textContent = fmtDate(row.received_at);
+        var who = splitFrom(row.from || "");
+        item.appendChild(avatar(who.email, who.name));
+
+        var main = el("div", "row-main");
+        var top = el("div", "row-top");
+        top.appendChild(el("span", "row-sender", who.name || who.email));
+        var meta = el("span", "row-meta");
+        if (row.has_attachment) {
+          var chip = el("span", "chip");
+          chip.innerHTML = CLIP_SVG;
+          meta.appendChild(chip);
+        }
+        if (row.thread_len > 1) meta.appendChild(el("span", "chip", String(row.thread_len)));
+        meta.appendChild(el("span", "row-date", fmtDate(row.received_at)));
+        top.appendChild(meta);
+        main.appendChild(top);
+        main.appendChild(el("div", "row-subject", row.subject || "(no subject)"));
+        if (row.preview) main.appendChild(el("div", "row-preview", row.preview));
+        item.appendChild(main);
+
         item.addEventListener("click", function () { openThread(row.thread_id, name); });
         list.appendChild(item);
       });
       view.appendChild(list);
-    }).catch(function (e) { if (e.message !== "unauthorized") view.appendChild(el("div", "error", e.message)); });
+    }).catch(function (e) { if (e.message !== "unauthorized") showError(e.message); });
+  }
+  function showError(msg) {
+    view.innerHTML = "";
+    view.appendChild(el("div", "empty empty-big", msg));
   }
 
   // ---- thread overlay ----
@@ -108,105 +181,141 @@
     api("/threads/" + encodeURIComponent(threadId)).then(function (msgs) {
       overlay.innerHTML = "";
       var panel = el("div", "panel thread-panel");
-      var close = el("button", "close", "Close");
+
+      var head = el("div", "thread-head");
+      head.appendChild(el("h2", "thread-subject", msgs[msgs.length - 1].subject || "(no subject)"));
+      var close = el("button", "btn-ghost btn-sm", "Close");
       close.type = "button";
       close.addEventListener("click", function () { overlay.hidden = true; loadBucket(bucket); });
+      head.appendChild(close);
+      panel.appendChild(head);
+
+      var stream = el("div", "thread-stream");
+      msgs.forEach(function (m) {
+        var who = splitFrom(m.from || "");
+        var block = el("div", "thread-msg");
+        var mh = el("div", "thread-msg-head");
+        var idrow = el("div", "thread-msg-id");
+        idrow.appendChild(avatar(who.email, who.name, "sm"));
+        var names = el("div", "thread-msg-names");
+        names.appendChild(el("span", "thread-msg-from", who.name || who.email));
+        names.appendChild(el("span", "thread-msg-to", "to " + (m.to || "you")));
+        idrow.appendChild(names);
+        mh.appendChild(idrow);
+        mh.appendChild(el("span", "thread-msg-date", fmtDate(m.received_at)));
+        block.appendChild(mh);
+        var body = el("div", "thread-msg-body");
+        body.textContent = m.body || "(body not fetched yet — sync in progress)";
+        block.appendChild(body);
+        stream.appendChild(block);
+      });
+      panel.appendChild(stream);
+
       var actions = el("div", "thread-actions");
       [["Set Aside", "set_aside"], ["Paper Trail", "paper_trail"], ["Feed", "feed"],
        ["Later", "later"], ["Imbox", "imbox"]].forEach(function (pair) {
-        var b = el("button", null, pair[0]);
+        var b = el("button", "btn-ghost btn-sm", pair[0]);
         b.type = "button";
         b.addEventListener("click", function () {
-          api("/messages/" + encodeURIComponent(msgs[msgs.length - 1].id) + "/action", { method: "POST", body: { action: pair[1] } })
+          api("/messages/" + encodeURIComponent(msgs[msgs.length - 1].id) + "/action",
+            { method: "POST", body: { action: pair[1] } })
             .then(function () { overlay.hidden = true; loadBucket(bucket); });
         });
         actions.appendChild(b);
       });
-      var reply = el("button", "primary", "Reply");
+      var reply = el("button", "btn-primary btn-sm", "Reply");
       reply.type = "button";
       reply.addEventListener("click", function () {
         var last = msgs[msgs.length - 1];
-        compose(last.from.replace(/.*<(.*)>.*/, "$1"), "Re: " + (last.subject || ""), last.id);
+        compose(splitFrom(last.from || "").email, "Re: " + (last.subject || ""), last.id);
       });
       actions.appendChild(reply);
-      panel.appendChild(close);
       panel.appendChild(actions);
 
-      msgs.forEach(function (m) {
-        var d = el("div", "msg-full");
-        var head = el("div", "msg-full-head");
-        head.appendChild(el("span", "msg-full-from", m.from));
-        head.appendChild(el("span", "msg-full-date", fmtDate(m.received_at)));
-        d.appendChild(head);
-        d.appendChild(el("div", "msg-full-subject", m.subject));
-        var body = el("div", "msg-full-body");
-        body.textContent = m.body || "(body not fetched yet — sync in progress)";
-        d.appendChild(body);
-        panel.appendChild(d);
-      });
       overlay.appendChild(panel);
       overlay.hidden = false;
 
       var last = msgs[msgs.length - 1];
-      api("/messages/" + encodeURIComponent(last.id) + "/action", { method: "POST", body: { action: "read" } });
+      api("/messages/" + encodeURIComponent(last.id) + "/action", { method: "POST", body: { action: "read" } })
+        .then(refreshCounts);
     }).catch(function (e) { showToast("Thread failed: " + e.message); });
   }
 
   // ---- screener ----
   function loadScreener() {
+    refreshCounts();
     api("/screener").then(function (rows) {
       view.innerHTML = "";
       if (!rows || !rows.length) {
-        view.appendChild(el("div", "empty", "No new senders waiting. Every sender you see has been screened."));
+        view.appendChild(emptyState("screener"));
         return;
       }
-      var intro = el("p", "screener-intro",
-        "New senders wait here. One decision covers all their mail, past and future.");
-      view.appendChild(intro);
+      view.appendChild(el("div", "page-kicker", "The Screener"));
+      view.appendChild(el("p", "page-sub",
+        "New senders wait here. Decide once — every message they ever send goes where you say."));
       rows.forEach(function (row) {
         var card = el("div", "screener-card");
-        var who = el("div", "screener-who");
-        who.appendChild(el("div", "screener-sender", row.sender));
-        who.appendChild(el("div", "screener-sample", (row.waiting + " waiting") + (row.sample_subject ? " — " + row.sample_subject : "")));
-        card.appendChild(who);
+        var who = splitFrom(row.sender);
+        var idrow = el("div", "screener-id");
+        idrow.appendChild(avatar(who.email, who.name, "lg"));
+        var idmain = el("div", "screener-idmain");
+        idmain.appendChild(el("div", "screener-sender", who.name === who.email ? who.email : who.name + "  ·  " + who.email));
+        var sample = el("div", "screener-sample");
+        sample.appendChild(el("span", "chip", row.waiting + " waiting"));
+        if (row.sample_subject) sample.appendChild(el("span", "screener-subject", row.sample_subject));
+        idmain.appendChild(sample);
+        idrow.appendChild(idmain);
+        card.appendChild(idrow);
+
         var btns = el("div", "screener-btns");
-        [["Allow — Imbox", true, "imbox"], ["Allow — Feed", true, "feed"],
-         ["Allow — Paper Trail", true, "paper_trail"], ["Deny", false, "blocked"]].forEach(function (opt) {
-          var b = el("button", opt[1] ? null : "danger", opt[0]);
+        var routes = [["Imbox", "imbox", "btn-primary"], ["Paper Trail", "paper_trail", "btn-outline"],
+          ["Feed", "feed", "btn-outline"]];
+        routes.forEach(function (r) {
+          var b = el("button", r[2], r[0]);
           b.type = "button";
           b.addEventListener("click", function () {
-            api("/screener/decide", { method: "POST", body: { sender: row.sender, allow: opt[1], route: opt[2] } })
-              .then(function () { loadScreener(); });
+            decide(row.sender, true, r[1]);
           });
           btns.appendChild(b);
         });
+        var block = el("button", "btn-danger-ghost", "Block");
+        block.type = "button";
+        block.addEventListener("click", function () { decide(row.sender, false, "blocked"); });
+        btns.appendChild(block);
         card.appendChild(btns);
         view.appendChild(card);
       });
-    }).catch(function (e) { if (e.message !== "unauthorized") view.appendChild(el("div", "error", e.message)); });
+    }).catch(function (e) { if (e.message !== "unauthorized") showError(e.message); });
+
+    function decide(sender, allow, route) {
+      api("/screener/decide", { method: "POST", body: { sender: sender, allow: allow, route: route } })
+        .then(loadScreener);
+    }
   }
 
   // ---- accounts ----
   function loadAccounts() {
     api("/accounts").then(function (rows) {
       view.innerHTML = "";
+      view.appendChild(el("div", "page-kicker", "Accounts"));
+      view.appendChild(el("p", "page-sub", "Mailboxes this app mirrors. Credentials are sealed at rest."));
       var list = el("div", "accounts");
       (rows || []).forEach(function (acc) {
         var card = el("div", "account-card");
         var line1 = el("div", "account-line");
         line1.appendChild(el("strong", null, acc.address));
-        line1.appendChild(el("span", "account-sub", "  " + acc.provider +
-          (acc.label ? " — " + acc.label : "")));
+        if (acc.label) line1.appendChild(el("span", "account-sub", acc.label));
         card.appendChild(line1);
         var line2 = el("div", "account-line account-meta");
+        var dot = el("span", "dot " + (acc.last_error ? "dot-red" : "dot-green"));
+        line2.appendChild(dot);
         line2.appendChild(el("span", null,
-          acc.message_count + " mirrored, " + acc.screener_count + " in screener, backfill " + acc.backfill_days + "d"));
-        var status = acc.last_error ? "error: " + acc.last_error :
-          (acc.last_sync_at ? "synced " + fmtDate(acc.last_sync_at) : "never synced");
-        line2.appendChild(el("span", acc.last_error ? "err" : "ok", status));
+          acc.last_error ? acc.last_error :
+          (acc.last_sync_at ? "synced " + fmtDate(acc.last_sync_at) : "connecting…") +
+          " — " + acc.message_count + " mirrored, " + acc.screener_count + " to screen"));
         card.appendChild(line2);
         var btns = el("div", "account-btns");
-        var sync = el("button", null, "Sync now");
+        var sync = el("button", "btn-outline btn-sm", "Sync now");
         sync.type = "button";
         sync.addEventListener("click", function () {
           syncNote.textContent = "syncing " + acc.address + "…";
@@ -215,7 +324,7 @@
             setTimeout(loadAccounts, 4000);
           });
         });
-        var del = el("button", "danger", "Disconnect");
+        var del = el("button", "btn-danger-ghost btn-sm", "Disconnect");
         del.type = "button";
         del.addEventListener("click", function () {
           if (!confirm("Disconnect " + acc.address + " and delete its mirror?")) return;
@@ -241,7 +350,7 @@
         '<label>SMTP port<input name="smtp_port" type="number" placeholder="587"></label>' +
         '<label>Backfill days<input name="backfill_days" type="number" value="90"></label>' +
         "</div>" +
-        '<button class="primary" type="submit">Connect</button>' +
+        '<button class="btn-primary" type="submit">Connect</button>' +
         '<p class="form-note">The password is encrypted (AES-256-GCM) before storage and validated by dialing the server first.</p>';
       form.addEventListener("submit", function (ev) {
         ev.preventDefault();
@@ -259,7 +368,7 @@
         });
       });
       view.appendChild(form);
-    }).catch(function (e) { if (e.message !== "unauthorized") view.appendChild(el("div", "error", e.message)); });
+    }).catch(function (e) { if (e.message !== "unauthorized") showError(e.message); });
   }
 
   // ---- compose ----
@@ -268,11 +377,12 @@
     var panel = el("div", "panel compose-panel");
     var form = el("form", "compose-form");
     form.innerHTML =
-      '<label>To<input name="to" type="email" required></label>' +
-      '<label>Subject<input name="subject" required></label>' +
-      '<textarea name="text" rows="10" required></textarea>' +
-      '<div class="compose-btns"><button class="primary" type="submit">Send</button>' +
-      '<button type="button" class="cancel">Cancel</button></div>';
+      '<div class="compose-kicker">New message</div>' +
+      '<input name="to" type="email" required class="compose-to" placeholder="To">' +
+      '<input name="subject" required class="compose-subject" placeholder="Subject">' +
+      '<textarea name="text" required class="compose-body" placeholder="Write something worth reading."></textarea>' +
+      '<div class="compose-btns"><button type="button" class="btn-ghost cancel">Discard</button>' +
+      '<button class="btn-primary" type="submit">Send</button></div>';
     form.to.value = to || "";
     form.subject.value = subject || "";
     if (replyToId) form.dataset.reply = replyToId;
@@ -297,7 +407,12 @@
   }
   document.getElementById("compose-btn").addEventListener("click", function () { compose(); });
 
-  // ---- keyboard: j/k navigate, enter opens ----
+  // ---- backdrop + keyboard ----
+  if (overlay) {
+    overlay.addEventListener("click", function (ev) {
+      if (ev.target === overlay) overlay.hidden = true;
+    });
+  }
   document.addEventListener("keydown", function (ev) {
     if (overlay && !overlay.hidden) {
       if (ev.key === "Escape") overlay.hidden = true;
@@ -328,12 +443,11 @@
     if (page === "bucket") loadBucket(view.dataset.bucket);
     else if (page === "screener") loadScreener();
     else if (page === "accounts") loadAccounts();
-    // highlight nav
     var nav = view.dataset.bucket || page;
     document.querySelectorAll("[data-nav]").forEach(function (a) {
       a.classList.toggle("active", a.dataset.nav === nav);
     });
-    api("/classify", { method: "POST" }).catch(function () {});
+    api("/classify", { method: "POST" }).then(refreshCounts).catch(function () {});
   }
   if (token()) boot();
 })();

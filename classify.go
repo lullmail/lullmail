@@ -83,6 +83,34 @@ func firstSenderEmail(fromJSON string) string {
 	return strings.ToLower(addrs[0].Email)
 }
 
+// handleCounts feeds the nav badges: unread per bucket, total for screener.
+func (a *App) handleCounts(w http.ResponseWriter, r *http.Request) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	var imbox, screener, feed, paper, aside, later int64
+	err = a.db.QueryRowContext(r.Context(), `
+		SELECT
+		  count(*) FILTER (WHERE h.bucket='imbox' AND h.read_at IS NULL),
+		  count(*) FILTER (WHERE h.bucket='screener'),
+		  count(*) FILTER (WHERE h.bucket='feed' AND h.read_at IS NULL),
+		  count(*) FILTER (WHERE h.bucket='paper_trail' AND h.read_at IS NULL),
+		  count(*) FILTER (WHERE h.bucket='set_aside'),
+		  count(*) FILTER (WHERE h.bucket='later')
+		FROM hey_messages h WHERE h.user_id = $1`, uid,
+	).Scan(&imbox, &screener, &feed, &paper, &aside, &later)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{
+		"imbox": int(imbox), "screener": int(screener), "feed": int(feed),
+		"paper_trail": int(paper), "set_aside": int(aside), "later": int(later),
+	})
+}
+
 // handleScreener lists undecided senders, newest message first.
 func (a *App) handleScreener(w http.ResponseWriter, r *http.Request) {
 	uid, err := a.userID(r.Context())

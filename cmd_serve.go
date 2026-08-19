@@ -41,12 +41,15 @@ func serve() {
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			name := strings.Trim(r.URL.Path, "/")
 			if name == "" {
-				http.ServeFileFS(w, r, dist, "index.html")
-				return
+				name = "index.html"
 			}
-			if fi, err := fs.Stat(dist, name); err == nil {
-				if fi.IsDir() {
-					name += "/index.html"
+			if fi, err := fs.Stat(dist, name); err == nil && fi.IsDir() {
+				name += "/index.html"
+			}
+			if _, err := fs.Stat(dist, name); err == nil {
+				if strings.HasSuffix(name, ".html") {
+					serveHTML(w, r, dist, name)
+					return
 				}
 				http.ServeFileFS(w, r, dist, name)
 				return
@@ -55,7 +58,8 @@ func serve() {
 				http.NotFound(w, r)
 				return
 			}
-			http.ServeFileFS(w, r, dist, "index.html")
+			// Extensionless fallback = client route: serve the root page.
+			serveHTML(w, r, dist, "index.html")
 		})
 	}
 	mux.Handle("/", handler)
@@ -67,6 +71,25 @@ func serve() {
 	}
 	log.Printf("email-soft listening on %s", addr)
 	log.Fatal(srv.ListenAndServe())
+}
+
+// serveHTML writes an HTML file with the stylesheet injected. The Neutron
+// static preset emits bare pages (title only); the CSS link is added here at
+// serve time — the same convention akiroo's static.go uses — so routes never
+// each have to remember it.
+func serveHTML(w http.ResponseWriter, r *http.Request, fsys fs.FS, name string) {
+	data, err := fs.ReadFile(fsys, name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	s := string(data)
+	const link = `<link rel="stylesheet" href="/styles.css">`
+	if !strings.Contains(s, link) {
+		s = strings.Replace(s, "</head>", link+"</head>", 1)
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(s))
 }
 
 func envOr(key, fallback string) string {
