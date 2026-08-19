@@ -3,13 +3,12 @@ declare module "@neutron-build/core" {
   interface NeutronGeneratedRouteMap {
     paths:
     | "/"
-    | "/feed"
-    | "/later"
-    | "/paper-trail"
     | "/people"
+    | "/reading"
+    | "/receipts"
     | "/screener"
-    | "/set-aside"
     | "/settings/accounts"
+    | "/snoozed"
     | "/today"
   }
 }

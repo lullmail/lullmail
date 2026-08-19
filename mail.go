@@ -129,6 +129,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	api.HandleFunc("GET /folder", a.handleFolder)
 	api.HandleFunc("GET /mailboxes", a.handleMailboxList)
 	api.HandleFunc("POST /screener/decide", a.handleDecide)
+	api.HandleFunc("POST /screener/undecide", a.handleUndecide)
 	api.HandleFunc("GET /buckets/{bucket}", a.handleBucket)
 	api.HandleFunc("GET /threads/{thread}", a.handleThread)
 	api.HandleFunc("POST /messages/{message}/action", a.handleMessageAction)

@@ -1,9 +1,11 @@
 export const config = { mode: "static" };
 
 export function head() {
-  return { title: "email-soft — Imbox" };
+  return { title: "Imbox" };
 }
 
+// The shell for this URL. Every pixel is rendered by the App island in the
+// layout; this exists so the route prerenders to a real file.
 export default function Page() {
-  return <div id="view" data-page="bucket" data-bucket="imbox"></div>;
+  return null;
 }

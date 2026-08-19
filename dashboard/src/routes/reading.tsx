@@ -1,7 +1,7 @@
 export const config = { mode: "static" };
 
 export function head() {
-  return { title: "Accounts" };
+  return { title: "Reading" };
 }
 
 export default function Page() {

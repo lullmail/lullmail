@@ -1,0 +1,144 @@
+// Message bodies. HTML goes into a sandboxed iframe with the app's own theme
+// injected; plain text keeps quoted replies collapsed. Remote images are
+// stripped by default because a one-pixel image is how senders learn you
+// opened the mail.
+import { useEffect, useRef, useState } from "preact/hooks";
+import { allowImages, reader, theme } from "../lib/store";
+import { Icon } from "../ui/Icon";
+
+const PLACEHOLDER =
+  "<span style=\"display:inline-flex;align-items:center;justify-content:center;" +
+  "border:1.5px dashed var(--ph-line);border-radius:8px;color:var(--ph-ink);" +
+  "font:12px sans-serif;padding:10px 14px\">image blocked</span>";
+
+/** Strips remote `src`s only — `data:` and `cid:` are already local to the message. */
+export function stripRemoteImages(html: string): { html: string; blocked: number } {
+  let blocked = 0;
+  const out = html.replace(
+    // Quoted and unquoted remote srcs alike; `data:` and `cid:` are untouched
+    // because they carry no request back to the sender.
+    /<img\b[^>]*\bsrc\s*=\s*(?:(["'])https?:\/\/[^"']*\1|https?:\/\/[^\s>]+)[^>]*>/gi,
+    () => {
+      blocked++;
+      return PLACEHOLDER;
+    }
+  );
+  return { html: out, blocked };
+}
+
+function cssVar(name: string): string {
+  if (typeof document === "undefined") return "";
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function frameDoc(html: string): string {
+  return (
+    "<!doctype html><html><head><meta charset='utf-8'><base target='_blank'>" +
+    "<style>" +
+    ":root{--ph-line:" + (cssVar("--line-strong") || "#ccc") + ";--ph-ink:" + (cssVar("--ink-3") || "#999") + "}" +
+    "html,body{margin:0;padding:0;background:transparent}" +
+    "body{font-family:" + cssVar("--sans") + ";color:" + cssVar("--ink") +
+    ";font-size:15px;line-height:1.62;padding:2px 0 8px;word-wrap:break-word;overflow-wrap:anywhere}" +
+    "img{max-width:100%;height:auto}" +
+    "a{color:" + (cssVar("--accent") || "#4a72d8") + "}" +
+    "blockquote{border-left:3px solid " + cssVar("--line-strong") +
+    ";margin:8px 0;padding:2px 12px;color:" + cssVar("--ink-2") + "}" +
+    "pre{white-space:pre-wrap}table{max-width:100%}" +
+    "</style></head><body>" + html + "</body></html>"
+  );
+}
+
+function HtmlBody({ html, messageId }: { html: string; messageId: string }) {
+  const ref = useRef<HTMLIFrameElement>(null);
+  const ok = reader.value.imagesOk.has(messageId);
+  const { html: safe, blocked } = ok ? { html, blocked: 0 } : stripRemoteImages(html);
+  // Read as a signal, not off the DOM: the injected colours are literals baked
+  // into srcdoc, so this component has to re-render when the theme changes.
+  const themeKey = theme.value;
+
+  useEffect(() => {
+    const frame = ref.current;
+    if (!frame) return;
+    const fit = () => {
+      try {
+        const h = frame.contentDocument?.body?.scrollHeight || 300;
+        frame.style.height = Math.min(Math.max(h + 12, 40), 900) + "px";
+      } catch {
+        frame.style.height = "300px";
+      }
+    };
+    frame.addEventListener("load", fit);
+    return () => frame.removeEventListener("load", fit);
+  }, [safe, themeKey]);
+
+  return (
+    <>
+      {blocked > 0 && (
+        <div class="img-notice">
+          <Icon name="shield" size={15} />
+          <span>
+            {blocked === 1 ? "1 remote image blocked" : blocked + " remote images blocked"} — loading
+            them tells the sender you opened this.
+          </span>
+          <button class="btn btn-outline btn-sm" type="button" onClick={() => allowImages(messageId)}>
+            Load images
+          </button>
+        </div>
+      )}
+      <iframe
+        ref={ref}
+        class="mail-frame"
+        title="Message body"
+        sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+        srcdoc={frameDoc(safe)}
+      />
+    </>
+  );
+}
+
+interface Segment { quoted: boolean; text: string }
+
+/** Groups a plain-text body into spoken and quoted runs. */
+export function segmentText(text: string): Segment[] {
+  const segs: Segment[] = [];
+  for (const line of (text || "").split("\n")) {
+    const quoted =
+      /^\s*>/.test(line) ||
+      /^On .+ wrote:\s*$/.test(line) ||
+      /^\s*-{2,}\s*Original Message\s*-{2,}/i.test(line) ||
+      /^\s*_{5,}/.test(line);
+    const last = segs[segs.length - 1];
+    if (last && last.quoted === quoted) last.text += "\n" + line;
+    else segs.push({ quoted, text: line });
+  }
+  return segs;
+}
+
+function QuotedRun({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button class="quote-toggle" type="button" onClick={() => setOpen((v) => !v)}>
+        {open ? "Hide quoted text" : "Show quoted text"}
+      </button>
+      {open && <div class="quote">{text}</div>}
+    </>
+  );
+}
+
+function TextBody({ text }: { text: string }) {
+  return (
+    <div class="msg-text">
+      {segmentText(text).map((seg, i) =>
+        seg.quoted ? <QuotedRun text={seg.text} key={i} /> : <div key={i}>{seg.text}</div>
+      )}
+    </div>
+  );
+}
+
+export function MessageBody({ html, text, messageId }: {
+  html?: string; text: string; messageId: string;
+}) {
+  if (html) return <HtmlBody html={html} messageId={messageId} />;
+  return <TextBody text={text || "(body not fetched yet — sync in progress)"} />;
+}

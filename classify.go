@@ -109,6 +109,7 @@ func (a *App) handleCounts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		"imbox": int(imbox), "screener": int(screener), "feed": int(feed),
 		"paper_trail": int(paper), "set_aside": int(aside), "later": int(later),
+		"snoozed": int(aside + later),
 	})
 }
 
@@ -289,16 +290,80 @@ func (a *App) handleDecide(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"sender": req.Sender, "route": req.Route})
 }
 
-var bucketNames = map[string]bool{
-	"screener": true, "imbox": true, "paper_trail": true, "feed": true,
-	"set_aside": true, "later": true,
+// handleUndecide reverses a Screener decision: the sender's rule is dropped and
+// every message routed by it returns to the Screener. Without this a mis-click
+// is permanent -- there is no other path back from "blocked", which makes the
+// four Screener buttons far riskier than they look.
+func (a *App) handleUndecide(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Sender string `json:"sender"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
+		return
+	}
+	req.Sender = strings.ToLower(strings.TrimSpace(req.Sender))
+	if req.Sender == "" {
+		writeProblem(w, http.StatusUnprocessableEntity, "Missing Sender", "sender is required")
+		return
+	}
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Begin Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(r.Context(),
+		`DELETE FROM hey_senders WHERE user_id = $1 AND sender_key = $2`,
+		uid, req.Sender); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Undecide Failed", err.Error())
+		return
+	}
+	// Mirror of handleDecide's re-route, in the other direction. Only mail the
+	// decision itself placed is recalled: a thread the user has since filed by
+	// hand keeps the bucket they chose.
+	if _, err := tx.ExecContext(r.Context(), `
+		UPDATE hey_messages SET bucket = 'screener'
+		WHERE user_id = $1 AND message_id IN (
+		  SELECT m.id FROM mail_messages m
+		  WHERE m.from_addrs LIKE '%' || $2 || '%')`,
+		uid, req.Sender); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Reroute Failed", err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Commit Failed", err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"sender": req.Sender, "route": "screener"})
+}
+
+// Listable buckets, mapped to the underlying hey_messages.bucket values.
+//
+// "snoozed" is the merge of set_aside and later: deferring mail is one idea, and
+// whether it comes back on a date or someday is an attribute of the deferral,
+// not a different place to keep it. The two storage values stay distinct so a
+// dated snooze can still be swept back (TASKS 1.4) without a migration.
+var bucketNames = map[string][]string{
+	"screener":    {"screener"},
+	"imbox":       {"imbox"},
+	"paper_trail": {"paper_trail"},
+	"feed":        {"feed"},
+	"snoozed":     {"set_aside", "later"},
+	"set_aside":   {"set_aside"},
+	"later":       {"later"},
 }
 
 // handleBucket lists threads for one bucket view: latest message per thread.
 func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
-	bucket := r.PathValue("bucket")
-	if !bucketNames[bucket] {
-		writeProblem(w, http.StatusNotFound, "No Such Bucket", "unknown bucket "+bucket)
+	buckets, ok := bucketNames[r.PathValue("bucket")]
+	if !ok {
+		writeProblem(w, http.StatusNotFound, "No Such Bucket", "unknown bucket "+r.PathValue("bucket"))
 		return
 	}
 	uid, err := a.userID(r.Context())
@@ -308,21 +373,21 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT m.thread_id, m.id, m.subject, m.from_addrs, m.received_at,
-		       h.read_at IS NOT NULL AS is_read, m.has_attachment, m.preview,
+		       h.read_at IS NOT NULL AS is_read, m.has_attachment, m.preview, h.bucket,
 		       (SELECT count(*) FROM mail_messages t
 		          WHERE t.account_id = m.account_id AND t.thread_id = m.thread_id) AS thread_len
 		FROM hey_messages h
 		JOIN mail_messages m ON m.id = h.message_id
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = h.user_id
-		WHERE h.user_id = $1 AND h.bucket = $2
+		WHERE h.user_id = $1 AND h.bucket = ANY($2)
 		  AND m.id = (
 		    SELECT m2.id FROM hey_messages h2
 		    JOIN mail_messages m2 ON m2.id = h2.message_id
-		    WHERE h2.user_id = $1 AND h2.bucket = $2
+		    WHERE h2.user_id = $1 AND h2.bucket = ANY($2)
 		      AND m2.account_id = m.account_id AND m2.thread_id = m.thread_id
 		    ORDER BY m2.received_at DESC NULLS LAST LIMIT 1)
 		ORDER BY m.received_at DESC NULLS LAST
-		LIMIT 200`, uid, bucket)
+		LIMIT 200`, uid, buckets)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return
@@ -338,6 +403,7 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 		Read       bool   `json:"read"`
 		Attachment bool   `json:"has_attachment"`
 		Preview    string `json:"preview"`
+		Bucket     string `json:"bucket"`
 		ThreadLen  int    `json:"thread_len"`
 	}
 	out := []threadRow{}
@@ -346,7 +412,7 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 		var fromJSON string
 		var received sql.NullTime
 		if err := rows.Scan(&row.ThreadID, &row.MessageID, &row.Subject, &fromJSON,
-			&received, &row.Read, &row.Attachment, &row.Preview, &row.ThreadLen); err != nil {
+			&received, &row.Read, &row.Attachment, &row.Preview, &row.Bucket, &row.ThreadLen); err != nil {
 			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
 			return
 		}
