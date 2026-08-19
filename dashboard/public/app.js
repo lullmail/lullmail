@@ -153,12 +153,14 @@
     return h;
   }
 
-  // ---- nav badges ----
+  // ---- nav badges + tab badge ----
   function refreshCounts() {
     if (!token()) return;
     api("/counts").then(function (c) {
+      var total = 0;
       document.querySelectorAll("[data-nav]").forEach(function (a) {
         var n = c[a.dataset.nav] || 0;
+        if (a.dataset.nav !== "screener" && a.dataset.nav !== "set_aside") total += n;
         var b = a.querySelector(".nav-count");
         if (n > 0) {
           if (!b) { b = el("span", "nav-count"); a.appendChild(b); b.textContent = n; }
@@ -166,9 +168,58 @@
           pop(b);
         } else if (b) b.remove();
       });
+      updateTabBadge(total);
     }).catch(function () {});
   }
+  var faviconLink = null;
+  function updateTabBadge(n) {
+    document.title = n > 0 ? "(" + n + ") email-soft" : "email-soft";
+    if (!faviconLink) {
+      faviconLink = document.createElement("link");
+      faviconLink.rel = "icon";
+      document.head.appendChild(faviconLink);
+    }
+    var bg = document.documentElement.getAttribute("data-theme") === "dark" ? "%23ecedf1" : "%2317181c";
+    var fg = document.documentElement.getAttribute("data-theme") === "dark" ? "%23101114" : "%23ffffff";
+    var svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">' +
+      '<rect width="64" height="64" rx="14" fill="' + bg + '"/>' +
+      (n > 0
+        ? '<text x="32" y="42" font-family="system-ui,sans-serif" font-size="' + (n > 99 ? 26 : 34) +
+          '" font-weight="700" text-anchor="middle" fill="' + fg + '">' + (n > 99 ? "99" : n) + "</text>"
+        : '<text x="32" y="42" font-family="Georgia,serif" font-size="34" font-weight="700" text-anchor="middle" fill="' + fg + '">\u2709</text>') +
+      "</svg>";
+    faviconLink.href = "data:image/svg+xml," + svg.replace(/#/g, "%23").replace(/"/g, "'");
+  }
 
+  // ---- quick actions on hover (workflow without opening) ----
+  var ACT_ICONS = {
+    set_aside: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
+    paper_trail: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2h9l5 5v15H6z"/><path d="M15 2v5h5"/><path d="M9 13h6M9 17h6"/></svg>',
+    feed: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11a9 9 0 0 1 9 9M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1.5" fill="currentColor"/></svg>'
+  };
+  var ACT_TITLES = { set_aside: "Set Aside", paper_trail: "Paper Trail", feed: "Feed" };
+  function quickAction(msgId, action, rowEl) {
+    rowEl.classList.add("bye");
+    setTimeout(function () {
+      api("/messages/" + encodeURIComponent(msgId) + "/action", { method: "POST", body: { action: action } })
+        .then(function () { loadBucket(view.dataset.bucket); });
+    }, 180);
+  }
+  function addHoverActions(item, row) {
+    var actions = el("div", "row-actions");
+    [["set_aside", "s"], ["paper_trail", "p"], ["feed", "f"]].forEach(function (pair) {
+      var b = el("button", "row-act");
+      b.type = "button";
+      b.title = ACT_TITLES[pair[0]];
+      b.innerHTML = ACT_ICONS[pair[0]];
+      b.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        quickAction(row.message_id, pair[0], item);
+      });
+      actions.appendChild(b);
+    });
+    item.appendChild(actions);
+  }
   // ---- date grouping ----
   function dayLabel(iso) {
     if (!iso) return "Earlier";
@@ -238,6 +289,7 @@
         main.appendChild(el("div", "row-subject", row.subject || "(no subject)"));
         if (row.preview) main.appendChild(el("div", "row-preview", row.preview));
         item.appendChild(main);
+        addHoverActions(item, row);
 
         item.addEventListener("click", function () {
           openThread(row.thread_id, name, item);
@@ -275,7 +327,11 @@
       mh.appendChild(el("span", "thread-msg-date", fmtDate(m.received_at)));
       block.appendChild(mh);
       var body = el("div", "thread-msg-body");
-      body.textContent = m.body || "(body not fetched yet — sync in progress)";
+      if (m.html) {
+        body.appendChild(htmlFrame(m.html));
+      } else {
+        body.appendChild(textBody(m.body || "(body not fetched yet — sync in progress)"));
+      }
       block.appendChild(body);
       stream.appendChild(block);
     });
@@ -301,6 +357,73 @@
     });
     actions.appendChild(reply);
     panel.appendChild(actions);
+  }
+
+  // ---- message body rendering: HTML in a sandboxed, theme-injected iframe;
+  // plain text with quoted replies collapsed behind a toggle ----
+  function cssVar(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+  function htmlFrame(html) {
+    var frame = document.createElement("iframe");
+    frame.className = "mail-frame";
+    frame.setAttribute("sandbox", "allow-same-origin allow-popups allow-popups-to-escape-sandbox");
+    var doc = "<!doctype html><html><head><meta charset='utf-8'>" +
+      "<base target='_blank'>" +
+      "<style>" +
+      "html,body{margin:0;padding:0 6px;background:transparent;}" +
+      "body{font-family:" + cssVar("--sans") + ";color:" + cssVar("--ink") + ";" +
+      "font-size:15px;line-height:1.6;padding:4px 0 8px;word-wrap:break-word;}" +
+      "img{max-width:100%;height:auto;}" +
+      "a{color:#4a72d8;}" +
+      "blockquote{border-left:3px solid " + cssVar("--line-strong") + ";" +
+      "margin:8px 0;padding:2px 12px;color:" + cssVar("--ink-2") + ";}" +
+      "pre{white-space:pre-wrap;}" +
+      "table{max-width:100%;}" +
+      "</style></head><body>" + html + "</body></html>";
+    frame.srcdoc = doc;
+    frame.addEventListener("load", function () {
+      try {
+        var h = frame.contentDocument.body.scrollHeight;
+        frame.style.height = Math.min(Math.max(h + 12, 40), 600) + "px";
+      } catch (e) { frame.style.height = "300px"; }
+    });
+    return frame;
+  }
+
+  function textBody(text) {
+    var wrap = el("div", "msg-text");
+    var lines = (text || "").split("\n");
+    var segs = [];
+    var cur = null;
+    lines.forEach(function (line) {
+      var isQuote = /^\s*>/.test(line) || /^On .+ wrote:\s*$/.test(line) ||
+        /^\s*-----Original Message-----/.test(line) || /^\s*_{5,}/.test(line);
+      if (isQuote && cur !== "q") { cur = "q"; segs.push({ t: "q", lines: [line] }); }
+      else if (!isQuote && cur !== "t") { cur = "t"; segs.push({ t: "t", lines: [line] }); }
+      else segs[segs.length - 1].lines.push(line);
+    });
+    segs.forEach(function (seg) {
+      if (seg.t === "t") {
+        var p = el("div", null);
+        p.textContent = seg.lines.join("\n");
+        wrap.appendChild(p);
+      } else {
+        var q = el("div", "quote");
+        q.textContent = seg.lines.join("\n");
+        var btn = el("button", "quote-toggle", "Show quoted text");
+        btn.type = "button";
+        btn.addEventListener("click", function () {
+          var open = !q.hidden;
+          q.hidden = open;
+          btn.textContent = open ? "Show quoted text" : "Hide quoted text";
+        });
+        wrap.appendChild(btn);
+        wrap.appendChild(q);
+        q.hidden = true;
+      }
+    });
+    return wrap;
   }
 
   function clearReader() {
@@ -576,6 +699,7 @@
       a.classList.toggle("active", a.dataset.nav === nav);
     });
     api("/classify", { method: "POST" }).then(refreshCounts).catch(function () {});
+    setInterval(refreshCounts, 45000);
   }
   if (token()) boot();
 })();

@@ -317,7 +317,7 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 	thread := r.PathValue("thread")
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT m.id, m.account_id, m.subject, m.from_addrs, m.to_addrs, m.received_at,
-		       COALESCE(h.bucket,''), COALESCE(b.text_body,'')
+		       COALESCE(h.bucket,''), COALESCE(b.text_body,''), COALESCE(b.html_body,'')
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
@@ -339,6 +339,7 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		ReceivedAt string `json:"received_at"`
 		Bucket     string `json:"bucket"`
 		Body       string `json:"body"`
+		HTML       string `json:"html,omitempty"`
 	}
 	out := []msgRow{}
 	for rows.Next() {
@@ -346,7 +347,7 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		var fromJSON, toJSON string
 		var received sql.NullTime
 		if err := rows.Scan(&row.ID, &row.Account, &row.Subject, &fromJSON, &toJSON,
-			&received, &row.Bucket, &row.Body); err != nil {
+			&received, &row.Bucket, &row.Body, &row.HTML); err != nil {
 			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
 			return
 		}
