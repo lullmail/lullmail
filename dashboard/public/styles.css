@@ -325,6 +325,105 @@ mark.hit {
 .img-shield { color: var(--danger); font-size: 15px; }
 .img-notice .btn-outline { border-color: rgba(187,58,48,.3); padding: 4px 12px; }
 
+/* ---- Today: the briefing ---- */
+.digest-head {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 26px 34px 10px;
+}
+.digest-title {
+  font-size: 12px; font-weight: 740; letter-spacing: .13em;
+  text-transform: uppercase; color: var(--ink-3);
+}
+.digest-title.accent { color: var(--accent); }
+.digest-count {
+  font-size: 11.5px; font-weight: 720; color: var(--ink-3);
+  background: var(--bg-raise); border-radius: 999px; padding: 1px 8px;
+}
+.digest-title.accent + .digest-count { background: var(--accent); color: #fff; }
+
+.digest-card {
+  margin: 8px 34px; padding: 16px 18px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 16px;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+.digest-card:hover { border-color: var(--line-strong); box-shadow: 0 2px 12px rgba(23,24,28,.05); }
+.digest-id { display: flex; gap: 13px; align-items: flex-start; }
+.digest-main { flex: 1; min-width: 0; }
+.digest-top { display: flex; align-items: baseline; gap: 10px; }
+.digest-sender { font-size: 13.5px; font-weight: 660; color: var(--ink-2); }
+.digest-date { margin-left: auto; font-size: 12.5px; color: var(--ink-3); flex: none; }
+.digest-subject {
+  font-family: var(--serif);
+  font-size: 18px; font-weight: 660; letter-spacing: -0.012em;
+  margin-top: 3px; line-height: 1.3;
+}
+.digest-preview {
+  font-size: 13.5px; color: var(--ink-3); margin-top: 3px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.digest-acts { display: flex; gap: 6px; margin-top: 12px; padding-left: 55px; }
+
+.inline-reply { margin-top: 12px; padding-left: 55px; }
+.inline-ta {
+  width: 100%; border: 1.5px solid var(--line-strong); border-radius: 12px;
+  padding: 10px 12px; font: inherit; font-size: 14.5px; background: var(--panel);
+  color: var(--ink); resize: vertical;
+}
+.inline-ta:focus { border-color: var(--ink-2); outline: none; }
+.inline-btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+
+.wait-card {
+  display: flex; align-items: center; gap: 11px;
+  margin: 4px 34px; padding: 10px 16px;
+  border-radius: 12px; color: var(--ink-2);
+  transition: background .1s ease, color .1s ease;
+}
+.wait-card:hover { background: var(--panel); color: var(--ink); }
+.wait-main { flex: 1; min-width: 0; display: flex; gap: 10px; align-items: baseline; }
+.wait-who { font-weight: 660; font-size: 13.5px; white-space: nowrap; }
+.wait-what {
+  font-family: var(--serif); font-size: 14.5px; color: var(--ink-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.quiet-rows { padding: 14px 34px; display: flex; flex-direction: column; }
+.quiet-row {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 9px 4px; border-top: 1px solid var(--line);
+  color: var(--ink-2); font-size: 14px;
+}
+.quiet-row:first-child { border-top: none; }
+.quiet-row:hover { color: var(--ink); }
+.quiet-name { font-weight: 660; }
+.quiet-stat { color: var(--accent); font-weight: 660; font-size: 13px; }
+.quiet-note { color: var(--ink-3); font-size: 13px; }
+.quiet-go { margin-left: auto; color: var(--ink-3); }
+
+.more-link {
+  display: inline-block; margin: 6px 34px; font-size: 13.5px;
+  font-weight: 620; color: var(--ink-3);
+}
+.more-link:hover { color: var(--ink); }
+
+.done-state::before { inset: 30% 30%; }
+
+.nav-sep { height: 1px; background: var(--line); margin: 10px 12px; }
+
+/* ---- People ---- */
+.people-list { display: flex; flex-direction: column; padding: 0 34px 40px; }
+.people-row {
+  display: flex; align-items: center; gap: 13px;
+  padding: 11px 4px; border-bottom: 1px solid var(--line);
+}
+.people-main { flex: 1; min-width: 0; }
+.chip-blocked { color: var(--danger); background: var(--danger-soft); }
+
+.nav-today {
+  font-family: var(--serif) !important;
+  font-size: 15.5px !important;
+  font-weight: 700 !important;
+}
+
 /* ---- empty states ---- */
 .empty { padding: 100px 32px; text-align: center; position: relative; }
 .empty::before {

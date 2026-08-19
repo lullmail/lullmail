@@ -21,12 +21,16 @@ export default function Layout(props: { children?: ComponentChildren }) {
       <aside class="sidebar">
         <a href="/" class="brand">email-soft</a>
         <nav>
+          <a href="/today" data-nav="today" class="nav-today">Today</a>
+          <div class="nav-sep"></div>
           <a href="/" data-nav="imbox">Imbox</a>
           <a href="/screener" data-nav="screener">Screener</a>
           <a href="/feed" data-nav="feed">Feed</a>
           <a href="/paper-trail" data-nav="paper_trail">Paper Trail</a>
           <a href="/set-aside" data-nav="set_aside">Set Aside</a>
           <a href="/later" data-nav="later">Later</a>
+          <div class="nav-sep"></div>
+          <a href="/people" data-nav="people">People</a>
         </nav>
         <nav class="sidebar-bottom">
           <a href="/settings/accounts" data-nav="accounts">Accounts</a>

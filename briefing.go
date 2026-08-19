@@ -1,0 +1,203 @@
+package main
+
+// The Briefing (TASKS 1.7): today-shaped view over the same mirror.
+//
+// Rules are deliberately conservative — a briefing that says "2 things need
+// you" and is wrong once loses the user to Classic forever. "Needs you"
+// requires: Imbox bucket, unread, and the thread's latest message is from
+// someone else. "You're waiting" requires the user to have spoken last in a
+// thread someone else started. Everything else stays a count.
+
+import (
+	"net/http"
+	"time"
+)
+
+type briefThread struct {
+	ThreadID   string `json:"thread_id"`
+	MessageID  string `json:"message_id"`
+	Subject    string `json:"subject"`
+	From       string `json:"from"`
+	ReceivedAt string `json:"received_at"`
+	Preview    string `json:"preview"`
+}
+
+func (a *App) handleBriefing(w http.ResponseWriter, r *http.Request) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+
+	// The user's own addresses, for whose-turn analysis.
+	myAddr := map[string]bool{}
+	{
+		rows, err := a.db.QueryContext(r.Context(),
+			`SELECT lower(address) FROM email_accounts WHERE user_id = $1`, uid)
+		if err == nil {
+			for rows.Next() {
+				var s string
+				rows.Scan(&s)
+				myAddr[s] = true
+			}
+			rows.Close()
+		}
+	}
+
+	// Latest message of every Imbox thread the user owns.
+	rows, err := a.db.QueryContext(r.Context(), `
+		SELECT DISTINCT ON (m.thread_id)
+		       m.thread_id, m.id, m.subject, m.from_addrs, m.received_at, m.preview
+		FROM mail_messages m
+		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+		JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
+		WHERE h.bucket = 'imbox'
+		ORDER BY m.thread_id, m.received_at DESC NULLS LAST`, uid)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	defer rows.Close()
+
+	// Unread state per latest message + whether each thread has messages from
+	// both sides — "you're waiting" requires someone else in the thread;
+	// a note-to-self is not a conversation.
+	readState := map[string]bool{} // message id -> read
+	spoke := map[string][2]bool{}  // thread -> {i_spoke, other_spoke}
+	{
+		r2, err := a.db.QueryContext(r.Context(), `
+			SELECT m.thread_id,
+			       bool_or(lower(m.from_addrs::json->0->>'email') = ANY ($2)),
+			       bool_or(lower(m.from_addrs::json->0->>'email') <> ALL ($2))
+			FROM mail_messages m
+			JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+			GROUP BY m.thread_id`, uid, addrList(myAddr))
+		if err == nil {
+			for r2.Next() {
+				var th string
+				var mine, theirs bool
+				if r2.Scan(&th, &mine, &theirs) == nil {
+					spoke[th] = [2]bool{mine, theirs}
+				}
+			}
+			r2.Close()
+		}
+		r3, err := a.db.QueryContext(r.Context(), `
+			SELECT h.message_id, h.read_at IS NOT NULL
+			FROM hey_messages h WHERE h.user_id = $1 AND h.bucket = 'imbox'`, uid)
+		if err == nil {
+			for r3.Next() {
+				var id string
+				var read bool
+				if r3.Scan(&id, &read) == nil {
+					readState[id] = read
+				}
+			}
+			r3.Close()
+		}
+	}
+
+	var needsYou, waiting []briefThread
+	for rows.Next() {
+		var bt briefThread
+		var fromJSON string
+		var received *time.Time
+		if err := rows.Scan(&bt.ThreadID, &bt.MessageID, &bt.Subject, &fromJSON, &received, &bt.Preview); err != nil {
+			continue
+		}
+		if received != nil {
+			bt.ReceivedAt = received.Format(time.RFC3339)
+		}
+		sender := firstSenderEmail(fromJSON)
+		fromMe := myAddr[sender]
+		bt.From = firstSenderName(fromJSON)
+
+		switch {
+		case !fromMe && !readState[bt.MessageID]:
+			needsYou = append(needsYou, bt)
+		case fromMe && spoke[bt.ThreadID][0] && spoke[bt.ThreadID][1]:
+			// My move was the last one and someone else is in the thread.
+			// Their turn — and if it stays theirs for long, this is the nudge.
+			waiting = append(waiting, bt)
+		}
+	}
+
+	// Feed + Paper Trail unread counts, screener total.
+	var feedN, paperN, screenerN int
+	a.db.QueryRowContext(r.Context(), `
+		SELECT
+		  count(*) FILTER (WHERE h.bucket='feed' AND h.read_at IS NULL),
+		  count(*) FILTER (WHERE h.bucket='paper_trail' AND h.read_at IS NULL),
+		  count(*) FILTER (WHERE h.bucket='screener')
+		FROM hey_messages h WHERE h.user_id = $1`, uid).Scan(&feedN, &paperN, &screenerN)
+
+	writeJSON(w, map[string]any{
+		"needs_you":    orEmpty(needsYou),
+		"waiting_on":   orEmpty(waiting),
+		"feed_unread":  feedN,
+		"paper_unread": paperN,
+		"screener":     screenerN,
+	})
+}
+
+// handlePeople: the roster — every decided sender with activity stats.
+func (a *App) handlePeople(w http.ResponseWriter, r *http.Request) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	rows, err := a.db.QueryContext(r.Context(), `
+		SELECT s.sender_key, s.route, s.allowed,
+		       count(h.message_id) AS total,
+		       max(m.received_at) AS last_at,
+		       max(m.subject) AS last_subject
+		FROM hey_senders s
+		LEFT JOIN mail_messages m ON lower(m.from_addrs::json->0->>'email') = s.sender_key
+		LEFT JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = s.user_id
+		LEFT JOIN hey_messages h ON h.message_id = m.id AND h.user_id = s.user_id
+		WHERE s.user_id = $1
+		GROUP BY s.sender_key, s.route, s.allowed
+		ORDER BY last_at DESC NULLS LAST`, uid)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	defer rows.Close()
+
+	type person struct {
+		Sender  string  `json:"sender"`
+		Route   string  `json:"route"`
+		Allowed bool    `json:"allowed"`
+		Total   int     `json:"total"`
+		LastAt  *string `json:"last_at"`
+		Subject *string `json:"last_subject"`
+	}
+	out := []person{}
+	for rows.Next() {
+		var p person
+		var lastAt, lastSub *string
+		if err := rows.Scan(&p.Sender, &p.Route, &p.Allowed, &p.Total, &lastAt, &lastSub); err != nil {
+			continue
+		}
+		p.LastAt = lastAt
+		p.Subject = lastSub
+		out = append(out, p)
+	}
+	writeJSON(w, out)
+}
+
+func addrList(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+func orEmpty[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
+}

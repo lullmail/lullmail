@@ -221,6 +221,240 @@
     });
     item.appendChild(actions);
   }
+  // ---- Today: the briefing ----
+  function loadToday() {
+    refreshCounts();
+    Promise.all([
+      api("/briefing"),
+      api("/screener").catch(function () { return []; })
+    ]).then(function (res) {
+      var b = res[0], screeners = res[1] || [];
+      view.innerHTML = "";
+
+      var now = new Date();
+      var head = el("div", "bucket-head");
+      var kicker = el("div", "page-kicker", "Today");
+      kicker.style.padding = "0";
+      head.appendChild(kicker);
+      head.appendChild(el("h1", "bucket-title",
+        now.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" })));
+      var totalOpen = (b.needs_you || []).length + (screeners.length ? 1 : 0);
+      head.appendChild(el("div", "bucket-sub", totalOpen === 0
+        ? "Everything's handled. This is the whole picture."
+        : (b.needs_you || []).length + (b.needs_you || []).length === 1 ? " thing needs you" : " things need you" +
+          (screeners.length ? ", plus " + screeners.length + " sender" + (screeners.length === 1 ? "" : "s") + " to screen" : "") + "."));
+      view.appendChild(head);
+
+      // -- Needs you --
+      if ((b.needs_you || []).length) {
+        view.appendChild(sectionHead("Needs you", b.needs_you.length, true));
+        b.needs_you.forEach(function (t, i) { view.appendChild(needCard(t, i)); });
+      }
+
+      // -- New senders (the Screener, embedded) --
+      if (screeners.length) {
+        view.appendChild(sectionHead("New senders", screeners.length, true));
+        screeners.slice(0, 5).forEach(function (row, i) {
+          view.appendChild(screenerInline(row, i));
+        });
+        if (screeners.length > 5) {
+          var more = el("a", "more-link", "All " + screeners.length + " senders →");
+          more.href = "/screener";
+          view.appendChild(more);
+        }
+      }
+
+      // -- You're waiting --
+      if ((b.waiting_on || []).length) {
+        view.appendChild(sectionHead("You're waiting", b.waiting_on.length, false));
+        b.waiting_on.forEach(function (t, i) { view.appendChild(waitCard(t, i)); });
+      }
+
+      // -- Quiet rows: feed + paper trail --
+      var quiet = el("div", "quiet-rows");
+      if (b.feed_unread || b.paper_unread) {
+        if (b.feed_unread) quiet.appendChild(quietRow("/feed", "The Feed", b.feed_unread + " new", "scan when you want"));
+        if (b.paper_unread) quiet.appendChild(quietRow("/paper-trail", "Paper Trail", b.paper_unread + " new", "receipts and notifications"));
+      }
+      if (quiet.childNodes.length) view.appendChild(quiet);
+
+      if (!totalOpen && !b.feed_unread && !b.paper_unread && !(b.waiting_on || []).length) {
+        var done = el("div", "empty done-state");
+        done.appendChild(el("div", "empty-big", "You're done."));
+        done.appendChild(el("div", "empty-sub", "Nothing needs you, nobody's waiting, all senders screened."));
+        view.appendChild(done);
+      }
+      if (wide()) clearReader();
+    }).catch(function (e) { if (e.message !== "unauthorized") showError(e.message); });
+
+    function sectionHead(title, n, accent) {
+      var h = el("div", "digest-head");
+      h.appendChild(el("span", "digest-title" + (accent ? " accent" : ""), title));
+      h.appendChild(el("span", "digest-count", String(n)));
+      return h;
+    }
+    function needCard(t, i) {
+      var who = splitFrom(t.from || "");
+      var card = el("div", "digest-card row-in");
+      card.style.animationDelay = Math.min(i, 10) * 26 + "ms";
+      var idrow = el("div", "digest-id");
+      idrow.appendChild(avatar(who.email, who.name));
+      var main = el("div", "digest-main");
+      var top = el("div", "digest-top");
+      top.appendChild(el("span", "digest-sender", who.name || who.email));
+      top.appendChild(el("span", "digest-date", fmtDate(t.received_at)));
+      main.appendChild(top);
+      main.appendChild(el("div", "digest-subject", t.subject || "(no subject)"));
+      if (t.preview) main.appendChild(el("div", "digest-preview", t.preview));
+      idrow.appendChild(main);
+      card.appendChild(idrow);
+
+      var acts = el("div", "digest-acts");
+      var reply = el("button", "btn-primary btn-sm", "Reply");
+      reply.type = "button";
+      reply.addEventListener("click", function () { inlineReply(card, t); });
+      var open = el("button", "btn-ghost btn-sm", "Open");
+      open.type = "button";
+      open.addEventListener("click", function () { openThread(t.thread_id, "imbox", null); });
+      var done = el("button", "btn-ghost btn-sm", "Done");
+      done.type = "button";
+      done.addEventListener("click", function () {
+        card.classList.add("bye");
+        api("/messages/" + encodeURIComponent(t.message_id) + "/action", { method: "POST", body: { action: "read" } })
+          .then(function () { loadToday(); });
+      });
+      acts.appendChild(reply); acts.appendChild(open); acts.appendChild(done);
+      card.appendChild(acts);
+      return card;
+    }
+    function inlineReply(card, t) {
+      if (card.querySelector(".inline-reply")) return;
+      var who = splitFrom(t.from || "");
+      var box = el("div", "inline-reply");
+      var ta = el("textarea", "inline-ta");
+      ta.rows = 3;
+      ta.placeholder = "Reply to " + (who.name || who.email) + "…";
+      var btns = el("div", "inline-btns");
+      var cancel = el("button", "btn-ghost btn-sm", "Cancel");
+      cancel.type = "button";
+      cancel.addEventListener("click", function () { box.remove(); });
+      var send = el("button", "btn-primary btn-sm", "Send");
+      send.type = "button";
+      send.addEventListener("click", function () {
+        if (!ta.value.trim()) return;
+        api("/send", { method: "POST", body: {
+          to: who.email,
+          subject: t.subject || "",
+          text: ta.value,
+          reply_to_message_id: t.message_id
+        } }).then(function (res) {
+          box.remove();
+          card.classList.add("bye");
+          setTimeout(loadToday, 200);
+          showToast("Sending in 5s", "Undo", function () {
+            api("/outbox/" + res.queued, { method: "DELETE" })
+              .then(function () { showToast("Send cancelled"); loadToday(); });
+          }, 5500);
+        }).catch(function (e) { showToast("Reply failed: " + e.message, null, null, 8000); });
+      });
+      btns.appendChild(cancel); btns.appendChild(send);
+      box.appendChild(ta); box.appendChild(btns);
+      card.appendChild(box);
+      ta.focus();
+    }
+    function waitCard(t, i) {
+      var who = splitFrom(t.from || "");
+      var row = el("a", "wait-card row-in");
+      row.style.animationDelay = Math.min(i, 10) * 26 + "ms";
+      row.href = "#";
+      row.addEventListener("click", function (ev) { ev.preventDefault(); openThread(t.thread_id, "imbox", null); });
+      row.appendChild(avatar(who.email, who.name, "sm"));
+      var main = el("div", "wait-main");
+      main.appendChild(el("span", "wait-who", who.name || who.email));
+      main.appendChild(el("span", "wait-what", t.subject || "(no subject)"));
+      row.appendChild(main);
+      row.appendChild(el("span", "digest-date", fmtDate(t.received_at)));
+      return row;
+    }
+    function screenerInline(row, i) {
+      var who = splitFrom(row.sender);
+      var card = el("div", "digest-card screener-inline row-in");
+      card.style.animationDelay = Math.min(i, 10) * 26 + "ms";
+      var idrow = el("div", "digest-id");
+      idrow.appendChild(avatar(who.email, who.name));
+      var main = el("div", "digest-main");
+      var top = el("div", "digest-top");
+      top.appendChild(el("span", "digest-sender", who.name === who.email ? who.email : who.name + " · " + who.email));
+      top.appendChild(el("span", "digest-date", row.waiting + " waiting"));
+      main.appendChild(top);
+      if (row.sample_subject) main.appendChild(el("div", "digest-preview", row.sample_subject));
+      idrow.appendChild(main);
+      card.appendChild(idrow);
+      var acts = el("div", "digest-acts");
+      [["Imbox", "imbox", "btn-primary btn-sm"], ["Feed", "feed", "btn-outline btn-sm"],
+       ["Paper", "paper_trail", "btn-outline btn-sm"], ["Block", null, "btn-danger-ghost btn-sm"]].forEach(function (opt) {
+        var bbtn = el("button", opt[2], opt[0]);
+        bbtn.type = "button";
+        bbtn.addEventListener("click", function () {
+          card.classList.add("bye");
+          api("/screener/decide", { method: "POST", body: {
+            sender: row.sender, allow: !!opt[1], route: opt[1] || "blocked"
+          } }).then(function () { loadToday(); });
+        });
+        acts.appendChild(bbtn);
+      });
+      card.appendChild(acts);
+      return card;
+    }
+    function quietRow(href, name, stat, note) {
+      var r = el("a", "quiet-row");
+      r.href = href;
+      r.appendChild(el("span", "quiet-name", name));
+      r.appendChild(el("span", "quiet-stat", stat));
+      r.appendChild(el("span", "quiet-note", note));
+      r.appendChild(el("span", "quiet-go", "→"));
+      return r;
+    }
+  }
+
+  // ---- People: the roster ----
+  function loadPeople() {
+    refreshCounts();
+    api("/people").then(function (rows) {
+      view.innerHTML = "";
+      view.appendChild(bucketHead("People", "Every sender you've decided on. One row per person, forever."));
+      if (!rows || !rows.length) {
+        var w = el("div", "empty");
+        w.appendChild(el("div", "empty-big", "No one yet."));
+        w.appendChild(el("div", "empty-sub", "Screen some senders and they'll gather here."));
+        view.appendChild(w);
+        return;
+      }
+      var list = el("div", "people-list");
+      rows.forEach(function (p, i) {
+        var who = splitFrom(p.sender);
+        var row = el("div", "people-row row-in");
+        row.style.animationDelay = Math.min(i, 14) * 20 + "ms";
+        row.appendChild(avatar(who.email, who.name));
+        var main = el("div", "people-main");
+        var top = el("div", "digest-top");
+        top.appendChild(el("span", "digest-sender", who.name === who.email ? who.email : who.name + " · " + who.email));
+        var routeChip = el("span", "chip", p.allowed ? p.route.replace("_", " ") : "blocked");
+        if (!p.allowed) routeChip.classList.add("chip-blocked");
+        top.appendChild(routeChip);
+        main.appendChild(top);
+        var sub = el("div", "digest-preview");
+        sub.textContent = p.total + " message" + (p.total === 1 ? "" : "s") +
+          (p.subject ? " — last: " + p.subject : "");
+        main.appendChild(sub);
+        row.appendChild(main);
+        row.appendChild(el("span", "digest-date", p.last_at ? fmtDate(p.last_at) : ""));
+        list.appendChild(row);
+      });
+      view.appendChild(list);
+    }).catch(function (e) { if (e.message !== "unauthorized") showError(e.message); });
+  }
+
   // ---- date grouping ----
   function dayLabel(iso) {
     if (!iso) return "Earlier";
@@ -847,7 +1081,9 @@
     if (!token() || !view) return;
     applyThemeIcons();
     var page = view.dataset.page;
-    if (page === "bucket") loadBucket(view.dataset.bucket);
+    if (page === "today") loadToday();
+    else if (page === "people") loadPeople();
+    else if (page === "bucket") loadBucket(view.dataset.bucket);
     else if (page === "screener") loadScreener();
     else if (page === "accounts") loadAccounts();
     var nav = view.dataset.bucket || page;

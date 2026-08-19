@@ -6,9 +6,11 @@ declare module "@neutron-build/core" {
     | "/feed"
     | "/later"
     | "/paper-trail"
+    | "/people"
     | "/screener"
     | "/set-aside"
     | "/settings/accounts"
+    | "/today"
   }
 }
 
