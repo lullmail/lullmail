@@ -237,7 +237,6 @@ button { font: inherit; cursor: pointer; border: none; background: none; color: 
    Mail is a document; a month is a grid. The calendar keeps the column's
    left edge but expands to the window, the same deal the topline gets —
    every extra pixel is another pixel of week. */
-.page-head.wide { max-width: 1440px; }
 .cal-surface { max-width: 1440px; }
 .cal-surface .page-head { padding: var(--sp-6) 0 var(--sp-3); }
 .cal-surface .cal-topline { margin-bottom: var(--sp-2); }
@@ -924,7 +923,6 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 @media (max-width: 1079px) {
   .board { grid-template-columns: 1fr; }
 }
-EOF echo appended
 /* ============================================================ Notes (the wall) */
 
 :root {
@@ -1001,8 +999,8 @@ EOF echo appended
   margin-bottom: 4px;
 }
 .cal-weekdays span {
-  font-size: var(--t-xs); font-weight: 680; letter-spacing: 0.08em;
-  color: var(--ink-3); text-align: center; text-transform: uppercase;
+  font-size: var(--t-xs); font-weight: 740; letter-spacing: 0.14em;
+  color: var(--ink-2); text-align: center; text-transform: uppercase;
 }
 .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); }
 .cal-cell {
@@ -1014,19 +1012,27 @@ EOF echo appended
 }
 .cal-cell:nth-child(7n + 1) { border-left: none; }
 .cal-cell.blank { pointer-events: none; }
+/* Weekends get a wash: the month reads as weeks at a glance. */
+.cal-cell:nth-child(7n), .cal-cell:nth-child(7n + 1) {
+  background: color-mix(in srgb, var(--ink) 3.5%, transparent);
+}
 .cal-cell:hover { background: var(--hover); }
-.cal-cell.today .cal-daynum { color: var(--accent); }
-.cal-cell.sel { background: var(--hover); box-shadow: inset 0 0 0 1.5px var(--ink); }
+.cal-cell.today .cal-daynum {
+  background: var(--accent); color: var(--accent-ink);
+  width: 32px; height: 32px; border-radius: 50%;
+  display: grid; place-items: center; margin: -3px 0 0 -3px;
+}
+.cal-cell.sel { box-shadow: inset 0 0 0 2px var(--ink); border-radius: var(--r-sm); }
 .cal-daynum { font-family: var(--serif); font-size: var(--t-lg); font-weight: 660; }
 .cal-dots {
-  font-size: var(--t-xs); font-weight: 660; color: var(--ink-2);
-  background: var(--accent-soft); color: var(--accent);
-  padding: 1px 6px; border-radius: 99px;
+  font-size: var(--t-xs); font-weight: 740;
+  background: var(--accent); color: var(--accent-ink);
+  padding: 2px 9px; border-radius: 99px;
 }
 
 .cal-day { margin-top: var(--sp-6); }
-.cal-day-head { padding-bottom: var(--sp-2); border-bottom: 2px solid var(--ink); }
-.cal-day-title { font-size: var(--t-md); font-weight: 700; }
+.cal-day-head { padding-bottom: var(--sp-2); border-bottom: 3px solid var(--ink); }
+.cal-day-title { font-family: var(--serif); font-size: var(--t-xl); font-weight: 700; }
 .cal-day-now { color: var(--accent); }
 .cal-day-empty { color: var(--ink-3); padding: var(--sp-3) 0; font-size: var(--t-md); }
 .cal-return {
@@ -1037,7 +1043,6 @@ EOF echo appended
   font: inherit; text-align: left; color: var(--ink-2);
 }
 .cal-return:hover { background: var(--hover); color: var(--ink); }
-.cal-return-when { flex: none; font-size: var(--t-sm); color: var(--accent); font-weight: 660; }
 .cal-return-what {
   font-family: var(--serif); font-size: var(--t-lg); color: var(--ink);
   flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -1050,19 +1055,22 @@ EOF echo appended
   .cal-dots { font-size: 9px; }
   .note-wall { width: 1400px; height: 1100px; }
 }
-EOF echo ok
 /* ---- calendar zoom ---- */
 
 .cal-zoom {
-  display: inline-flex; border: 1px solid var(--line-strong);
+  display: inline-flex; border: 2px solid var(--ink);
   border-radius: 99px; overflow: hidden;
 }
 .cal-zoom-btn {
-  padding: 4px 14px; font: inherit; font-size: var(--t-sm); font-weight: 660;
+  padding: 6px 18px; font: inherit; font-size: var(--t-md); font-weight: 720;
   color: var(--ink-2); border: none; background: transparent; cursor: pointer;
+  transition: color 0.1s ease;
 }
 .cal-zoom-btn:hover { color: var(--ink); }
-.cal-zoom-btn.active { background: var(--ink); color: var(--bg); }
+.cal-zoom-btn.active { background: var(--accent); color: var(--accent-ink); }
+.cal-topline .btn-icon { width: 36px; height: 36px; justify-content: center; }
+.cal-topline .btn-icon svg { transition: transform 0.12s ease; }
+.cal-topline .btn-icon:hover svg { transform: scale(1.25); }
 
 /* Year: twelve quiet mini-months, dots where mail returns. */
 .cal-year {
@@ -1083,10 +1091,13 @@ EOF echo ok
   border-radius: var(--r-sm);
 }
 .cal-mini-day:hover { background: var(--hover); color: var(--ink); }
-.cal-mini-day.today { color: var(--accent); font-weight: 700; }
+.cal-mini-day.today {
+  background: var(--accent); color: var(--accent-ink);
+  border-radius: 50%; font-weight: 700;
+}
 .cal-mini-day.has::after {
   content: ""; position: absolute; bottom: 1px; left: 50%; transform: translateX(-50%);
-  width: 4px; height: 4px; border-radius: 50%; background: var(--accent);
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent);
 }
 .cal-year-note { margin-top: var(--sp-4); font-size: var(--t-md); color: var(--ink-3); }
 
@@ -1094,25 +1105,40 @@ EOF echo ok
 .cal-week { display: grid; grid-template-columns: repeat(7, 1fr); }
 .cal-wday {
   min-height: 260px; padding: var(--sp-2);
-  border-top: 2px solid var(--line);
+  border-top: 3px solid var(--line);
   display: flex; flex-direction: column; gap: 6px;
 }
-.cal-wday.today { border-top-color: var(--accent); }
-.cal-wday-head { display: flex; align-items: baseline; gap: 6px; margin-bottom: 2px; }
-.cal-wday-name {
-  font-size: var(--t-xs); font-weight: 680; letter-spacing: 0.06em;
-  text-transform: uppercase; color: var(--ink-3);
+.cal-wday:nth-child(1), .cal-wday:nth-child(7) {
+  background: color-mix(in srgb, var(--ink) 3.5%, transparent);
 }
-.cal-wday-num { font-family: var(--serif); font-size: var(--t-lg); font-weight: 680; color: var(--ink); }
+.cal-wday.today { border-top: 4px solid var(--accent); }
+.cal-wday-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+.cal-wday-name {
+  font-size: var(--t-xs); font-weight: 740; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--ink-2);
+}
+.cal-wday-num {
+  font-family: var(--serif); font-size: 30px; font-weight: 720; color: var(--ink);
+  margin-left: auto; line-height: 1;
+}
 .cal-wday.today .cal-wday-num { color: var(--accent); }
 .cal-wday-quiet { color: var(--ink-3); font-size: var(--t-md); }
 .cal-witem {
-  border: none; background: none; cursor: pointer; text-align: left; font: inherit;
-  padding: 6px 8px; border-radius: var(--r-sm); color: var(--ink-2);
-  display: flex; flex-direction: column; gap: 1px; align-items: flex-start;
+  border: none; background: var(--panel); cursor: pointer; text-align: left; font: inherit;
+  padding: 8px 10px; border-radius: var(--r-md); color: var(--ink-2);
+  display: flex; flex-direction: column; gap: 2px; align-items: flex-start;
+  box-shadow: 0 1px 0 var(--line-strong);
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
 }
-.cal-witem:hover { background: var(--hover); color: var(--ink); }
-.cal-witem-when { font-size: var(--t-xs); font-weight: 680; color: var(--accent); }
+.cal-witem:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.1);
+  color: var(--ink);
+}
+.cal-witem-when {
+  font-size: var(--t-xs); font-weight: 740; color: var(--accent-ink);
+  background: var(--accent); padding: 1px 7px; border-radius: 99px;
+}
 .cal-witem-what {
   font-family: var(--serif); font-size: var(--t-md); color: var(--ink); line-height: 1.3;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
@@ -1128,4 +1154,21 @@ EOF echo ok
   .cal-wday { min-height: 0; }
   .cal-zoom-btn { padding: 4px 10px; }
 }
-EOF echo ok
+
+/* ---- the bold pass: poster title, filled chips, month day-detail ---- */
+
+/* The month name is the poster: bigger than anything else on the page,
+   because the calendar is the one surface whose subject is time itself. */
+.cal-surface .page-title {
+  font-size: clamp(44px, 5.5vw, 68px);
+  letter-spacing: -0.03em; line-height: 1.02;
+}
+.cal-surface .page-head { padding: var(--sp-5) 0 var(--sp-2); }
+.cal-surface .page-sub { color: var(--ink-2); }
+
+.cal-return:hover { background: var(--hover); color: var(--ink); }
+.cal-return-when {
+  flex: none; font-size: var(--t-xs); font-weight: 740;
+  color: var(--accent-ink); background: var(--accent);
+  padding: 2px 8px; border-radius: 99px;
+}
