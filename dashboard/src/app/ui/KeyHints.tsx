@@ -14,7 +14,7 @@ function hintsFor(): [string, string][] {
   }
   const kind = routeFor(path.value).kind;
   if (kind === "notes") return [["2×click", "new note"], ["drag", "move"], ["⌘K", "jump"]];
-  if (kind === "calendar") return [["← →", "month"], ["t", "today"], ["⌘K", "jump"]];
+  if (kind === "calendar") return [["y m w", "year, month, week"], ["← →", "move"], ["t", "today"]];
   if (kind === "accounts" || kind === "people") return [["⌘K", "search & jump"], ["c", "compose"]];
   return [["⌘K", "search & jump"], ["c", "compose"], ["/", "search"]];
 }
