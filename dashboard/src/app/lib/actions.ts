@@ -12,7 +12,7 @@ import {
 
 /** The one place bucket names are written. Storage values are unchanged. */
 export const BUCKET_LABEL: Record<ListBucket, string> = {
-  imbox: "Imbox",
+  imbox: "Inbox",
   screener: "Screener",
   feed: "Reading",
   paper_trail: "Receipts",

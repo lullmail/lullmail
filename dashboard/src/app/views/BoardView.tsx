@@ -208,7 +208,7 @@ export function BoardView() {
       <PageHead
         kicker="Board"
         title="The board your mail writes"
-        sub="Cards fill themselves: unread Imbox mail needs you, threads you answered are waiting on the other side, snoozed mail comes back on its day. Pin anything to keep it here."
+        sub="Cards fill themselves: unread Inbox mail needs you, threads you answered are waiting on the other side, snoozed mail comes back on its day. Pin anything to keep it here."
       />
 
       {loading && !data && <ListSkeleton rows={4} />}

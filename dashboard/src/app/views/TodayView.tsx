@@ -9,7 +9,7 @@ import { Empty, ListSkeleton, PageHead, SectionHead } from "../ui/bits";
 import { ScreenerCard } from "../ui/ScreenerCard";
 import { Icon } from "../ui/Icon";
 
-/** Briefing threads are always unread Imbox mail, so they act like rows. */
+/** Briefing threads are always unread Inbox mail, so they act like rows. */
 function asRow(t: BriefThread): Row {
   return { ...t, read: false, bucket: "imbox" };
 }
@@ -151,7 +151,7 @@ export function TodayView() {
           <SectionHead title="New senders" count={senders.length} />
           <p class="explainer">
             These people have never written to you before, so nothing of theirs has reached your
-            Imbox. Pick where their mail should go and every message they ever send follows that
+            Inbox. Pick where their mail should go and every message they ever send follows that
             rule — you can change it later from People.
           </p>
           {/* Same card as /screener. The keys are not bound here, so they are not advertised. */}

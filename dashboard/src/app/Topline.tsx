@@ -12,18 +12,19 @@ import { MoreMenu } from "./ui/MoreMenu";
 // mail files itself into — seven unfamiliar words in an even row give a
 // newcomer nothing to hold on to.
 type NavItem = [string, string, string, keyof typeof COUNTABLE | null];
-const COUNTABLE = { imbox: 1, screener: 1, feed: 1, snoozed: 1 } as const;
+const COUNTABLE = { imbox: 1, screener: 1, feed: 1 } as const;
 
 // Four words, plus the Board experiment while it is under test. Receipts is
 // deliberately absent: nobody browses receipts, they search them — it lives
 // in the palette and on Today. The Screener joins only while senders are
-// waiting, because it is a queue you empty, not a place.
+// waiting, because it is a queue you empty, not a place. Snoozed is off the
+// nav too: it is Inbox mail on a timer, not a destination — the board's
+// third column and the palette (g z) reach it.
 const NAV: NavItem[] = [
   ["/today", "today", "Today", null],
   ["/board", "board", "Board", null],
-  ["/", "imbox", "Imbox", "imbox"],
+  ["/", "imbox", "Inbox", "imbox"],
   ["/reading", "feed", "Reading", "feed"],
-  ["/snoozed", "snoozed", "Snoozed", "snoozed"],
 ];
 
 function NavLink({ item, here }: { item: NavItem; here: string }) {

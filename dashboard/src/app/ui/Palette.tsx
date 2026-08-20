@@ -21,7 +21,7 @@ interface Item {
 const JUMPS: [string, string][] = [
   ["Today", "/today"],
   ["Board", "/board"],
-  ["Imbox", "/"],
+  ["Inbox", "/"],
   ["Screener", "/screener"],
   ["Reading", "/reading"],
   // Not in the nav — this is how you actually reach receipts.

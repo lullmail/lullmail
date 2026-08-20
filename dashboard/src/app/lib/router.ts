@@ -18,7 +18,7 @@ export interface Route {
 }
 
 const ROUTES: Record<string, Route> = {
-  "/": { kind: "bucket", bucket: "imbox", nav: "imbox", title: "Imbox" },
+  "/": { kind: "bucket", bucket: "imbox", nav: "imbox", title: "Inbox" },
   "/today": { kind: "today", nav: "today", title: "Today" },
   "/board": { kind: "board", nav: "board", title: "Board" },
   "/screener": { kind: "screener", nav: "screener", title: "The Screener" },

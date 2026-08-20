@@ -1,7 +1,7 @@
 export const config = { mode: "static" };
 
 export function head() {
-  return { title: "Imbox" };
+  return { title: "Inbox" };
 }
 
 // The shell for this URL. Every pixel is rendered by the App island in the

@@ -7,7 +7,7 @@ import { Icon } from "./Icon";
     screen, then retires itself once the user clearly knows them. */
 function hintsFor(): [string, string][] {
   if (list.value.kind === "senders") {
-    return [["j k", "move"], ["1", "Imbox"], ["2", "Reading"], ["3", "Receipts"], ["0", "block"]];
+    return [["j k", "move"], ["1", "Inbox"], ["2", "Reading"], ["3", "Receipts"], ["0", "block"]];
   }
   if (list.value.kind === "rows") {
     return [["j k", "move"], ["↵", "open"], ["e", "done"], ["s", "snooze"], ["x", "select"]];

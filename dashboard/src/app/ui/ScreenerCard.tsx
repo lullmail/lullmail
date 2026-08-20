@@ -8,7 +8,7 @@ import { Avatar } from "./bits";
     set and a different order; a decision this permanent must look and behave
     identically wherever it is made. */
 const CHOICES: [string, boolean, "imbox" | "feed" | "paper_trail" | "blocked", string][] = [
-  ["Imbox", true, "imbox", "btn-primary"],
+  ["Inbox", true, "imbox", "btn-primary"],
   ["Reading", true, "feed", "btn-outline"],
   ["Receipts", true, "paper_trail", "btn-outline"],
   // Quiet until hovered: colouring the destructive choice by default pulls the

@@ -9,7 +9,7 @@ import { BulkBar } from "../ui/BulkBar";
 
 const COPY: Record<ListBucket, { title: string; sub: string; emptyTitle: string; emptySub: string }> = {
   imbox: {
-    title: "Imbox",
+    title: "Inbox",
     sub: "The people you chose to hear from.",
     emptyTitle: "All quiet.",
     emptySub: "Nothing needs you right now. Enjoy it.",
@@ -22,7 +22,7 @@ const COPY: Record<ListBucket, { title: string; sub: string; emptyTitle: string;
     title: "Reading",
     sub: "Mail you allowed but never have to answer. Skim it when you feel like it.",
     emptyTitle: "Nothing to read.",
-    emptySub: "Newsletters and periodic mail gather here, so they never touch your Imbox.",
+    emptySub: "Newsletters and periodic mail gather here, so they never touch your Inbox.",
   },
   paper_trail: {
     title: "Receipts",

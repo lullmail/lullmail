@@ -36,7 +36,7 @@ export function BulkBar() {
         )}
       </div>
 
-      <button class="btn btn-ghost btn-sm" type="button" onClick={() => moveTo(rows, "imbox")}>Imbox</button>
+      <button class="btn btn-ghost btn-sm" type="button" onClick={() => moveTo(rows, "imbox")}>Inbox</button>
       <button class="btn btn-ghost btn-sm" type="button" onClick={() => moveTo(rows, "feed")}>Reading</button>
       <button class="btn btn-ghost btn-sm" type="button" onClick={() => moveTo(rows, "paper_trail")}>Receipts</button>
       <button class="btn btn-ghost btn-sm" type="button" onClick={() => markRead(rows, !allRead)}>

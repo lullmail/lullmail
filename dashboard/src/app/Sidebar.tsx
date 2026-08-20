@@ -2,17 +2,17 @@ import { counts } from "./lib/store";
 import { path, routeFor } from "./lib/router";
 
 // Classic's nav. Text only and grouped, with counts — a column has room for the
-// numbers the topline deliberately leaves out.
+// numbers the topline deliberately leaves out. Snoozed is off the nav here
+// too: reachable from the board column and the palette, not browsed.
 const MAILBOX: [string, string, string, keyof typeof COUNT_KEYS | null][] = [
-  ["/", "imbox", "Imbox", "imbox"],
+  ["/", "imbox", "Inbox", "imbox"],
   ["/screener", "screener", "Screener", "screener"],
   ["/reading", "feed", "Reading", "feed"],
   ["/receipts", "paper_trail", "Receipts", "paper_trail"],
-  ["/snoozed", "snoozed", "Snoozed", "snoozed"],
 ];
 
 const COUNT_KEYS = {
-  imbox: 1, screener: 1, feed: 1, paper_trail: 1, snoozed: 1,
+  imbox: 1, screener: 1, feed: 1, paper_trail: 1,
 } as const;
 
 function Item({ href, nav, label, count, here }: {

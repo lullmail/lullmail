@@ -26,7 +26,7 @@ export function ScreenerView() {
       {!!data?.length && (
         <div class="keys-hint">
           <span class="kbd">j</span><span class="kbd">k</span> to move ·{" "}
-          <span class="kbd">1</span> Imbox · <span class="kbd">2</span> Reading ·{" "}
+          <span class="kbd">1</span> Inbox · <span class="kbd">2</span> Reading ·{" "}
           <span class="kbd">3</span> Receipts · <span class="kbd">0</span> Block
         </div>
       )}

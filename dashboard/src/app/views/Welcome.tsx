@@ -23,7 +23,7 @@ export function Welcome() {
           <div>
             <strong>Everyone new lands in the Screener.</strong>
             <p>
-              Nobody reaches you until you say so. You decide once per sender — Imbox for people,
+              Nobody reaches you until you say so. You decide once per sender — Inbox for people,
               Reading for newsletters, Receipts for confirmations — and every message they ever
               send follows that rule. Change your mind whenever; nothing is permanent.
             </p>
@@ -32,7 +32,7 @@ export function Welcome() {
         <div class="welcome-step">
           <div class="welcome-num">2</div>
           <div>
-            <strong>The Imbox is only what you said yes to.</strong>
+            <strong>The Inbox is only what you said yes to.</strong>
             <p>
               Newsletters and confirmations never touch it. They wait in Reading and Receipts
               for whenever you feel like looking.
