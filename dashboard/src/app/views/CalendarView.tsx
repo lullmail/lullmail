@@ -117,38 +117,40 @@ export function CalendarView() {
 
   return (
     <>
-      <PageHead kicker="Calendar" title={title} sub={sub} />
+      <div class="cal-surface">
+        <PageHead kicker="Calendar" title={title} sub={sub} />
 
-      <div class="cal-topline">
-        <button class="btn-icon" type="button" title={"Previous " + zoom + " (←)" } aria-label={"Previous " + zoom}
-          onClick={() => setAnchor((a) => shiftDate(a, zoom, -1))}>
-          <Icon name="back" size={16} />
-        </button>
-        <div class="cal-zoom" role="group" aria-label="Zoom">
-          {(["year", "month", "week"] as Zoom[]).map((z) => (
-            <button
-              class={"cal-zoom-btn" + (zoom === z ? " active" : "")} type="button" key={z}
-              onClick={() => setZoom(z)}
-            >
-              {z === "year" ? "Year" : z === "month" ? "Month" : "Week"}
-            </button>
-          ))}
+        <div class="cal-topline">
+          <button class="btn-icon" type="button" title={"Previous " + zoom + " (←)" } aria-label={"Previous " + zoom}
+            onClick={() => setAnchor((a) => shiftDate(a, zoom, -1))}>
+            <Icon name="back" size={16} />
+          </button>
+          <div class="cal-zoom" role="group" aria-label="Zoom">
+            {(["year", "month", "week"] as Zoom[]).map((z) => (
+              <button
+                class={"cal-zoom-btn" + (zoom === z ? " active" : "")} type="button" key={z}
+                onClick={() => setZoom(z)}
+              >
+                {z === "year" ? "Year" : z === "month" ? "Month" : "Week"}
+              </button>
+            ))}
+          </div>
+          <span class="spacer" />
+          <button class="btn btn-ghost btn-sm" type="button" onClick={() => { setAnchor(new Date()); }}>
+            Today <span class="kbd">t</span>
+          </button>
+          <button class="btn-icon" type="button" title={"Next " + zoom + " (→)"} aria-label={"Next " + zoom}
+            onClick={() => setAnchor((a) => shiftDate(a, zoom, 1))}>
+            <Icon name="arrow" size={16} />
+          </button>
         </div>
-        <span class="spacer" />
-        <button class="btn btn-ghost btn-sm" type="button" onClick={() => { setAnchor(new Date()); }}>
-          Today <span class="kbd">t</span>
-        </button>
-        <button class="btn-icon" type="button" title={"Next " + zoom + " (→)"} aria-label={"Next " + zoom}
-          onClick={() => setAnchor((a) => shiftDate(a, zoom, 1))}>
-          <Icon name="arrow" size={16} />
-        </button>
+
+        {loading && !data && <ListSkeleton rows={4} />}
+        {error && <Empty title="The calendar didn't load." sub={error} />}
       </div>
 
-      {loading && !data && <ListSkeleton rows={4} />}
-      {error && <Empty title="The calendar didn't load." sub={error} />}
-
       {data && zoom === "year" && (
-        <>
+        <div class="cal-surface">
           <div class="cal-year">
             {Array.from({ length: 12 }, (_, mm) => {
               const cells = monthCells(y, mm);
@@ -183,11 +185,11 @@ export function CalendarView() {
           {yearDots > 0 && (
             <div class="cal-year-note">{yearDots} dated {yearDots === 1 ? "return" : "returns"} in {y}.</div>
           )}
-        </>
+        </div>
       )}
 
       {data && zoom === "month" && (
-        <>
+        <div class="cal-surface">
           <div class="cal-weekdays">
             {WEEKDAYS.map((w, i) => <span key={i}>{w}</span>)}
           </div>
@@ -239,11 +241,12 @@ export function CalendarView() {
               );
             })}
           </div>
-        </>
+        </div>
       )}
 
       {data && zoom === "week" && (
-        <div class="cal-week">
+        <div class="cal-surface">
+          <div class="cal-week">
           {weekDays.map((d) => {
             const items = returnsOn(d);
             const isToday = sameDay(d, today);
@@ -270,15 +273,18 @@ export function CalendarView() {
               </div>
             );
           })}
+          </div>
         </div>
       )}
 
       {data && someday.length > 0 && (
-        <a class="quiet-row" href="/snoozed">
-          <span class="quiet-name">{someday.length} for someday</span>
-          <span class="quiet-note">snoozed without a date — they wait until you look</span>
-          <span class="quiet-go"><Icon name="arrow" size={14} /></span>
-        </a>
+        <div class="cal-surface">
+          <a class="quiet-row" href="/snoozed">
+            <span class="quiet-name">{someday.length} for someday</span>
+            <span class="quiet-note">snoozed without a date — they wait until you look</span>
+            <span class="quiet-go"><Icon name="arrow" size={14} /></span>
+          </a>
+        </div>
       )}
     </>
   );

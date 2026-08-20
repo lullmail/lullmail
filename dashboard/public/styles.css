@@ -232,6 +232,21 @@ button { font: inherit; cursor: pointer; border: none; background: none; color: 
 /* ---- page head ---- */
 
 .page-head { padding: var(--sp-7) 0 var(--sp-5); }
+
+/* ---- calendar: a grid surface, not a reading page ----
+   Mail is a document; a month is a grid. The calendar keeps the column's
+   left edge but expands to the window, the same deal the topline gets —
+   every extra pixel is another pixel of week. */
+.page-head.wide { max-width: 1440px; }
+.cal-surface { max-width: 1440px; }
+.cal-surface .page-head { padding: var(--sp-6) 0 var(--sp-3); }
+.cal-surface .cal-topline { margin-bottom: var(--sp-2); }
+.cal-surface .cal-weekdays { margin-bottom: 2px; }
+.cal-surface .cal-cell { min-height: 108px; }
+.cal-surface .cal-day { margin-top: var(--sp-4); }
+.cal-surface .cal-year { gap: var(--sp-3) var(--sp-4); }
+.cal-surface .cal-week { min-height: 52vh; }
+.cal-surface .cal-wday { min-height: 340px; }
 .page-kicker {
   font-size: var(--t-xs); font-weight: 740; letter-spacing: 0.14em;
   text-transform: uppercase; color: var(--ink-3); margin-bottom: var(--sp-2);
