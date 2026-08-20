@@ -35,6 +35,8 @@ export function Sidebar() {
       <nav>
         <Item href="/today" nav="today" label="Today" here={here} />
         <Item href="/board" nav="board" label="Board" here={here} />
+        <Item href="/calendar" nav="calendar" label="Calendar" here={here} />
+        <Item href="/notes" nav="notes" label="Notes" here={here} />
 
         <div class="side-label">Mailbox</div>
         {MAILBOX.map(([href, nav, label, key]) => (

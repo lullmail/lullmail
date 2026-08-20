@@ -5,7 +5,7 @@
 // silently relocated a thread with no way back. Each verb here captures the
 // state it replaced and hands it to the toast.
 import { api, ApiError } from "./api";
-import type { BoardCard, Bucket, Counts, ListBucket, Message, Row } from "./types";
+import type { BoardCard, Bucket, Counts, ListBucket, Message, Row, StickyNote } from "./types";
 import {
   closeReader, counts, list, reader, rememberListScroll, resetSelection, showError, showToast,
 } from "./store";
@@ -230,6 +230,40 @@ export async function addCard(title: string, note: string): Promise<boolean> {
   } catch (e) {
     fail(e, "Could not add that");
     return false;
+  }
+}
+
+/* ---- stickies ---- */
+
+export async function createNote(x: number, y: number, text: string, color = 0): Promise<StickyNote | null> {
+  try {
+    return await api<StickyNote>("/notes", { body: { x, y, text, color } });
+  } catch (e) {
+    fail(e, "Could not stick that");
+    return null;
+  }
+}
+
+/** Silent by design: saving a position or a keystroke must not refetch the
+    whole wall (that would flicker and drop scroll). */
+export async function saveNote(id: string, patch: Partial<Pick<StickyNote, "x" | "y" | "text" | "color">>) {
+  try {
+    await api("/notes/" + encodeURIComponent(id), { body: patch });
+  } catch (e) {
+    fail(e, "Could not save that note");
+  }
+}
+
+export async function throwAwayNote(note: StickyNote, after: () => void) {
+  try {
+    await api("/notes/" + encodeURIComponent(note.id), { method: "DELETE" });
+    after();
+    showToast("Thrown away", async () => {
+      const again = await createNote(note.x, note.y, note.text, note.color);
+      if (again) after();
+    }, 8000);
+  } catch (e) {
+    fail(e, "Could not throw that away");
   }
 }
 

@@ -15,6 +15,8 @@ import { Gate } from "./ui/Gate";
 import { ListSkeleton } from "./ui/bits";
 import { TodayView } from "./views/TodayView";
 import { BoardView } from "./views/BoardView";
+import { NotesView } from "./views/NotesView";
+import { CalendarView } from "./views/CalendarView";
 import { BucketView } from "./views/BucketView";
 import { ScreenerView } from "./views/ScreenerView";
 import { PeopleView } from "./views/PeopleView";
@@ -50,6 +52,8 @@ function CurrentView() {
   switch (route.kind) {
     case "today": return <TodayView />;
     case "board": return <BoardView />;
+    case "notes": return <NotesView />;
+    case "calendar": return <CalendarView />;
     case "screener": return <ScreenerView />;
     case "people": return <PeopleView />;
     case "accounts": return <AccountsView />;

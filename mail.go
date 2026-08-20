@@ -135,6 +135,11 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	api.HandleFunc("POST /board/cards", a.handleBoardCard)
 	api.HandleFunc("POST /board/cards/{id}/done", a.handleBoardCardDone)
 	api.HandleFunc("POST /board/unpin", a.handleBoardUnpin)
+
+	api.HandleFunc("GET /notes", a.handleNotes)
+	api.HandleFunc("POST /notes", a.handleNoteCreate)
+	api.HandleFunc("POST /notes/{id}", a.handleNoteUpdate)
+	api.HandleFunc("DELETE /notes/{id}", a.handleNoteDelete)
 	api.HandleFunc("GET /people", a.handlePeople)
 	api.HandleFunc("GET /recent", a.handleRecent)
 	api.HandleFunc("GET /folder", a.handleFolder)

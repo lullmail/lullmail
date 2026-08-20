@@ -13,6 +13,8 @@ function hintsFor(): [string, string][] {
     return [["j k", "move"], ["↵", "open"], ["e", "done"], ["s", "snooze"], ["x", "select"]];
   }
   const kind = routeFor(path.value).kind;
+  if (kind === "notes") return [["2×click", "new note"], ["drag", "move"], ["⌘K", "jump"]];
+  if (kind === "calendar") return [["← →", "month"], ["t", "today"], ["⌘K", "jump"]];
   if (kind === "accounts" || kind === "people") return [["⌘K", "search & jump"], ["c", "compose"]];
   return [["⌘K", "search & jump"], ["c", "compose"], ["/", "search"]];
 }

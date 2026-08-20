@@ -23,6 +23,8 @@ const COUNTABLE = { imbox: 1, screener: 1, feed: 1 } as const;
 const NAV: NavItem[] = [
   ["/today", "today", "Today", null],
   ["/board", "board", "Board", null],
+  ["/calendar", "calendar", "Calendar", null],
+  ["/notes", "notes", "Notes", null],
   ["/", "imbox", "Inbox", "imbox"],
   ["/reading", "feed", "Reading", "feed"],
 ];

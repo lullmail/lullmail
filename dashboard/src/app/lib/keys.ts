@@ -12,6 +12,8 @@ import { splitFrom } from "./fmt";
 const GOTO: Record<string, string> = {
   t: "/today",
   b: "/board",
+  d: "/calendar",
+  n: "/notes",
   i: "/",
   s: "/screener",
   r: "/reading",
@@ -178,7 +180,7 @@ export const SHORTCUTS: [string, string][] = [
   ["r", "Reply"],
   ["c", "Compose"],
   ["1 2 3 0", "Screener: Inbox, Reading, Receipts, Block"],
-  ["g then t b i r z s c p", "Go to Today, Board, Inbox, Reading, Snoozed, Screener, Receipts, People"],
+  ["g then t b d n i r z s c p", "Go to Today, Board, Calendar, Notes, Inbox, Reading, Snoozed, Screener, Receipts, People"],
   ["/ or ⌘K", "Search, browse, jump — one palette"],
   ["Esc", "Dismiss"],
   ["?", "This list"],

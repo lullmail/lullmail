@@ -4,6 +4,8 @@ declare module "@neutron-build/core" {
     paths:
     | "/"
     | "/board"
+    | "/calendar"
+    | "/notes"
     | "/people"
     | "/reading"
     | "/receipts"

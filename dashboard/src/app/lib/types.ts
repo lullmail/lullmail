@@ -43,6 +43,15 @@ export interface Board {
   done: BoardCard[];
 }
 
+/** A sticky on the canvas. Color indexes the client-side palette. */
+export interface StickyNote {
+  id: string;
+  x: number;
+  y: number;
+  text: string;
+  color: number;
+}
+
 export interface Attachment {
   part_id: string;
   filename: string;

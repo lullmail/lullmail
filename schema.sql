@@ -81,5 +81,20 @@ CREATE INDEX IF NOT EXISTS board_cards_user ON board_cards (user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS board_cards_one_pin
   ON board_cards (user_id, thread_key) WHERE thread_key IS NOT NULL;
 
+-- Sticky notes: the spatial canvas. x/y are positions on the wall (px);
+-- color is an index into the client's curated palette. Notes are thoughts,
+-- not mail — they never touch buckets.
+CREATE TABLE IF NOT EXISTS sticky_notes (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  x integer NOT NULL DEFAULT 0,
+  y integer NOT NULL DEFAULT 0,
+  text text NOT NULL DEFAULT '',
+  color integer NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS sticky_notes_user ON sticky_notes (user_id);
+
 -- Phase 2+ tables (aliases, calendar, contacts, campaigns) land in later
 -- migrations, only when their phase ships. See SPEC.md sections 6.2-6.5.
