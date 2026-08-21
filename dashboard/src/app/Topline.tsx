@@ -8,23 +8,24 @@ import { MoreMenu } from "./ui/MoreMenu";
 // the Screener, because it is the only destination that is a to-do rather than
 // a place. In Classic the nav moves into the sidebar and this line keeps only
 // the wordmark and the actions.
-// [href, key, label, countKey]. The rule splits the daily loop from the places
-// mail files itself into — seven unfamiliar words in an even row give a
-// newcomer nothing to hold on to.
+// [href, key, label, countKey].
 type NavItem = [string, string, string, keyof typeof COUNTABLE | null];
 const COUNTABLE = { imbox: 1, screener: 1, feed: 1 } as const;
 
-// Four words, plus the Board experiment while it is under test. Receipts is
-// deliberately absent: nobody browses receipts, they search them — it lives
-// in the palette and on Today. The Screener joins only while senders are
-// waiting, because it is a queue you empty, not a place. Snoozed is off the
-// nav too: it is Inbox mail on a timer, not a destination — the board's
-// third column and the palette (g z) reach it.
-const NAV: NavItem[] = [
+// Two groups, one hairline between — different kinds of thing must not sit
+// in one undifferentiated row. The day's surfaces (your time and work), then
+// the mail's places (where filing happens). Receipts stays palette/Today-only
+// (nobody browses receipts), Snoozed is mail-on-a-timer not a destination
+// (board column + g z), and the Screener — a queue, not a place — joins the
+// mail group only while senders wait, its badge setting it apart.
+const DAY: NavItem[] = [
   ["/today", "today", "Today", null],
   ["/board", "board", "Board", null],
   ["/calendar", "calendar", "Calendar", null],
   ["/notes", "notes", "Notes", null],
+];
+
+const MAIL: NavItem[] = [
   ["/", "imbox", "Inbox", "imbox"],
   ["/reading", "feed", "Reading", "feed"],
 ];
@@ -70,12 +71,11 @@ export function Topline() {
 
         {!classic && (
           <nav class="nav">
-            {NAV.map((item) => <NavLink key={item[1]} item={item} here={here} />)}
+            {DAY.map((item) => <NavLink key={item[1]} item={item} here={here} />)}
+            <span class="nav-rule" />
+            {MAIL.map((item) => <NavLink key={item[1]} item={item} here={here} />)}
             {(screenerWaiting > 0 || here === "screener") && (
-              <>
-                <span class="nav-rule" />
-                <NavLink item={["/screener", "screener", "Screener", "screener"]} here={here} />
-              </>
+              <NavLink item={["/screener", "screener", "Screener", "screener"]} here={here} />
             )}
           </nav>
         )}

@@ -33,6 +33,10 @@ export function Sidebar() {
   return (
     <aside class="sidebar">
       <nav>
+        {/* Same split as the topline: the day's surfaces, then the mail's
+            places, then people. Labels make the groups explicit here because
+            a column has room for them. */}
+        <div class="side-label">Day</div>
         <Item href="/today" nav="today" label="Today" here={here} />
         <Item href="/board" nav="board" label="Board" here={here} />
         <Item href="/calendar" nav="calendar" label="Calendar" here={here} />
