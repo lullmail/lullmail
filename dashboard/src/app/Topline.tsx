@@ -8,24 +8,17 @@ import { MoreMenu } from "./ui/MoreMenu";
 // the Screener, because it is the only destination that is a to-do rather than
 // a place. In Classic the nav moves into the sidebar and this line keeps only
 // the wordmark and the actions.
-// [href, key, label, countKey].
+// The topline is mail's territory, and Today is the front door to everything
+// else. Three words most days — Today, then the mail places; the Screener
+// (a queue, not a place) joins only while senders wait, its badge setting it
+// apart. The other day surfaces (Board, Calendar, Notes) live one hop away:
+// Today's day row, the palette, g-keys, and Classic's labeled sidebar —
+// six-plus words in one row was an app-switcher pretending to be a nav.
 type NavItem = [string, string, string, keyof typeof COUNTABLE | null];
 const COUNTABLE = { imbox: 1, screener: 1, feed: 1 } as const;
 
-// Two groups, one hairline between — different kinds of thing must not sit
-// in one undifferentiated row. The day's surfaces (your time and work), then
-// the mail's places (where filing happens). Receipts stays palette/Today-only
-// (nobody browses receipts), Snoozed is mail-on-a-timer not a destination
-// (board column + g z), and the Screener — a queue, not a place — joins the
-// mail group only while senders wait, its badge setting it apart.
-const DAY: NavItem[] = [
+const NAV: NavItem[] = [
   ["/today", "today", "Today", null],
-  ["/board", "board", "Board", null],
-  ["/calendar", "calendar", "Calendar", null],
-  ["/notes", "notes", "Notes", null],
-];
-
-const MAIL: NavItem[] = [
   ["/", "imbox", "Inbox", "imbox"],
   ["/reading", "feed", "Reading", "feed"],
 ];
@@ -71,9 +64,9 @@ export function Topline() {
 
         {!classic && (
           <nav class="nav">
-            {DAY.map((item) => <NavLink key={item[1]} item={item} here={here} />)}
+            {NAV.slice(0, 1).map((item) => <NavLink key={item[1]} item={item} here={here} />)}
             <span class="nav-rule" />
-            {MAIL.map((item) => <NavLink key={item[1]} item={item} here={here} />)}
+            {NAV.slice(1).map((item) => <NavLink key={item[1]} item={item} here={here} />)}
             {(screenerWaiting > 0 || here === "screener") && (
               <NavLink item={["/screener", "screener", "Screener", "screener"]} here={here} />
             )}

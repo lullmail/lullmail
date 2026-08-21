@@ -136,6 +136,14 @@ export function TodayView() {
     <>
       <PageHead kicker="Today" title={today} sub={sub} />
 
+      {/* The day surfaces live here, not in the topline — Today is their
+          front door. Quiet text links, same register as the rows below. */}
+      <div class="day-row">
+        <a class="day-link" href="/board">Board</a>
+        <a class="day-link" href="/calendar">Calendar</a>
+        <a class="day-link" href="/notes">Notes</a>
+      </div>
+
       {loading && !data && <ListSkeleton rows={3} />}
       {error && <Empty title="The briefing didn't load." sub={error} />}
 

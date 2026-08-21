@@ -1204,3 +1204,13 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
   color: var(--accent-ink); background: var(--accent);
   padding: 2px 8px; border-radius: 99px;
 }
+/* The day surfaces' front door on Today — quiet text links, not nav items. */
+.day-row {
+  display: flex; gap: var(--sp-4); margin: 0 0 var(--sp-5);
+}
+.day-link {
+  font-size: var(--t-md); font-weight: 620; color: var(--ink-3);
+  text-decoration: none; padding-bottom: 2px;
+  border-bottom: 1px solid transparent;
+}
+.day-link:hover { color: var(--ink); border-bottom-color: var(--line-strong); }
