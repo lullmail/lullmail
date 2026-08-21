@@ -6,14 +6,26 @@ import type { Bucket, Counts, ListBucket, Message, Row, ScreenerSender } from ".
 
 /* ---- theme ---- */
 
-export const theme = signal<"light" | "dark">(
+export type Theme = "light" | "sepia" | "dark";
+
+/** Cycle order for the toggle; sepia sits between the two ends. */
+const THEMES: Theme[] = ["light", "sepia", "dark"];
+
+function initialTheme(): Theme {
+  if (typeof document === "undefined") return "light";
+  const attr = document.documentElement.getAttribute("data-theme");
+  if (attr === "sepia" || attr === "dark") return attr;
+  return "light";
+}
+
+export const theme = signal<Theme>(
   typeof document === "undefined"
     ? "light"
-    : ((document.documentElement.getAttribute("data-theme") as "light" | "dark") || "light")
+    : ((document.documentElement.getAttribute("data-theme") as Theme) || "light")
 );
 
 export function toggleTheme() {
-  const next = theme.value === "dark" ? "light" : "dark";
+  const next = THEMES[(THEMES.indexOf(initialTheme()) + 1) % THEMES.length];
   theme.value = next;
   document.documentElement.setAttribute("data-theme", next);
   try {

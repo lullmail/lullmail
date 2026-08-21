@@ -64,6 +64,7 @@ function CurrentView() {
 /** Keeps the tab title and favicon in step with what is actually waiting. */
 function TabBadge() {
   const count = attentionTotal.value;
+  // Sepia is a light ground; the favicon inverts only for true dark.
   const dark = theme.value === "dark";
   useEffect(() => {
     let link = document.querySelector<HTMLLinkElement>("link[rel='icon']");

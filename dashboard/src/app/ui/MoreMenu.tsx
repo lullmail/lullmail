@@ -19,6 +19,7 @@ export function MoreMenu() {
   }, [open]);
 
   const pick = (fn: () => void) => () => { setOpen(false); fn(); };
+  const themeLabel = theme.value === "dark" ? "Dark" : theme.value === "sepia" ? "Sepia" : "Light";
 
   return (
     <div style={{ position: "relative" }} ref={ref}>
@@ -33,7 +34,7 @@ export function MoreMenu() {
         <div class="menu menu-right" role="menu">
           <button class="menu-item" type="button" role="menuitem" onClick={pick(toggleTheme)}>
             <Icon name={theme.value === "dark" ? "sun" : "moon"} size={14} />
-            Appearance<span class="note">{theme.value === "dark" ? "Dark" : "Light"}</span>
+            Appearance<span class="note">{themeLabel}</span>
           </button>
           <button class="menu-item" type="button" role="menuitem" onClick={pick(toggleLayout)}>
             <Icon name={layout.value === "classic" ? "classic" : "document"} size={14} />

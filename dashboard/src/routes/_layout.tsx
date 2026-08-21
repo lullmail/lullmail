@@ -17,7 +17,7 @@ export function head() {
         id: "theme-init",
         content:
           "(function(){try{var t=localStorage.getItem('es-theme');" +
-          "if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light';}" +
+          "if(t!=='light'&&t!=='sepia'&&t!=='dark'){t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light';}" +
           "document.documentElement.setAttribute('data-theme',t);}catch(e){}})();",
       },
     ],

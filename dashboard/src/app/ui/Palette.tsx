@@ -129,9 +129,13 @@ export function Palette() {
     const settings: [Item, string][] = [
       [{
         key: "theme",
-        label: theme.value === "dark" ? "Switch to light theme" : "Switch to dark theme",
+        label: theme.value === "dark"
+          ? "Switch to sepia theme"
+          : theme.value === "sepia"
+            ? "Switch to light theme"
+            : "Switch to dark theme",
         run: () => { close(); toggleTheme(); },
-      }, "theme appearance dark light mode"],
+      }, "theme appearance sepia dark light mode"],
       [{
         key: "layout",
         label: layout.value === "classic"

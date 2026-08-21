@@ -85,6 +85,33 @@
   color-scheme: dark;
 }
 
+/* Sepia: paper-in-a-warm-room. Darker than light, nowhere near dark —
+   beige ground, grey-blue ink, burnt orange accent. No pure black
+   anywhere; shadows are brown, not charcoal. */
+:root[data-theme="sepia"] {
+  --bg: #e7dfd2;
+  --panel: #efe8db;
+  --raise: #e2d9c8;
+  --ink: #3d3833;
+  --ink-2: #6b635a;
+  --ink-3: #978d7f;
+  --line: #d8cfbe;
+  --line-strong: #c4b9a4;
+  --hover: #e0d7c6;
+  --sel: #e9dfc9;
+  --accent: #c25a24;
+  --accent-ink: #fdf8ef;
+  --accent-soft: #f3e0cd;
+  --danger: #a53c2c;
+  --danger-soft: #ecdccd;
+  --ok: #6c8a3f;
+  --scroll: #c9bfae;
+  --shadow-1: 0 1px 2px rgba(90, 74, 50, 0.08);
+  --shadow-3: 0 1px 2px rgba(90, 74, 50, 0.08), 0 24px 64px rgba(90, 74, 50, 0.22);
+  --veil: rgba(70, 58, 40, 0.34);
+  color-scheme: light;
+}
+
 /* ============================================================ base */
 
 * { box-sizing: border-box; }
@@ -934,6 +961,11 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
   --st0: #5f5624; --st1: #6e453b; --st2: #37536b;
   --st3: #3f5e39; --st4: #4e4166;
   --st-ink: #f1ecdd;
+}
+:root[data-theme="sepia"] {
+  --st0: #b3a15c; --st1: #b78371; --st2: #7f95a3;
+  --st3: #8a9c72; --st4: #97844f;
+  --st-ink: #2e2a20;
 }
 
 .notes-topline { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--sp-4); }
