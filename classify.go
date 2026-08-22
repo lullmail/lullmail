@@ -91,6 +91,11 @@ func (a *App) handleCounts(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
 		return
 	}
+	// Counts feed the nav numerals; sweep first so a returned snooze stops
+	// counting as snoozed the moment anything asks.
+	if err := a.sweepSnoozed(r.Context(), uid); err != nil {
+		a.log.Error("counts sweep failed", "err", err)
+	}
 	var imbox, screener, feed, paper, aside, later int64
 	err = a.db.QueryRowContext(r.Context(), `
 		SELECT
@@ -370,6 +375,13 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
 		return
+	}
+	// The Snoozed list (and the calendar fed by it) must never show a return
+	// date already past — sweep before listing.
+	if r.PathValue("bucket") == "snoozed" {
+		if err := a.sweepSnoozed(r.Context(), uid); err != nil {
+			a.log.Error("bucket sweep failed", "err", err)
+		}
 	}
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT m.thread_id, m.id, m.subject, m.from_addrs, m.received_at,

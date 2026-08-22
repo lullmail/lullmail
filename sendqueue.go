@@ -65,15 +65,27 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve the reply parent from the mirror so threading headers are
-	// built from the stored message, never trusted from the client.
+	// built from the stored message, never trusted from the client. The
+	// parent may live on any of the user's accounts — a reply must go out
+	// through the account the thread belongs to, not whichever connected
+	// first.
 	var outgoing *mail.Outgoing
 	if req.ReplyToID != "" {
-		parent, err := a.store.Envelope(r.Context(), mail.AccountID(mirror), mail.MessageID(req.ReplyToID))
+		var parentAcct string
+		err := a.db.QueryRowContext(r.Context(), `
+			SELECT m.account_id FROM mail_messages m
+			JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+			WHERE m.id = $2`, uid, req.ReplyToID).Scan(&parentAcct)
 		if err != nil {
 			writeProblem(w, http.StatusNotFound, "Parent Not Found", "reply_to_message_id does not resolve")
 			return
 		}
-		sender, from, ok := a.SMTPFor(r.Context(), mail.AccountID(mirror))
+		parent, err := a.store.Envelope(r.Context(), mail.AccountID(parentAcct), mail.MessageID(req.ReplyToID))
+		if err != nil {
+			writeProblem(w, http.StatusNotFound, "Parent Not Found", "reply_to_message_id does not resolve")
+			return
+		}
+		sender, from, ok := a.SMTPFor(r.Context(), mail.AccountID(parentAcct))
 		if !ok {
 			writeProblem(w, http.StatusPreconditionFailed, "No SMTP Credential", "cannot send for this account")
 			return

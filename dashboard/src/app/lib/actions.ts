@@ -7,7 +7,7 @@
 import { api, ApiError } from "./api";
 import type { BoardCard, Bucket, Counts, ListBucket, Message, Row, StickyNote } from "./types";
 import {
-  closeReader, counts, list, reader, rememberListScroll, resetSelection, showError, showToast,
+  closeReader, counts, list, openCompose, reader, rememberListScroll, resetSelection, showError, showToast,
 } from "./store";
 
 /** The one place bucket names are written. Storage values are unchanged. */
@@ -357,6 +357,12 @@ export async function sendMail(input: SendInput): Promise<boolean> {
       async () => {
         try {
           await api("/outbox/" + encodeURIComponent(res.queued), { method: "DELETE" });
+          // The toast promised the draft comes back — so it has to actually
+          // come back, seeded exactly as it was sent.
+          openCompose({
+            to: input.to, subject: input.subject, body: input.text,
+            replyToId: input.replyToId,
+          });
           showToast("Send cancelled — your draft is back");
         } catch (e) {
           fail(e, "Too late to cancel");
