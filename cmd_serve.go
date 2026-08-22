@@ -14,11 +14,6 @@ func serve() {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"ok"}`))
-	})
-
 	app := connectApp(cfg)
 	if app != nil {
 		app.mountAPI(mux)
@@ -26,6 +21,21 @@ func serve() {
 	} else {
 		apiUnavailable(mux, "no database configured")
 	}
+
+	// Always 200 on purpose: deploy health checks should restart on process
+	// death, not on a database blip — the API degrades to 503 instead and
+	// the dashboard says why. Registered after connectApp so it can report
+	// database state.
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		db := "down"
+		if app != nil {
+			if err := app.db.PingContext(r.Context()); err == nil {
+				db = "up"
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok","database":"` + db + `"}`))
+	})
 
 	dist, err := fs.Sub(assets, "dashboard/dist")
 	if err != nil {

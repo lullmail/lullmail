@@ -1,0 +1,35 @@
+# Self-host in one command. Bring the three env vars (see README):
+#   SECRET_KEY=... EMAILSOFT_TOKEN=... EMAILSOFT_USER_EMAIL=you@example.com docker compose up -d
+# Migrations (product schema + mail mirror) run automatically at boot.
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://emailsoft:emailsoft@db:5432/emailsoft?sslmode=disable
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY to a long random string}
+      EMAILSOFT_TOKEN: ${EMAILSOFT_TOKEN:?set EMAILSOFT_TOKEN to a long random token}
+      EMAILSOFT_USER_EMAIL: ${EMAILSOFT_USER_EMAIL:?set EMAILSOFT_USER_EMAIL to your address}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: emailsoft
+      POSTGRES_USER: emailsoft
+      POSTGRES_PASSWORD: emailsoft
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U emailsoft"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    restart: unless-stopped
+
+volumes:
+  pgdata:

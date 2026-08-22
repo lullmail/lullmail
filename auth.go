@@ -6,8 +6,9 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/json"
 	"net/http"
-	"strings"
 )
 
 func (a *App) requireToken(next http.Handler) http.Handler {
@@ -16,8 +17,10 @@ func (a *App) requireToken(next http.Handler) http.Handler {
 			writeProblem(w, http.StatusServiceUnavailable, "Auth Unconfigured", "EMAILSOFT_TOKEN is not set; API is locked")
 			return
 		}
-		h := r.Header.Get("Authorization")
-		if h != "Bearer "+a.cfg.APIToken {
+		got := r.Header.Get("Authorization")
+		// Constant-time: the token guards every route, so it must not leak
+		// by comparison timing either.
+		if subtle.ConstantTimeCompare([]byte(got), []byte("Bearer "+a.cfg.APIToken)) != 1 {
 			writeProblem(w, http.StatusUnauthorized, "Unauthorized", "bad or missing bearer token")
 			return
 		}
@@ -43,12 +46,10 @@ func (a *App) userID(ctx context.Context) (string, error) {
 	return id, err
 }
 
-func bearer(r *http.Request) string {
-	return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-}
-
 func writeProblem(w http.ResponseWriter, status int, title, detail string) {
+	// Marshal, never concatenate: provider errors carry quotes and
+	// newlines, which would emit malformed JSON to the client.
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(status)
-	w.Write([]byte(`{"title":"` + title + `","detail":"` + detail + `"}`))
+	json.NewEncoder(w).Encode(map[string]string{"title": title, "detail": detail})
 }
