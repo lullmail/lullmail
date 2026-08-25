@@ -11,6 +11,7 @@ services:
       SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY to a long random string}
       EMAILSOFT_TOKEN: ${EMAILSOFT_TOKEN:?set EMAILSOFT_TOKEN to a long random token}
       EMAILSOFT_USER_EMAIL: ${EMAILSOFT_USER_EMAIL:?set EMAILSOFT_USER_EMAIL to your address}
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
     depends_on:
       db:
         condition: service_healthy

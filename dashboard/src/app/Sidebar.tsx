@@ -53,6 +53,7 @@ export function Sidebar() {
         {/* Settings belongs at the foot, not filed under People. */}
         <div class="side-spacer" />
         <Item href="/settings/accounts" nav="accounts" label="Accounts" here={here} />
+        <Item href="/settings/security" nav="security" label="Security" here={here} />
       </nav>
     </aside>
   );

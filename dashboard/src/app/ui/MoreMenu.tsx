@@ -51,6 +51,11 @@ export function MoreMenu() {
             <Icon name="settings" size={14} />
             Accounts
           </button>
+          <button class="menu-item" type="button" role="menuitem"
+            onClick={pick(() => navigate("/settings/security"))}>
+            <Icon name="settings" size={14} />
+            Security
+          </button>
         </div>
       )}
     </div>

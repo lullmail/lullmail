@@ -31,6 +31,7 @@ const JUMPS: [string, string][] = [
   ["Snoozed", "/snoozed"],
   ["People", "/people"],
   ["Accounts", "/settings/accounts"],
+  ["Security", "/settings/security"],
 ];
 
 function titleCase(s: string): string {

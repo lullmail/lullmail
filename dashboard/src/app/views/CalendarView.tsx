@@ -20,6 +20,10 @@ function sameDay(a: Date, b: Date): boolean {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
 
+function dayKey(d: Date): string {
+  return d.getFullYear() + "-" + d.getMonth() + "-" + d.getDate();
+}
+
 /** Arrows move by whatever the zoom is showing. Month shifts clamp so
     Jan 31 -> Feb 28 instead of spilling into March. */
 function shiftDate(d: Date, zoom: Zoom, delta: number): Date {
@@ -78,8 +82,15 @@ export function CalendarView() {
     [data]
   );
   const someday = useMemo(() => (data || []).filter((r) => !r.snooze_until), [data]);
-
-  const returnsOn = (d: Date) => dated.filter((r) => sameDay(new Date(r.snooze_until!), d));
+  const returnsByDay = useMemo(() => {
+    const grouped = new Map<string, Row[]>();
+    for (const row of dated) {
+      const key = dayKey(new Date(row.snooze_until!));
+      grouped.set(key, [...(grouped.get(key) || []), row]);
+    }
+    return grouped;
+  }, [dated]);
+  const returnsOn = (d: Date) => returnsByDay.get(dayKey(d)) || [];
 
   const y = anchor.getFullYear();
   const m = anchor.getMonth();

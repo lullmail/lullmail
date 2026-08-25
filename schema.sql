@@ -10,6 +10,74 @@ CREATE TABLE IF NOT EXISTS users (
   display_name text NOT NULL DEFAULT '',
   created_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE users ADD COLUMN IF NOT EXISTS webauthn_handle bytea;
+
+-- Authentication material is server-side. Browser cookies contain only a
+-- random session or ceremony token; their hashes are what reach Postgres.
+CREATE TABLE IF NOT EXISTS auth_credentials (
+  id text PRIMARY KEY,
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name text NOT NULL DEFAULT 'Passkey',
+  credential_ciphertext text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  last_used_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS auth_credentials_user ON auth_credentials (user_id);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  id_hash text PRIMARY KEY,
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  last_seen_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NOT NULL,
+  user_agent text NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS auth_sessions_user ON auth_sessions (user_id, expires_at);
+
+CREATE TABLE IF NOT EXISTS auth_challenges (
+  id_hash text PRIMARY KEY,
+  user_id uuid REFERENCES users(id) ON DELETE CASCADE,
+  kind text NOT NULL CHECK (kind IN ('bootstrap','register','login')),
+  session_json text NOT NULL,
+  expires_at timestamptz NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth_recovery_codes (
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  code_hash text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  used_at timestamptz,
+  PRIMARY KEY (user_id, code_hash)
+);
+
+CREATE TABLE IF NOT EXISTS auth_totp (
+  user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  secret_ciphertext text NOT NULL,
+  enabled_at timestamptz
+);
+
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  endpoint_hash text PRIMARY KEY,
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  subscription_ciphertext text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS push_subscriptions_user ON push_subscriptions (user_id);
+
+CREATE TABLE IF NOT EXISTS push_deliveries (
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  message_id text NOT NULL,
+  delivered_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, message_id)
+);
+
+CREATE TABLE IF NOT EXISTS oauth_states (
+  state_hash text PRIMARY KEY,
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  provider text NOT NULL CHECK (provider IN ('gmail','graph')),
+  verifier text NOT NULL,
+  expires_at timestamptz NOT NULL
+);
 
 -- Per-sender Screener decision. One decision covers all future mail from the
 -- sender: allowed senders route straight to their bucket, unknown senders
@@ -56,11 +124,13 @@ CREATE TABLE IF NOT EXISTS email_accounts (
   smtp_port integer NOT NULL DEFAULT 587,
   cred_ciphertext text NOT NULL,
   backfill_days integer NOT NULL DEFAULT 90,
+  retention_days integer NOT NULL DEFAULT 0 CHECK (retention_days >= 0),
   sync_enabled boolean NOT NULL DEFAULT true,
   last_sync_at timestamptz,
   last_error text,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS retention_days integer NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS email_accounts_user ON email_accounts (user_id);
 

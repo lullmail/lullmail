@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "neutron-ts dev",
-    "build": "neutron-ts build --preset static"
+    "build": "neutron-ts build --preset static",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:e2e": "node e2e/auth.mjs"
   },
   "dependencies": {
     "@neutron-build/cli": "latest",
@@ -16,8 +19,11 @@
     "preact-render-to-string": "^6.5.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@preact/preset-vite": "^2.9.4",
+    "jsdom": "^30.0.1",
     "typescript": "^5.9.3",
-    "vite": "^6.0.7"
+    "vite": "^6.0.7",
+    "vitest": "^4.1.11"
   }
 }

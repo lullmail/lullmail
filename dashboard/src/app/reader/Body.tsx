@@ -3,7 +3,7 @@
 // stripped by default because a one-pixel image is how senders learn you
 // opened the mail.
 import { useEffect, useRef, useState } from "preact/hooks";
-import { allowImages, reader, theme } from "../lib/store";
+import { allowImages, allowSenderImages, imageSenders, reader, theme } from "../lib/store";
 import { Icon } from "../ui/Icon";
 
 const PLACEHOLDER =
@@ -13,6 +13,21 @@ const PLACEHOLDER =
 
 /** Strips remote `src`s only — `data:` and `cid:` are already local to the message. */
 export function stripRemoteImages(html: string): { html: string; blocked: number } {
+	if (typeof DOMParser !== "undefined") {
+		const doc = new DOMParser().parseFromString(html, "text/html");
+		let blocked = 0;
+		doc.querySelectorAll<HTMLImageElement>("img").forEach((image) => {
+			const remote = /^https?:/i.test(image.getAttribute("src") || "") || /https?:/i.test(image.getAttribute("srcset") || "");
+			if (!remote) return;
+			const holder = doc.createElement("span"); holder.innerHTML = PLACEHOLDER;
+			image.replaceWith(holder.firstElementChild!); blocked++;
+		});
+		doc.querySelectorAll<SVGImageElement>("svg image").forEach((image) => {
+			const href = image.getAttribute("href") || image.getAttribute("xlink:href") || "";
+			if (/^https?:/i.test(href)) { image.remove(); blocked++; }
+		});
+		return { html: doc.body.innerHTML, blocked };
+	}
   let blocked = 0;
   const out = html.replace(
     // Quoted and unquoted remote srcs alike; `data:` and `cid:` are untouched
@@ -24,6 +39,42 @@ export function stripRemoteImages(html: string): { html: string; blocked: number
     }
   );
   return { html: out, blocked };
+}
+
+const TRACKING_PARAMS = /^(utm_.+|mc_cid|mc_eid|mkt_tok|vero_id|oly_anon_id|oly_enc_id|rb_clickid)$/i;
+const REDIRECT_PARAMS = ["url", "u", "target", "redirect", "redirect_url", "dest", "destination", "to"];
+
+/** Removes common click-measurement wrappers and campaign query parameters.
+    Parsing is deliberately browser-native: malformed mail remains unchanged. */
+export function cleanLinks(html: string): string {
+  if (typeof DOMParser === "undefined") return html;
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  doc.querySelectorAll("script,object,embed,form,meta[http-equiv],base,iframe,frame,link,video,audio,source").forEach((node) => node.remove());
+	doc.querySelectorAll("style").forEach((node) => { if (/url\s*\(\s*['\"]?https?:/i.test(node.textContent || "")) node.remove(); });
+  doc.querySelectorAll<HTMLElement>("*").forEach((node) => {
+    for (const attr of [...node.attributes]) if (/^on/i.test(attr.name)) node.removeAttribute(attr.name);
+		if (/url\s*\(\s*['\"]?https?:/i.test(node.getAttribute("style") || "")) node.removeAttribute("style");
+		if (/^https?:/i.test(node.getAttribute("background") || "")) node.removeAttribute("background");
+  });
+  doc.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((anchor) => {
+    try {
+      let target = new URL(anchor.href);
+		if (!["http:", "https:", "mailto:"].includes(target.protocol)) { anchor.removeAttribute("href"); return; }
+      for (const key of REDIRECT_PARAMS) {
+        const nested = target.searchParams.get(key);
+        if (!nested) continue;
+        const decoded = new URL(nested, target);
+        if (decoded.protocol === "http:" || decoded.protocol === "https:") { target = decoded; break; }
+      }
+		if (target.protocol === "http:" || target.protocol === "https:") {
+			for (const key of [...target.searchParams.keys()]) if (TRACKING_PARAMS.test(key)) target.searchParams.delete(key);
+		}
+      anchor.href = target.toString();
+      anchor.rel = "noopener noreferrer";
+      anchor.target = "_blank";
+    } catch { anchor.removeAttribute("href"); }
+  });
+  return doc.body.innerHTML;
 }
 
 function cssVar(name: string): string {
@@ -48,10 +99,12 @@ function frameDoc(html: string): string {
   );
 }
 
-function HtmlBody({ html, messageId }: { html: string; messageId: string }) {
+function HtmlBody({ html, messageId, sender }: { html: string; messageId: string; sender: string }) {
   const ref = useRef<HTMLIFrameElement>(null);
-  const ok = reader.value.imagesOk.has(messageId);
-  const { html: safe, blocked } = ok ? { html, blocked: 0 } : stripRemoteImages(html);
+  const senderKey = sender.trim().toLowerCase();
+  const ok = reader.value.imagesOk.has(messageId) || imageSenders.value.has(senderKey);
+  const cleaned = cleanLinks(html);
+  const { html: safe, blocked } = ok ? { html: cleaned, blocked: 0 } : stripRemoteImages(cleaned);
   // Read as a signal, not off the DOM: the injected colours are literals baked
   // into srcdoc, so this component has to re-render when the theme changes.
   const themeKey = theme.value;
@@ -81,8 +134,9 @@ function HtmlBody({ html, messageId }: { html: string; messageId: string }) {
             them tells the sender you opened this.
           </span>
           <button class="btn btn-outline btn-sm" type="button" onClick={() => allowImages(messageId)}>
-            Load images
+            Load once
           </button>
+          {senderKey && <button class="btn btn-ghost btn-sm" type="button" onClick={() => allowSenderImages(senderKey)}>Always for sender</button>}
         </div>
       )}
       <iframe
@@ -136,9 +190,9 @@ function TextBody({ text }: { text: string }) {
   );
 }
 
-export function MessageBody({ html, text, messageId }: {
-  html?: string; text: string; messageId: string;
+export function MessageBody({ html, text, messageId, sender }: {
+  html?: string; text: string; messageId: string; sender: string;
 }) {
-  if (html) return <HtmlBody html={html} messageId={messageId} />;
+  if (html) return <HtmlBody html={html} messageId={messageId} sender={sender} />;
   return <TextBody text={text || "(body not fetched yet — sync in progress)"} />;
 }

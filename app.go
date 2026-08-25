@@ -7,19 +7,24 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"sync"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/neutron-build/neutron/mail"
 )
 
 type App struct {
-	cfg   *Config
-	db    *sql.DB
-	log   *slog.Logger
-	store *mail.PgStore
-	eng   *mail.Engine
-	svc   *mail.Service
-	sched *mail.Scheduler
-	sendq *sendQueue
+	cfg          *Config
+	db           *sql.DB
+	log          *slog.Logger
+	store        *mail.PgStore
+	eng          *mail.Engine
+	svc          *mail.Service
+	sched        *mail.Scheduler
+	sendq        *sendQueue
+	wa           *webauthn.WebAuthn
+	authMu       sync.Mutex
+	authAttempts map[string]authAttempt
 }
 
 func (a *App) Token(ctx context.Context, acct mail.AccountID) (mail.Credential, error) {
@@ -31,6 +36,9 @@ func (a *App) Token(ctx context.Context, acct mail.AccountID) (mail.Credential, 
 	).Scan(&provider, &address, &username, &host, &port, &ciphertext)
 	if err != nil {
 		return mail.Credential{}, err
+	}
+	if provider == "gmail" || provider == "graph" {
+		return a.oauthToken(ctx, provider, string(acct), address, ciphertext)
 	}
 	password, err := openSecret(a.cfg, ciphertext)
 	if err != nil {

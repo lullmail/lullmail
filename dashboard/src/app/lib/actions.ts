@@ -35,7 +35,7 @@ export function reload() {
 
 export async function refreshCounts() {
   try {
-    counts.value = await api<Counts>("/counts");
+    counts.value = await api<Counts>("/counts", { fresh: true });
   } catch {
     /* counts are decoration; a failure here must not disturb the view */
   }

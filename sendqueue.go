@@ -26,6 +26,8 @@ type sendQueue struct {
 	sends map[string]*pendingSend
 }
 
+type deliverFunc func(context.Context, *mail.Outgoing) error
+
 func newSendQueue() *sendQueue {
 	return &sendQueue{sends: map[string]*pendingSend{}}
 }
@@ -85,19 +87,19 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, http.StatusNotFound, "Parent Not Found", "reply_to_message_id does not resolve")
 			return
 		}
-		sender, from, ok := a.SMTPFor(r.Context(), mail.AccountID(parentAcct))
+		deliver, from, ok := a.deliveryFor(r.Context(), mail.AccountID(parentAcct))
 		if !ok {
-			writeProblem(w, http.StatusPreconditionFailed, "No SMTP Credential", "cannot send for this account")
+			writeProblem(w, http.StatusPreconditionFailed, "No Send Credential", "cannot send for this account")
 			return
 		}
 		outgoing = mail.ReplyTo(parent, from, req.Text)
-		a.enqueue(w, sender, outgoing)
+		a.enqueue(w, deliver, outgoing)
 		return
 	}
 
-	sender, from, ok := a.SMTPFor(r.Context(), mail.AccountID(mirror))
+	deliver, from, ok := a.deliveryFor(r.Context(), mail.AccountID(mirror))
 	if !ok {
-		writeProblem(w, http.StatusPreconditionFailed, "No SMTP Credential", "cannot send for this account")
+		writeProblem(w, http.StatusPreconditionFailed, "No Send Credential", "cannot send for this account")
 		return
 	}
 	outgoing = &mail.Outgoing{
@@ -106,10 +108,30 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		Subject: req.Subject,
 		Text:    req.Text,
 	}
-	a.enqueue(w, sender, outgoing)
+	a.enqueue(w, deliver, outgoing)
 }
 
-func (a *App) enqueue(w http.ResponseWriter, sender *mail.Sender, outgoing *mail.Outgoing) {
+func (a *App) deliveryFor(ctx context.Context, account mail.AccountID) (deliverFunc, mail.Address, bool) {
+	var provider, address string
+	if err := a.db.QueryRowContext(ctx, `SELECT provider,address FROM email_accounts WHERE mirror_account_id=$1`, string(account)).Scan(&provider, &address); err != nil {
+		return nil, mail.Address{}, false
+	}
+	if provider == "gmail" || provider == "graph" {
+		return func(ctx context.Context, outgoing *mail.Outgoing) error {
+			return a.sendOAuth(ctx, provider, string(account), outgoing)
+		}, mail.Address{Email: address}, true
+	}
+	sender, from, ok := a.SMTPFor(ctx, account)
+	if !ok {
+		return nil, mail.Address{}, false
+	}
+	return func(ctx context.Context, outgoing *mail.Outgoing) error {
+		_, err := sender.Send(ctx, outgoing)
+		return err
+	}, from, true
+}
+
+func (a *App) enqueue(w http.ResponseWriter, deliver deliverFunc, outgoing *mail.Outgoing) {
 	a.sendq.mu.Lock()
 	id := time.Now().Format("150405.000") + "-" + newID()[:6]
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -130,7 +152,7 @@ func (a *App) enqueue(w http.ResponseWriter, sender *mail.Sender, outgoing *mail
 			return
 		case <-time.After(undoWindow):
 		}
-		_, err := sender.Send(ctx, outgoing)
+		err := deliver(ctx, outgoing)
 		if err != nil {
 			a.log.Error("send failed", "err", err)
 		}

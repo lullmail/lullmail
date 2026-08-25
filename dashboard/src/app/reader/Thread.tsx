@@ -1,5 +1,6 @@
 import { useState } from "preact/hooks";
-import { closeReader, openCompose, reader } from "../lib/store";
+import { download } from "../lib/api";
+import { closeReader, openCompose, reader, showError } from "../lib/store";
 import { BUCKET_LABEL, markDone, markRead, moveTo, pinThreads, snooze } from "../lib/actions";
 import type { Bucket, ListBucket, Message, Row } from "../lib/types";
 import { countOf, fmtFull, splitFrom } from "../lib/fmt";
@@ -28,6 +29,7 @@ function rowFor(messages: Message[], threadId: string, bucket: ListBucket | null
 
 function ThreadMessage({ message }: { message: Message }) {
   const who = splitFrom(message.from);
+  const [exporting, setExporting] = useState(false);
   return (
     <article class="thread-msg">
       <div class="thread-msg-head">
@@ -38,9 +40,29 @@ function ThreadMessage({ message }: { message: Message }) {
           <span class="thread-msg-to">to {message.to || "you"}</span>
         </div>
         <span class="thread-msg-date">{fmtFull(message.received_at)}</span>
+        <button
+          class="btn-icon message-export" type="button"
+          title="Download original message (.eml)" aria-label="Download original message"
+          disabled={exporting}
+          onClick={async () => {
+            setExporting(true);
+            try {
+              await download(
+                "/messages/" + encodeURIComponent(message.id) + "/eml?account=" + encodeURIComponent(message.account),
+                "message.eml"
+              );
+            } catch (e) {
+              showError(e instanceof Error ? e.message : "Message export failed");
+            } finally {
+              setExporting(false);
+            }
+          }}
+        >
+          <Icon name="download" size={15} />
+        </button>
       </div>
       <div class="thread-msg-body">
-        <MessageBody html={message.html} text={message.body} messageId={message.id} />
+        <MessageBody html={message.html} text={message.body} messageId={message.id} sender={who.email} />
         <Attachments messageId={message.id} items={message.attachments || []} />
       </div>
     </article>

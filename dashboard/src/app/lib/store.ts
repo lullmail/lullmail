@@ -228,6 +228,14 @@ export const reader = signal<ReaderState>({
   threadId: null, bucket: null, loading: false, error: null, messages: [], imagesOk: new Set(),
 });
 
+const imageSenderKey = "es-image-senders";
+function storedImageSenders(): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try { return new Set(JSON.parse(localStorage.getItem(imageSenderKey) || "[]")); }
+  catch { return new Set(); }
+}
+export const imageSenders = signal<Set<string>>(storedImageSenders());
+
 /** Where the list was scrolled to when a thread was opened, so closing it does
     not dump you back at the top of a long bucket. */
 let listScroll = 0;
@@ -247,6 +255,13 @@ export function allowImages(messageId: string) {
   const next = new Set(reader.value.imagesOk);
   next.add(messageId);
   reader.value = { ...reader.value, imagesOk: next };
+}
+
+export function allowSenderImages(sender: string) {
+  const key = sender.trim().toLowerCase();
+  if (!key) return;
+  const next = new Set(imageSenders.value); next.add(key); imageSenders.value = next;
+  try { localStorage.setItem(imageSenderKey, JSON.stringify([...next])); } catch { /* privacy mode */ }
 }
 
 /* ---- compose ---- */

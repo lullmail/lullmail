@@ -31,6 +31,7 @@ const PATHS: Record<string, JSX.Element> = {
   undo: <><path d="M4 9h11a5 5 0 0 1 0 10h-6" /><path d="m8 5-4 4 4 4" /></>,
   pin: <><path d="M12 17v4" /><path d="M7 4h10l-1.5 6.5 2.5 3v1.5H6V13l2.5-3z" /></>,
   plus: <><path d="M12 5v14M5 12h14" /></>,
+  download: <><path d="M12 3v12M7 10l5 5 5-5" /><path d="M4 20h16" /></>,
 };
 
 export type IconName = keyof typeof PATHS;

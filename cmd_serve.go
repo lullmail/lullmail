@@ -57,6 +57,10 @@ func serve() {
 				name += "/index.html"
 			}
 			if _, err := fs.Stat(dist, name); err == nil {
+				if name == "service-worker.js" {
+					w.Header().Set("Cache-Control", "no-cache")
+					w.Header().Set("Service-Worker-Allowed", "/")
+				}
 				if strings.HasSuffix(name, ".html") {
 					serveHTML(w, r, dist, name)
 					return
@@ -76,11 +80,26 @@ func serve() {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           securityHeaders(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	log.Printf("email-soft listening on %s", addr)
 	log.Fatal(srv.ListenAndServe())
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Content-Security-Policy",
+			"default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "+
+				"script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data: blob: https:; connect-src 'self'; form-action 'self'")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // serveHTML writes an HTML file with the stylesheet injected. The Neutron

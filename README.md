@@ -25,8 +25,20 @@ RFC 4155) is a table-stakes feature, not a cancellation flow.
 - **Notes** — a spatial canvas of stickies. Thoughts, not tasks.
 - Keyboard-first (j/k, verbs, `g` jumps, one command palette), undo on every
   action, light/sepia/dark, no telemetry.
+- **Leave cleanly** — download one original message as EML or a whole account
+  as mailbox-by-mailbox mboxrd, with a manifest that discloses any local-mirror
+  fallback instead of silently dropping data.
+- Installable PWA with an explicit iOS path, account-bound offline reading,
+  resilient local drafts, a conservative replay queue for reversible filing
+  actions, and optional private web-push alerts.
+- Recovery-first security: discoverable passkeys with required user
+  verification, multiple-key management, printable one-use recovery codes,
+  optional TOTP, HttpOnly server sessions, revocation, rate limiting, and
+  provable self-serve deletion.
 
-Single-user v0 (see Status).
+Standalone and single-owner by design. Fylun may consume mail context and
+Akiroo may present a thin business-mail surface, but this repository remains
+the canonical mailbox and does not absorb campaign infrastructure.
 
 ## Quickstart (self-host)
 
@@ -34,12 +46,15 @@ Single-user v0 (see Status).
 SECRET_KEY=$(openssl rand -hex 32) \
 EMAILSOFT_TOKEN=$(openssl rand -hex 24) \
 EMAILSOFT_USER_EMAIL=you@example.com \
+PUBLIC_URL=http://localhost:8080 \
 docker compose up -d
 ```
 
-Then open `http://localhost:8080`, sign in with `EMAILSOFT_TOKEN`, and
-connect an IMAP/JMAP account (host, username, app password). Gmail and
-Outlook OAuth are on the roadmap but not shipped yet.
+Then open `http://localhost:8080`. Use `EMAILSOFT_TOKEN` once to create the
+first passkey and save the recovery codes; the token stops authenticating API
+requests as soon as that passkey exists. Connect IMAP/JMAP with an app
+password, or enable the included Google/Microsoft OAuth flows with provider
+credentials.
 
 Migrations run automatically at boot. To run them by hand: `email-soft migrate`.
 
@@ -48,16 +63,33 @@ Migrations run automatically at boot. To run them by hand: `email-soft migrate`.
 | Variable | Required | Notes |
 |---|---|---|
 | `DATABASE_URL` | yes | Postgres, e.g. `postgres://user:pass@host:5432/emailsoft` |
-| `SECRET_KEY` | for sending/connect | Seals provider credentials (AES-256-GCM). Changing it invalidates stored credentials. |
-| `EMAILSOFT_TOKEN` | for API access | The sign-in token; API returns 503 when unset. Long random string. |
-| `EMAILSOFT_USER_EMAIL` | for sending/connect | Bootstraps the single user; used for whose-turn analysis. |
+| `SECRET_KEY` | yes | Seals mail credentials, OAuth/passkey records, TOTP, and push subscriptions with AES-256-GCM. Changing it invalidates them. |
+| `EMAILSOFT_TOKEN` | first setup | One-time installation secret for registering the first passkey. It is not accepted after setup. |
+| `EMAILSOFT_USER_EMAIL` | recommended | Bootstraps the owner and drives whose-turn analysis; first-run setup can supply it. |
+| `PUBLIC_URL` | yes outside localhost | Exact browser origin, e.g. `https://mail.example.com`. WebAuthn and mutation-origin checks intentionally reject a different origin. Defaults to `http://localhost:8080`. |
+| `WEBAUTHN_RP_ID` | no | Relying-party domain; derived from `PUBLIC_URL`. |
 | `PORT` / `ADDR` | no | Defaults to `:8080`. |
+
+Optional Google: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`. Redirect URI:
+`$PUBLIC_URL/api/oauth/google/callback`. Required scopes are `gmail.modify`
+and `gmail.send` plus identity; public multi-user distribution still requires
+Google's restricted-scope verification/CASA process.
+
+Optional Microsoft: `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`, and
+`MICROSOFT_TENANT` (default `common`). Redirect URI:
+`$PUBLIC_URL/api/oauth/microsoft/callback`; delegated scopes are
+`User.Read`, `Mail.ReadWrite`, `Mail.Send`, and `offline_access`.
+
+Optional web push: `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and
+`VAPID_SUBJECT` (normally `mailto:you@example.com`). Generate a pair with any
+standards-compatible VAPID tool. Notifications are deliberately generic and
+never put subject/sender content on the lock screen.
 
 ## Develop
 
 ```
-go build ./... && go test ./...
-cd dashboard && npm i && npm run build   # dashboard is embedded via go:embed
+go build ./... && go test ./... && go vet ./...
+cd dashboard && npm ci && npm test && npm run typecheck && npm run build
 go run . serve
 ```
 
@@ -87,10 +119,15 @@ provider ──sync──> mail_* mirror ──classify──> buckets ──der
 
 ## Status
 
-Early. Shaped like a product, sized like a preview: single user with an
-env-token sign-in (passkeys are the next auth milestone), Gmail/Outlook OAuth
-pending verification paperwork, export/deletion controls in flight, no
-mobile apps. SPEC.md is the product truth; TASKS.md is the build order.
+Release-candidate standalone reader. The complete local product path is
+implemented: auth/recovery, IMAP/JMAP, provider-OAuth plumbing and refresh,
+sync/triage/read/send, responsive PWA/offline behavior, privacy controls,
+push, standards exports, retention, mailbox disconnect, and full-account
+deletion. Google/Microsoft public consent approval, a named-domain production
+deployment, and a real-provider credential smoke test are operator/release
+work—not missing code—and are listed explicitly in TASKS.md. Alias-domain and
+campaign-sending infrastructure are not part of this standalone mailbox;
+those belong with Akiroo if pursued.
 
 ## License
 

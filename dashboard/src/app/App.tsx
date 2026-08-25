@@ -1,5 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
-import { api, authed } from "./lib/api";
+import { lazy, Suspense } from "preact/compat";
+import { api, authed, authReady, refreshAuth } from "./lib/api";
 import { path, routeFor, startRouter } from "./lib/router";
 import { installKeys } from "./lib/keys";
 import { refreshCounts } from "./lib/actions";
@@ -12,18 +13,25 @@ import { Palette } from "./ui/Palette";
 import { Shortcuts } from "./ui/Shortcuts";
 import { Toast } from "./ui/Toast";
 import { Gate } from "./ui/Gate";
-import { ListSkeleton } from "./ui/bits";
+import { ListSkeleton, RouteSkeleton } from "./ui/bits";
 import { TodayView } from "./views/TodayView";
-import { BoardView } from "./views/BoardView";
-import { NotesView } from "./views/NotesView";
-import { CalendarView } from "./views/CalendarView";
 import { BucketView } from "./views/BucketView";
 import { ScreenerView } from "./views/ScreenerView";
-import { PeopleView } from "./views/PeopleView";
-import { AccountsView } from "./views/AccountsView";
 import { SearchView } from "./views/SearchView";
 import { Welcome } from "./views/Welcome";
 import { KeyHints } from "./ui/KeyHints";
+import { offline, startPWA } from "./lib/pwa";
+import { startOfflineData } from "./lib/offline";
+
+// The mailbox loop stays in the first bundle. Larger secondary workspaces and
+// settings load only when opened, keeping the gate and Inbox quick on modest
+// phones without changing the app's one-screen-at-a-time character.
+const BoardView = lazy(() => import("./views/BoardView").then((m) => ({ default: m.BoardView })));
+const NotesView = lazy(() => import("./views/NotesView").then((m) => ({ default: m.NotesView })));
+const CalendarView = lazy(() => import("./views/CalendarView").then((m) => ({ default: m.CalendarView })));
+const PeopleView = lazy(() => import("./views/PeopleView").then((m) => ({ default: m.PeopleView })));
+const AccountsView = lazy(() => import("./views/AccountsView").then((m) => ({ default: m.AccountsView })));
+const SecurityView = lazy(() => import("./views/SecurityView").then((m) => ({ default: m.SecurityView })));
 
 /** Classic needs three columns' worth of room; below that the preference is
     honoured by falling back rather than by cramming. */
@@ -48,7 +56,7 @@ function CurrentView() {
   const route = routeFor(path.value);
   // Nothing connected yet: six empty buckets read as "no mail", which is the
   // wrong answer. Settings still opens so they can actually connect one.
-  if (accountCount.value === 0 && route.kind !== "accounts") return <Welcome />;
+  if (accountCount.value === 0 && route.kind !== "accounts" && route.kind !== "security") return <Welcome />;
   switch (route.kind) {
     case "today": return <TodayView />;
     case "board": return <BoardView />;
@@ -57,8 +65,17 @@ function CurrentView() {
     case "screener": return <ScreenerView />;
     case "people": return <PeopleView />;
     case "accounts": return <AccountsView />;
+    case "security": return <SecurityView />;
     default: return <BucketView bucket={route.bucket || "imbox"} />;
   }
+}
+
+function columnClass(): string {
+  if (query.value.trim()) return "column";
+  const kind = routeFor(path.value).kind;
+  return kind === "board" || kind === "calendar" || kind === "notes"
+    ? "column workspace-column"
+    : "column";
 }
 
 /** Keeps the tab title and favicon in step with what is actually waiting. */
@@ -99,20 +116,20 @@ export default function App() {
     resolveLayout();
     startRouter();
     const offKeys = installKeys();
-    refreshCounts();
-    // Classification is idempotent; running it on boot means a freshly synced
-    // message is bucketed before the user notices it missing.
-    api("/classify", { method: "POST" }).then(refreshCounts).catch(() => {});
-    // Drives the first-run screen. Only a successful empty list means "no
-    // mailboxes"; an error must not be mistaken for one.
-    api<unknown[]>("/accounts")
-      .then((rows) => { accountCount.value = rows.length; })
-      .catch(() => {});
-    const tick = setInterval(refreshCounts, 45000);
-    return () => { offKeys(); clearInterval(tick); };
+    const offPWA = startPWA();
+    const offData = startOfflineData();
+    refreshAuth().catch(() => {});
+    const tick = setInterval(() => { if (authed.value) refreshCounts(); }, 45000);
+    return () => { offKeys(); offPWA(); offData(); clearInterval(tick); };
   }, []);
 
-  if (!mounted) {
+  useEffect(() => {
+    if (!mounted || !authed.value) return;
+    refreshCounts();
+    api<unknown[]>("/accounts").then((rows) => { accountCount.value = rows.length; }).catch(() => {});
+  }, [mounted, authed.value]);
+
+  if (!mounted || !authReady.value) {
     return (
       <div class="page">
         <Topline />
@@ -136,7 +153,7 @@ export default function App() {
       <div class="page classic">
         <Topline />
         <Sidebar />
-        <div class="list-pane"><div class="column"><CurrentView /></div></div>
+        <div class="list-pane"><div class="column"><Suspense fallback={<RouteSkeleton />}><CurrentView /></Suspense></div></div>
         <div class="reader-pane">
           {openThreadId ? (
             <Thread backTo={routeFor(path.value).title} variant="pane" />
@@ -164,7 +181,7 @@ export default function App() {
       {openThreadId ? (
         <Thread backTo={routeFor(path.value).title} />
       ) : (
-        <div class="column"><CurrentView /></div>
+        <div class={columnClass()}><Suspense fallback={<RouteSkeleton />}><CurrentView /></Suspense></div>
       )}
 
       <Overlays />
@@ -182,6 +199,7 @@ function Overlays() {
       {accountCount.value !== 0 && !reader.value.threadId && <KeyHints />}
       <Toast />
       <TabBadge />
+      {offline.value && <div class="offline-note" role="status">Offline — cached mail is available; safe actions are queued for reconnect.</div>}
     </>
   );
 }

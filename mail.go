@@ -64,12 +64,20 @@ func connectApp(cfg *Config) *App {
 	}
 
 	app := &App{
-		cfg:   cfg,
-		db:    db,
-		log:   slog.Default(),
-		store: store,
-		eng:   mail.NewEngine(store, slog.Default()),
-		sendq: newSendQueue(),
+		cfg:          cfg,
+		db:           db,
+		log:          slog.Default(),
+		store:        store,
+		eng:          mail.NewEngine(store, slog.Default()),
+		sendq:        newSendQueue(),
+		authAttempts: map[string]authAttempt{},
+	}
+	app.wa, err = newWebAuthn(cfg)
+	if err != nil {
+		store.Close()
+		db.Close()
+		log.Printf("app: webauthn setup failed — API disabled: %v", err)
+		return nil
 	}
 	app.svc = mail.NewService(store, app.eng)
 	app.svc.Resolve = newResolver()
@@ -108,6 +116,10 @@ func (a *App) startBackground() {
 				if err := a.sweepSnoozed(ctx, uid); err != nil {
 					a.log.Error("sweep failed", "err", err)
 				}
+				if err := a.applyRetention(ctx, uid); err != nil {
+					a.log.Error("retention sweep failed", "err", err)
+				}
+				a.sendPushForUser(ctx, uid)
 			}
 			<-t.C
 		}
@@ -116,6 +128,9 @@ func (a *App) startBackground() {
 
 func (a *App) mountAPI(mux *http.ServeMux) {
 	api := http.NewServeMux()
+	public := http.NewServeMux()
+	a.mountAuth(public)
+	a.mountOAuthCallbacks(public)
 
 	// neutron-mail surface, for the dashboard's use (bodies, raw search).
 	api.Handle("/mail/", http.StripPrefix("/mail", a.svc.Handler()))
@@ -125,6 +140,24 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	api.HandleFunc("GET /accounts/{id}", a.handleAccountItem)
 	api.HandleFunc("DELETE /accounts/{id}", a.handleAccountItem)
 	api.HandleFunc("POST /accounts/{id}", a.handleAccountItem)
+	api.HandleFunc("GET /accounts/{id}/export", a.handleAccountExport)
+	api.HandleFunc("GET /security", a.handleSecurity)
+	api.HandleFunc("POST /security/passkeys/begin", a.handlePasskeyRegisterBegin)
+	api.HandleFunc("POST /security/passkeys/finish", a.handlePasskeyRegisterFinish)
+	api.HandleFunc("DELETE /security/passkeys/{id}", a.handlePasskeyDelete)
+	api.HandleFunc("POST /security/recovery/regenerate", a.handleRecoveryRegenerate)
+	api.HandleFunc("POST /security/totp/begin", a.handleTOTPBegin)
+	api.HandleFunc("POST /security/totp/confirm", a.handleTOTPConfirm)
+	api.HandleFunc("DELETE /security/totp", a.handleTOTPDelete)
+	api.HandleFunc("GET /security/sessions", a.handleSessions)
+	api.HandleFunc("DELETE /security/sessions/{id}", a.handleSessions)
+	api.HandleFunc("DELETE /account", a.handleFullAccountDelete)
+	api.HandleFunc("GET /personal/export", a.handlePersonalExport)
+	api.HandleFunc("GET /push", a.handlePush)
+	api.HandleFunc("POST /push", a.handlePush)
+	api.HandleFunc("DELETE /push", a.handlePush)
+	api.HandleFunc("GET /oauth/status", a.handleOAuthStatus)
+	api.HandleFunc("POST /oauth/{provider}/start", a.handleOAuthStart)
 
 	api.HandleFunc("GET /screener", a.handleScreener)
 	api.HandleFunc("GET /counts", a.handleCounts)
@@ -150,6 +183,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	api.HandleFunc("GET /threads/{thread}", a.handleThread)
 	api.HandleFunc("POST /messages/{message}/action", a.handleMessageAction)
 	api.HandleFunc("GET /messages/{message}/attachment/{part}", a.handleAttachment)
+	api.HandleFunc("GET /messages/{message}/eml", a.handleMessageEML)
 	api.HandleFunc("POST /send", a.handleSend)
 	api.HandleFunc("DELETE /outbox/{id}", a.handleUndoSend)
 	api.HandleFunc("POST /classify", func(w http.ResponseWriter, r *http.Request) {
@@ -162,11 +196,14 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 			writeProblem(w, http.StatusInternalServerError, "Classify Failed", err.Error())
 			return
 		}
+		go a.sendPushForUser(context.Background(), uid)
 		writeJSON(w, map[string]any{"ok": true})
 	})
 
-	// One wrapper, every API route behind it.
-	mux.Handle("/api/", http.StripPrefix("/api", a.requireToken(api)))
+	// Auth ceremony/status routes are public; all product data is session
+	// protected. The bootstrap token stops working after the first passkey.
+	public.Handle("/", a.requireAuth(api))
+	mux.Handle("/api/", http.StripPrefix("/api", public))
 }
 
 // apiUnavailable keeps API paths JSON-shaped (RFC 7807) instead of letting

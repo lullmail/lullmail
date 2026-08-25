@@ -112,6 +112,7 @@ export interface Account {
   address: string;
   label: string;
   backfill_days: number;
+  retention_days: number;
   last_sync_at: string | null;
   last_error: string | null;
   message_count: number;

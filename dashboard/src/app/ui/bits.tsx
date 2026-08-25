@@ -60,6 +60,18 @@ export function ListSkeleton({ rows = 6 }: { rows?: number }) {
   );
 }
 
+/** A stable page silhouette while a secondary route's code arrives. */
+export function RouteSkeleton() {
+  return (
+    <div class="route-skeleton" aria-busy="true" aria-label="Loading page">
+      <div class="skel" style={{ height: 10, width: 72 }} />
+      <div class="skel" style={{ height: 34, width: "42%" }} />
+      <div class="skel" style={{ height: 13, width: "64%" }} />
+      <div class="route-skeleton-body"><ListSkeleton rows={4} /></div>
+    </div>
+  );
+}
+
 /** Highlights the first case-insensitive occurrence of `q` inside `text`. */
 export function Highlight({ text, q }: { text: string; q?: string }): JSX.Element {
   if (!q) return <>{text}</>;
