@@ -725,10 +725,19 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
   box-shadow: var(--shadow-3); animation: rise 0.2s var(--ease);
 }
 .gate-wide { max-width: 620px; }
-.gate-mark {
-  width: 44px; height: 44px; margin: 0 auto var(--sp-4); display: grid; place-items: center;
-  border-radius: 14px; color: var(--accent-ink); background: var(--accent); font-size: 21px;
+.gate-fan { position: relative; width: 92px; height: 58px; margin: 0 auto var(--sp-3); }
+.gate-fan-card {
+  position: absolute; top: 7px; width: 42px; height: 42px; display: grid; place-items: center;
+  border: 1px solid var(--line-strong); border-radius: 11px; color: var(--ink-2);
+  background: var(--panel); box-shadow: var(--shadow-2);
 }
+.gate-fan-card svg { width: 22px; height: 22px; }
+.gate-fan-mail { left: 3px; transform: rotate(-13deg); animation: gate-float-left 5s ease-in-out infinite; }
+.gate-fan-calendar { left: 25px; top: 0; z-index: 2; color: var(--accent); animation: gate-float-center 5s .35s ease-in-out infinite; }
+.gate-fan-board { right: 3px; transform: rotate(13deg); animation: gate-float-right 5s .7s ease-in-out infinite; }
+@keyframes gate-float-left { 50% { transform: translateY(-3px) rotate(-11deg); } }
+@keyframes gate-float-center { 50% { transform: translateY(-4px); } }
+@keyframes gate-float-right { 50% { transform: translateY(-3px) rotate(11deg); } }
 .gate-brand { font-family: var(--serif); font-size: 28px; font-weight: 700; letter-spacing: -0.022em; }
 .gate-brand::after { content: "."; color: var(--accent); }
 .gate h1 { margin: var(--sp-3) 0 0; font-family: var(--serif); font-size: 22px; letter-spacing: -0.015em; }
@@ -751,14 +760,10 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 .gate-trust { margin: var(--sp-5) 0 0; color: var(--ink-3); font-size: var(--t-xs); }
 .gate-switch { display: flex; justify-content: center; flex-wrap: wrap; gap: var(--sp-4); margin-top: var(--sp-4); }
 .gate-switch button { color: var(--ink-2); font-size: var(--t-xs); text-decoration: underline; text-underline-offset: 3px; }
-.gate-steps {
-  display: flex; align-items: center; justify-content: center; gap: var(--sp-3);
-  margin: var(--sp-4) 0 var(--sp-1);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: var(--t-xs); letter-spacing: 0.12em; color: var(--ink-3);
-}
-.gate-steps .cur { color: var(--ink); }
-.gate-steps i { width: 20px; height: 1px; background: var(--line-strong); }
+.gate-progress { display: flex; align-items: center; gap: var(--sp-3); margin: var(--sp-4) 0 var(--sp-1); color: var(--ink-3); font-size: var(--t-xs); }
+.gate-progress span { flex: none; }
+.gate-progress i { flex: 1; height: 2px; overflow: hidden; border-radius: 99px; background: var(--line); }
+.gate-progress b { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width .2s var(--ease); }
 .gate-step { animation: rise 0.18s var(--ease); }
 .gate-nav { display: flex; gap: var(--sp-2); margin-top: var(--sp-3); }
 .gate-nav .btn { flex: 1; width: auto; margin-top: 0; }

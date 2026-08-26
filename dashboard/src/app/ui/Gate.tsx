@@ -4,6 +4,32 @@ import { createPasskey, getPasskey } from "../lib/passkeys";
 
 type Mode = "passkey" | "recovery" | "totp";
 
+function GateFan() {
+  return (
+    <div class="gate-fan" aria-hidden="true">
+      <span class="gate-fan-card gate-fan-mail">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="5" width="18" height="14" rx="2" />
+          <path d="m4 7 8 6 8-6" />
+        </svg>
+      </span>
+      <span class="gate-fan-card gate-fan-calendar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="4" width="18" height="17" rx="2" />
+          <path d="M7 2v4M17 2v4M3 9h18" />
+          <path d="M8 13h2M14 13h2M8 17h2M14 17h2" />
+        </svg>
+      </span>
+      <span class="gate-fan-card gate-fan-board">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="M9 4v16M15 4v16M5.5 8h1M11.5 8h1M17.5 8h1M5.5 12h1M11.5 12h1" />
+        </svg>
+      </span>
+    </div>
+  );
+}
+
 export function Gate() {
   const status = authStatus.value;
   const [mode, setMode] = useState<Mode>("passkey");
@@ -37,37 +63,37 @@ export function Gate() {
   return (
     <div class="gate-wrap">
       <section class="gate" aria-labelledby="gate-title">
-        <div class="gate-mark" aria-hidden="true">✦</div>
+        <GateFan />
         <div class="gate-brand">email-soft</div>
         <h1 id="gate-title">Welcome back</h1>
-        <p class="gate-sub">Your mail stays behind a device-bound passkey.</p>
+        <p class="gate-sub">Use a passkey to open your mailbox.</p>
         {mode === "passkey" ? (
           <>
             <button class="btn btn-accent gate-primary" type="button" disabled={busy} onClick={signIn}>
-              {busy ? "Waiting for your device…" : "Sign in with a passkey"}
+              {busy ? "Waiting for your device…" : "Continue with a passkey"}
             </button>
-            <button class="gate-link" type="button" onClick={() => setMode("recovery")}>Use a recovery method</button>
+            <button class="gate-link" type="button" onClick={() => setMode("recovery")}>Can't use your passkey?</button>
           </>
         ) : (
           <form onSubmit={fallback}>
             <label class="sr-only" for="fallback-email">Account email</label>
-            <input id="fallback-email" type="email" placeholder="Account email (optional)" autocomplete="email" value={email}
+            <input id="fallback-email" type="email" placeholder="Email (optional)" autocomplete="email" value={email}
               onInput={(e) => setEmail((e.target as HTMLInputElement).value)} />
             <label class="sr-only" for="fallback-code">{mode === "totp" ? "Authenticator code" : "Recovery code"}</label>
             <input id="fallback-code" inputMode={mode === "totp" ? "numeric" : "text"}
               placeholder={mode === "totp" ? "6-digit authenticator code" : "Recovery code"}
               autocomplete="one-time-code" value={code} onInput={(e) => setCode((e.target as HTMLInputElement).value)} />
-            <button class="btn btn-accent" type="submit" disabled={busy || !code.trim()}>{busy ? "Checking…" : "Continue"}</button>
+            <button class="btn btn-accent" type="submit" disabled={busy || !code.trim()}>{busy ? "Checking…" : "Sign in"}</button>
             <div class="gate-switch">
               <button type="button" onClick={() => setMode(mode === "totp" ? "recovery" : "totp")}>
                 Use {mode === "totp" ? "a recovery code" : "an authenticator code"}
               </button>
-              <button type="button" onClick={() => setMode("passkey")}>Back to passkey</button>
+              <button type="button" onClick={() => setMode("passkey")}>Use a passkey instead</button>
             </div>
           </form>
         )}
         {error && <div class="gate-error" role="alert">{error}</div>}
-        <p class="gate-trust">HttpOnly sessions · user verification required · one-use recovery</p>
+        <p class="gate-trust">No password to remember. Recovery codes work once.</p>
       </section>
     </div>
   );
@@ -139,34 +165,32 @@ function SetupWizard({ status }: { status: AuthStatus }) {
   return (
     <div class="gate-wrap">
       <section class={"gate" + (step === 3 ? " gate-wide" : "")} aria-labelledby="setup-title">
-        <div class="gate-mark" aria-hidden="true">✦</div>
+        <GateFan />
         <div class="gate-brand">email-soft</div>
-        <div class="gate-steps" aria-hidden="true">
-          <span class={step === 0 ? "cur" : undefined}>01</span><i />
-          <span class={step === 1 ? "cur" : undefined}>02</span><i />
-          <span class={step === 2 ? "cur" : undefined}>03</span><i />
-          <span class={step === 3 ? "cur" : undefined}>04</span>
+        <div class="gate-progress" role="progressbar" aria-label={`Setup, step ${step + 1} of 4`} aria-valuemin={1} aria-valuemax={4} aria-valuenow={step + 1}>
+          <span>Step {step + 1} of 4</span>
+          <i><b style={{ width: `${(step + 1) * 25}%` }} /></i>
         </div>
         <div class="gate-step" key={step}>
           {step === 0 && (
             <>
-              <h1 id="setup-title">Make this mailbox yours</h1>
-              <p class="gate-sub">Create a passkey. Nothing reusable is stored in your browser.</p>
+              <h1 id="setup-title">Set up your mailbox</h1>
+              <p class="gate-sub">Create your account and passkey. It takes about a minute.</p>
               {status.detected_origin && (
-                <p class="gate-origin">Setting up at <b>{status.detected_origin}</b><br />Your passkey will only work at this address.</p>
+                <p class="gate-origin">You'll sign in at <b>{status.detected_origin}</b>.<br />Passkeys created here only work at this address.</p>
               )}
-              <button class="btn btn-accent gate-primary" type="button" onClick={() => goTo(1)}>Continue</button>
+              <button class="btn btn-accent gate-primary" type="button" onClick={() => goTo(1)}>Get started</button>
             </>
           )}
           {step === 1 && (
             <form onSubmit={enterToken}>
-              <h1 id="setup-title">The one-time token</h1>
-              <p class="gate-sub">A token was printed when this server first started. Enter it to prove you can reach the container.</p>
-              {!status.bootstrap_available && <div class="gate-error">Setup is unavailable — the one-time token may have expired. Restart the container to generate a fresh one.</div>}
-              <label class="sr-only" for="setup-token">One-time setup token</label>
-              <input id="setup-token" type="password" placeholder="One-time setup token" autocomplete="off" autofocus value={token}
+              <h1 id="setup-title">Enter your setup code</h1>
+              <p class="gate-sub">email-soft added a one-time code to your container logs when it started. Paste it here to confirm this is your server.</p>
+              {!status.bootstrap_available && <div class="gate-error">This setup code has expired. Restart the container to create a new one.</div>}
+              <label class="sr-only" for="setup-token">Setup code</label>
+              <input id="setup-token" type="password" placeholder="Setup code" autocomplete="off" autofocus value={token}
                 onInput={(e) => setToken((e.target as HTMLInputElement).value)} />
-              <p class="gate-hint">See it again with <code>docker compose logs app</code>. It expires 24 hours after startup.</p>
+              <p class="gate-hint">Open your platform's container logs to find it. With Docker Compose, run <code>docker compose logs app</code>. The code expires after 24 hours.</p>
               <div class="gate-nav">
                 <button class="btn btn-outline" type="button" onClick={() => goTo(0)}>Back</button>
                 <button class="btn btn-accent" type="submit" disabled={!status.bootstrap_available}>Continue</button>
@@ -176,16 +200,16 @@ function SetupWizard({ status }: { status: AuthStatus }) {
           )}
           {step === 2 && (
             <form onSubmit={setUp}>
-              <h1 id="setup-title">Owner and passkey</h1>
-              <p class="gate-sub">The email names the owner. The passkey becomes the only way in.</p>
+              <h1 id="setup-title">Create your account</h1>
+              <p class="gate-sub">Enter your email, then create a passkey with your fingerprint, face, or device PIN.</p>
               <label class="sr-only" for="setup-email">Owner email</label>
-              <input id="setup-email" type="email" placeholder="Owner email" autocomplete="email" value={email}
+              <input id="setup-email" type="email" placeholder="Your email" autocomplete="email" value={email}
                 onInput={(e) => setEmail((e.target as HTMLInputElement).value)} />
-              <p class="gate-hint">You'll confirm with your device — fingerprint, face, or PIN.</p>
+              <p class="gate-hint">You'll use this passkey whenever you sign in. Recovery codes are available if you lose access to it.</p>
               <div class="gate-nav">
                 <button class="btn btn-outline" type="button" disabled={busy} onClick={() => goTo(1)}>Back</button>
                 <button class="btn btn-accent" type="submit" disabled={busy || !status.bootstrap_available}>
-                  {busy ? "Creating passkey…" : "Create passkey"}
+                  {busy ? "Creating your passkey…" : "Create my passkey"}
                 </button>
               </div>
               {error && <div class="gate-error" role="alert">{error}</div>}
@@ -194,17 +218,17 @@ function SetupWizard({ status }: { status: AuthStatus }) {
           {step === 3 && (
             <>
               <h1 id="setup-title">Save your recovery codes</h1>
-              <p class="gate-sub">These are shown once. Print or save them somewhere outside this device.</p>
+              <p class="gate-sub">Keep these somewhere safe. Each code can sign you in once if your passkey isn't available.</p>
               <div class="recovery-grid">{recoveryCodes.map((item) => <code key={item}>{item}</code>)}</div>
               <div class="gate-code-actions">
-                <button class="btn btn-outline" type="button" onClick={downloadCodes}>Download codes</button>
-                <button class="btn btn-outline" type="button" onClick={copyAll}>{copied ? "Copied" : "Copy all"}</button>
+                <button class="btn btn-outline" type="button" onClick={downloadCodes}>Download</button>
+                <button class="btn btn-outline" type="button" onClick={copyAll}>{copied ? "Copied" : "Copy"}</button>
               </div>
-              <button class="btn btn-accent" type="button" onClick={() => refreshAuth()}>I saved them — continue</button>
+              <button class="btn btn-accent" type="button" onClick={() => refreshAuth()}>I've saved them</button>
             </>
           )}
         </div>
-        <p class="gate-trust">HttpOnly sessions · user verification required · one-use recovery</p>
+        <p class="gate-trust">No password to remember. Recovery codes work once.</p>
       </section>
     </div>
   );

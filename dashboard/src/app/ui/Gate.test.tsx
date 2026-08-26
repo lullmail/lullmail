@@ -25,7 +25,7 @@ describe("first-run setup", () => {
     render(<Gate />, host);
 
     act(() => host.querySelector<HTMLButtonElement>("button")!.click());
-    expect(host.textContent).toContain("The one-time token");
+    expect(host.textContent).toContain("Enter your setup code");
 
     const token = host.querySelector<HTMLInputElement>("#setup-token")!;
     act(() => {
@@ -34,7 +34,7 @@ describe("first-run setup", () => {
     });
     act(() => host.querySelector<HTMLFormElement>("form")!.requestSubmit());
 
-    expect(host.textContent).toContain("Owner and passkey");
+    expect(host.textContent).toContain("Create your account");
     expect(host.querySelector("#setup-email")).not.toBeNull();
   });
 });

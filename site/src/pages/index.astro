@@ -4,8 +4,8 @@ import "@fontsource-variable/newsreader";
 import "@fontsource-variable/newsreader/wght-italic.css";
 import "../styles/global.css";
 
-const title = "email-soft — Mail in. Life out.";
-const description = "A briefing-first mail client that screens new senders once, gives each day an ending, and lets unfinished mail return when it matters.";
+const title = "email-soft — Email doesn't need your whole day";
+const description = "A focused email client that screens new senders, shows what needs you today, and brings unfinished mail back at the right time.";
 ---
 
 <!doctype html>
@@ -50,34 +50,34 @@ const description = "A briefing-first mail client that screens new senders once,
           <div class="hero-grain" aria-hidden="true"></div>
 
           <div class="hero-copy">
-            <p class="overline">A briefing-first client for the mailbox you already have.</p>
-            <h1 id="hero-title"><span>Mail in.</span><em>Life out.</em></h1>
-            <p class="hero-lede">Screen new senders once. Start with the few things that need you. Let everything unfinished return on its day.</p>
-            <a class="arrow-link light" href="#product">See the daily loop <span aria-hidden="true">↓</span></a>
+            <p class="overline">A focused email client for the mailbox you already use.</p>
+            <h1 id="hero-title"><span>Email doesn't need </span><em>your whole day.</em></h1>
+            <p class="hero-lede">Choose who gets through. See what actually needs you. Set the rest aside until the right day.</p>
+            <a class="arrow-link light" href="#product">See how it works <span aria-hidden="true">↓</span></a>
           </div>
 
           <div class="hero-meter" aria-hidden="true">
-            <span>Unsorted</span>
+            <span>Incoming</span>
             <i><b></b></i>
-            <span>Clear</span>
+            <span>Handled</span>
           </div>
         </div>
       </section>
 
       <section class="product" id="product" aria-labelledby="product-title">
         <header class="section-lead">
-          <p class="overline dark">One quiet loop</p>
-          <h2 id="product-title">Your inbox can have an ending.</h2>
-          <p>Email arrives continuously. Your attention does not have to. email-soft turns the mailbox into a finite briefing, then gets out of the way.</p>
+          <p class="overline dark">How it works</p>
+          <h2 id="product-title">A short list, not an endless inbox.</h2>
+          <p>email-soft shows you what needs a decision today. Handle it, set it aside, or leave it for later without losing track of anything.</p>
         </header>
 
         <div class="proof-list">
           <article class="proof">
             <div class="proof-copy">
               <span class="proof-index">01</span>
-              <h3>Screen once.</h3>
-              <p>Unknown senders wait outside the Inbox. Choose Inbox, Reading, Receipts, or Block once; every future message follows that rule until you change it.</p>
-              <small>One decision per sender, not per message.</small>
+              <h3>Choose who gets through.</h3>
+              <p>New senders wait for your approval. Send them to Inbox, Reading, or Receipts, or block them. Future messages follow the same choice until you change it.</p>
+              <small>No more sorting the same sender again and again.</small>
             </div>
 
             <div class="app-frame" role="img" aria-label="The Screener showing a new sender waiting for a routing decision">
@@ -109,9 +109,9 @@ const description = "A briefing-first mail client that screens new senders once,
           <article class="proof reverse">
             <div class="proof-copy">
               <span class="proof-index">02</span>
-              <h3>Start finite.</h3>
-              <p>Today shows what needs you, who you are waiting on, and what arrived quietly. When there is nothing left, it says so.</p>
-              <small>Board, Calendar, and Notes remain one quiet step away.</small>
+              <h3>Know what needs you.</h3>
+              <p>Today brings together the messages that need a reply, the people you are waiting on, and anything else worth seeing. When you are done, it is done.</p>
+              <small>No hidden queue asking for one more refresh.</small>
             </div>
 
             <div class="app-frame today-frame" role="img" aria-label="The Today briefing showing two messages that need attention and one person being waited on">
@@ -124,7 +124,7 @@ const description = "A briefing-first mail client that screens new senders once,
                 <div class="today-heading">
                   <small>Today</small>
                   <h4>Tuesday, August 25</h4>
-                  <p>2 things need you. This is the whole picture.</p>
+                  <p>2 things need you. That's everything for today.</p>
                 </div>
                 <div class="surface-nav"><span>Board</span><span>Calendar</span><span>Notes</span></div>
                 <div class="brief-title"><b>Needs you</b><span>2</span></div>
@@ -139,9 +139,9 @@ const description = "A briefing-first mail client that screens new senders once,
           <article class="proof">
             <div class="proof-copy">
               <span class="proof-index">03</span>
-              <h3>Let time hold it.</h3>
-              <p>Snooze a thread until tomorrow, next week, or someday. It leaves the Inbox completely and returns exactly when promised.</p>
-              <small>Unfinished does not have to mean visible.</small>
+              <h3>Come back to it later.</h3>
+              <p>Set a thread aside until tomorrow, next week, or a date you choose. It leaves your Inbox and comes back when you are ready for it.</p>
+              <small>Out of sight without being forgotten.</small>
             </div>
 
             <div class="return-frame" role="img" aria-label="A mail return timeline showing a final draft scheduled to return Friday at 9 AM">
@@ -161,24 +161,24 @@ const description = "A briefing-first mail client that screens new senders once,
 
       <section class="trust" id="trust" aria-labelledby="trust-title">
         <header class="trust-intro">
-          <p class="overline dark">Your mail remains yours</p>
-          <h2 id="trust-title">The exit is part of the product.</h2>
-          <p>email-soft processes readable mail to sync and organize it. It does not use your messages for ads, telemetry, or model training.</p>
+          <p class="overline dark">Privacy without fine print</p>
+          <h2 id="trust-title">Your mail stays yours.</h2>
+          <p>email-soft reads your mail only to sync and organize it for you. Your messages are never used for ads, tracking, or model training.</p>
         </header>
 
         <div class="trust-list">
-          <article><span>01</span><h3>Read without reporting back.</h3><p>Remote images are blocked by default. Common redirect wrappers and campaign parameters are removed.</p></article>
-          <article><span>02</span><h3>Credentials stay sealed.</h3><p>Account credentials are encrypted at rest with AES-256-GCM. Passkeys, recovery codes, TOTP, and session revocation are built in.</p></article>
-          <article><span>03</span><h3>Leave in standard formats.</h3><p>Download individual messages as EML or a complete account as mailbox-by-mailbox mboxrd. Delete the local account state yourself.</p></article>
-          <article><span>04</span><h3>Run the whole thing yourself.</h3><p>One Go binary and Postgres. The complete core is MIT licensed, with no telemetry and no required cloud service.</p></article>
+          <article><span>01</span><h3>Tracking stays out.</h3><p>Remote images are blocked by default. Common tracking links and campaign parameters are removed.</p></article>
+          <article><span>02</span><h3>Your secrets stay encrypted.</h3><p>Account credentials are encrypted at rest. Passkeys, recovery codes, authenticator codes, and session revocation are built in.</p></article>
+          <article><span>03</span><h3>Your mail comes with you.</h3><p>Download individual messages as EML or export a complete account in the standard mboxrd format. Delete your local data whenever you want.</p></article>
+          <article><span>04</span><h3>Run it on your own server.</h3><p>The complete core is one Go binary and Postgres, MIT licensed, with no telemetry and no required cloud service.</p></article>
         </div>
       </section>
 
       <section class="availability" id="availability" aria-labelledby="availability-title">
         <div class="availability-copy">
-          <p class="overline">Private preview · Release candidate</p>
-          <h2 id="availability-title">Mail should make room for life.</h2>
-          <p>The standalone product path is complete. A named-domain deployment, public provider approval, and final real-provider verification remain before launch.</p>
+          <p class="overline">Private preview</p>
+          <h2 id="availability-title">Private for now.</h2>
+          <p>The core product works. We are testing it with real accounts and finishing the public provider integrations before opening access more widely.</p>
         </div>
         <div class="availability-meta">
           <span>IMAP + JMAP</span><span>One owner</span><span>MIT licensed</span><span>Self-hostable</span>
