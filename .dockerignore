@@ -1,6 +1,8 @@
 node_modules
 dashboard/node_modules
 dashboard/dist
+site/node_modules
+site/dist
 mail-engine/cmd
 output
 .DS_Store

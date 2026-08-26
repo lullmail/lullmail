@@ -93,6 +93,15 @@ cd dashboard && npm ci && npm test && npm run typecheck && npm run build
 go run . serve
 ```
 
+The private marketing-site prototype is a separate Astro build:
+
+```
+cd site && npm install && npm run dev
+```
+
+It uses `email-soft` only as a working label. The product name and public
+domain remain intentionally undecided.
+
 A local mail world for testing (GreenMail — real IMAP/SMTP against fake
 accounts):
 

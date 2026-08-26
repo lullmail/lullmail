@@ -1,0 +1,329 @@
+---
+import "../styles/global.css";
+
+const title = "email-soft — Mail in. Life out.";
+const description = "A private, briefing-first mail client that screens the noise and turns unfinished email into a calm day.";
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#17191f" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>{title}</title>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="site-head" data-header>
+      <a class="brand" href="#top" aria-label="email-soft home">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i></span>
+        <span>email-soft</span>
+      </a>
+      <nav aria-label="Main navigation">
+        <a href="#shift">The shift</a>
+        <a href="#day">Your day</a>
+        <a href="#trust">Trust</a>
+      </nav>
+      <a class="head-cta" href="#preview"><span class="head-cta-long">Private preview</span><span class="head-cta-short">Preview</span> <span aria-hidden="true">↗</span></a>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top" aria-labelledby="hero-title">
+        <canvas class="wind-canvas" data-wind aria-hidden="true"></canvas>
+        <div class="sky-grain" aria-hidden="true"></div>
+        <div class="sun" aria-hidden="true"></div>
+        <svg class="horizon" viewBox="0 0 1600 720" preserveAspectRatio="none" aria-hidden="true">
+          <path class="mountain far" d="M0 500 165 390l112 70 172-160 172 153 170-120 146 121 169-197 214 213 120-80 160 117v213H0Z" />
+          <path class="mountain near" d="M0 548 166 477l139 56 161-126 145 95 160-83 130 113 189-174 208 164 116-73 186 104v167H0Z" />
+          <path class="field" d="M0 558c208-35 359 26 570 1 221-26 370-102 585-60 145 29 283 84 445 58v163H0Z" />
+          <path class="grass grass-a" d="M0 617c273-64 504-11 744-10 294 2 528-91 856-10v123H0Z" />
+          <path class="grass grass-b" d="M0 654c316-42 533 17 813 5 247-10 521-62 787 0v61H0Z" />
+        </svg>
+
+        <div class="figure" aria-hidden="true">
+          <span class="figure-hair"></span>
+          <span class="figure-head"></span>
+          <span class="figure-neck"></span>
+          <span class="figure-body"></span>
+          <span class="figure-coat"></span>
+          <span class="figure-scarf"></span>
+        </div>
+
+        <div class="hero-copy">
+          <p class="eyebrow"><span>01</span> A softer operating system for email</p>
+          <h1 id="hero-title">MAIL IN.<br /><em>LIFE OUT.</em></h1>
+          <p class="hero-lede">Screen the noise. See what needs you. Let unfinished things find their own way back.</p>
+          <div class="hero-actions">
+            <a class="button primary" href="#shift">Enter the calm <span aria-hidden="true">↓</span></a>
+            <button class="soundless" type="button" data-gust>Send a gust <span aria-hidden="true">→</span></button>
+          </div>
+        </div>
+
+        <div class="hero-caption" aria-hidden="true">
+          <span>WIND FROM WSW</span><b></b><span>THE MAIL KEEPS MOVING</span>
+        </div>
+      </section>
+
+      <section class="manifesto reveal" id="shift">
+        <div class="manifesto-index">A / THE SHIFT</div>
+        <div class="manifesto-copy">
+          <p class="oversize">Your inbox was never supposed to become a second job.</p>
+          <p class="manifesto-note">So this one gets quieter the longer you use it. People are screened once. The day is briefed once. Everything else waits somewhere honest.</p>
+        </div>
+        <div class="orbit" aria-hidden="true">
+          <span class="orbit-ring ring-a"></span>
+          <span class="orbit-ring ring-b"></span>
+          <span class="orbit-core">YOU</span>
+          <span class="orbit-label label-a">PEOPLE</span>
+          <span class="orbit-label label-b">TIME</span>
+          <span class="orbit-label label-c">MAIL</span>
+        </div>
+      </section>
+
+      <section class="screen-scene reveal" aria-labelledby="screen-title">
+        <div class="scene-copy">
+          <p class="section-kicker">The first boundary</p>
+          <h2 id="screen-title">Nobody walks in<br />without knocking.</h2>
+          <p>New senders wait outside. You decide once where their mail belongs, and the rule follows them from then on.</p>
+          <div class="scene-stat"><strong>1</strong><span>decision per person,<br />not per message</span></div>
+        </div>
+        <div class="screen-stage" aria-label="Illustration of the sender screening interface">
+          <div class="stage-wind wind-one"></div>
+          <div class="stage-wind wind-two"></div>
+          <article class="sender-card card-back">
+            <span class="avatar avocado">N</span>
+            <div><b>Nucleon Weekly</b><small>2 editions waiting</small></div>
+          </article>
+          <article class="sender-card card-mid">
+            <span class="avatar blue">P</span>
+            <div><b>Parcel Service</b><small>1 delivery update</small></div>
+          </article>
+          <article class="sender-card card-front">
+            <span class="avatar coral">S</span>
+            <div class="sender-person"><b>Sarah Chen</b><small>Contract redlines before Friday</small></div>
+            <div class="sender-actions"><span>Inbox</span><span>Reading</span><span>Receipts</span><span>Block</span></div>
+          </article>
+          <p class="stage-caption">THE SCREENER / YOUR DOOR, YOUR RULES</p>
+        </div>
+      </section>
+
+      <section class="day" id="day" aria-labelledby="day-title">
+        <div class="day-head reveal">
+          <p class="section-kicker">Not six apps. One day.</p>
+          <h2 id="day-title">The work your mail<br />was trying to become.</h2>
+          <p>Mail is the spine. Time, tasks, and notes are views over what is already happening.</p>
+        </div>
+
+        <div class="day-track" data-track>
+          <article class="surface today-surface reveal">
+            <header><span>01 / TODAY</span><b>Tuesday, August 25</b></header>
+            <div class="surface-body today-ui">
+              <div class="ui-title"><span>NEEDS YOU</span><strong>2</strong></div>
+              <div class="mail-line hot"><i></i><div><b>Sarah Chen</b><span>Contract redlines before Friday</span></div><time>9:12</time></div>
+              <div class="mail-line"><i></i><div><b>Micah Evans</b><span>Are we still on for the coast?</span></div><time>Yesterday</time></div>
+              <div class="ui-title quiet"><span>YOU'RE WAITING</span><strong>1</strong></div>
+              <div class="waiting-line"><b>Nadia Flores</b><span>Draft review</span><em>4 days</em></div>
+            </div>
+            <footer>A finite briefing. A real ending.</footer>
+          </article>
+
+          <article class="surface board-surface reveal">
+            <header><span>02 / BOARD</span><b>The board your mail writes</b></header>
+            <div class="surface-body board-ui">
+              <div class="board-col"><small>NEEDS YOU</small><div class="task cream">Send final draft<b>Sarah / Friday</b></div><div class="task coral-task">Book the coast train<b>Personal</b></div></div>
+              <div class="board-col"><small>WAITING</small><div class="task ash">Draft review<b>4 days quiet</b></div></div>
+              <div class="board-col"><small>SNOOZED</small><div class="task blue-task">Renewal notice<b>Back Thursday</b></div></div>
+            </div>
+            <footer>The todo list that fills and clears itself.</footer>
+          </article>
+
+          <article class="surface calendar-surface reveal">
+            <header><span>03 / CALENDAR</span><b>August</b></header>
+            <div class="surface-body calendar-ui">
+              <div class="weeknames"><span>S</span><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span></div>
+              <div class="month-grid">
+                {Array.from({ length: 35 }, (_, i) => <i class:list={{ today: i === 23, event: [9, 17, 25, 30].includes(i) }}>{i < 4 ? "" : i - 3}</i>)}
+              </div>
+              <div class="calendar-event"><time>FRI 28</time><b>Final draft returns</b><span>09:00</span></div>
+            </div>
+            <footer>Zoom from a year to the week in front of you.</footer>
+          </article>
+
+          <article class="surface notes-surface reveal">
+            <header><span>04 / NOTES</span><b>The wall</b></header>
+            <div class="surface-body notes-ui">
+              <div class="sticky yellow">Ask Nadia about the old station route</div>
+              <div class="sticky rose">A calmer inbox should make a calmer day.</div>
+              <div class="sticky sky">Friday<br />send final draft</div>
+            </div>
+            <footer>Thoughts are not mail. They get their own wall.</footer>
+          </article>
+        </div>
+      </section>
+
+      <section class="return-scene reveal" aria-labelledby="return-title">
+        <div class="return-sky" aria-hidden="true">
+          <span class="return-sun"></span>
+          <span class="return-envelope"><i></i></span>
+          <span class="return-line line-one"></span>
+          <span class="return-line line-two"></span>
+          <span class="return-line line-three"></span>
+        </div>
+        <div class="return-copy">
+          <p class="section-kicker">Time is part of the interface</p>
+          <h2 id="return-title">Put it down.<br />It knows the way back.</h2>
+          <p>Snooze a thread until tomorrow, next week, or someday. Dated mail returns to your Inbox and calendar exactly when promised.</p>
+        </div>
+      </section>
+
+      <section class="trust reveal" id="trust" aria-labelledby="trust-title">
+        <div class="trust-title">
+          <p class="section-kicker">Built with an exit</p>
+          <h2 id="trust-title">The door out<br />is part of<br />the door in.</h2>
+        </div>
+        <div class="trust-ledger">
+          <div><span>01</span><b>Your mail exports</b><p>mboxrd and EML. Standard formats, raw messages first, no cancellation hostage ritual.</p></div>
+          <div><span>02</span><b>Your data deletes</b><p>Credentials, mirrored bodies, filing state, and sessions. Self-serve and explicit.</p></div>
+          <div><span>03</span><b>Your reading stays private</b><p>Remote trackers blocked. Redirect wrappers removed. Nothing trains on your mail.</p></div>
+          <div><span>04</span><b>Your server is welcome</b><p>One Go binary, Postgres, and a Docker Compose file. Self-hosting is architecture, not marketing copy.</p></div>
+        </div>
+      </section>
+
+      <section class="final-scene" id="preview">
+        <canvas class="wind-canvas final-wind" data-wind aria-hidden="true"></canvas>
+        <div class="final-grain" aria-hidden="true"></div>
+        <p class="final-index">PRIVATE PREVIEW / 2026</p>
+        <h2>LET THE NOISE<br /><em>PASS YOU BY.</em></h2>
+        <p>email-soft is still becoming. The core product works; the name and the public launch are intentionally not rushed.</p>
+        <span class="button light preview-state">Preview currently private <span aria-hidden="true">•</span></span>
+        <div class="final-meta"><span>Standalone by design</span><span>Optional Fylun connections later</span><span>MIT core</span></div>
+      </section>
+    </main>
+
+    <footer class="site-foot">
+      <a class="brand foot-brand" href="#top"><span class="brand-mark"><i></i><i></i></span><span>email-soft</span></a>
+      <p>Mail should make room for life.</p>
+      <div><a href="#trust">Privacy</a><a href="#day">Product</a><span>Working title</span></div>
+    </footer>
+
+    <script>
+      const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      class WindField {
+        canvas;
+        ctx;
+        particles = [];
+        raf = 0;
+        gust = 1;
+        pointer = { x: 0.5, y: 0.4 };
+
+        constructor(canvas) {
+          this.canvas = canvas;
+          this.ctx = canvas.getContext("2d");
+          this.resize();
+          const count = Math.min(42, Math.max(18, Math.floor(innerWidth / 34)));
+          for (let i = 0; i < count; i++) this.particles.push(this.create(true));
+          if (!reduced) this.raf = requestAnimationFrame((t) => this.frame(t));
+          else this.draw(0);
+        }
+
+        create(initial = false) {
+          const z = Math.random();
+          return {
+            x: initial ? Math.random() * this.canvas.width : -80,
+            y: this.canvas.height * (0.16 + Math.random() * 0.58),
+            z,
+            size: 8 + z * 23,
+            speed: 0.35 + z * 1.25,
+            phase: Math.random() * Math.PI * 2,
+            tilt: -0.35 + Math.random() * 0.7,
+            kind: Math.random() > 0.38 ? "envelope" : "paper",
+          };
+        }
+
+        resize() {
+          const dpr = Math.min(devicePixelRatio || 1, 2);
+          const rect = this.canvas.getBoundingClientRect();
+          this.canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+          this.canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+          this.canvas.dataset.dpr = String(dpr);
+        }
+
+        frame(t) {
+          this.draw(t);
+          this.raf = requestAnimationFrame((n) => this.frame(n));
+        }
+
+        draw(t) {
+          const { ctx, canvas } = this;
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          const dpr = Number(canvas.dataset.dpr || 1);
+          const wind = this.gust * dpr;
+          this.gust += (1 - this.gust) * 0.018;
+          for (const p of this.particles) {
+            if (!reduced) {
+              p.x += p.speed * wind;
+              p.y += Math.sin(t * 0.0012 + p.phase + p.x * 0.006) * 0.28 * wind;
+              p.tilt += Math.sin(t * 0.0008 + p.phase) * 0.0015;
+              if (p.x > canvas.width + 100) Object.assign(p, this.create(false));
+            }
+            const alpha = 0.18 + p.z * 0.48;
+            const w = p.size * dpr;
+            const h = w * (p.kind === "envelope" ? 0.64 : 1.18);
+            ctx.save();
+            ctx.translate(p.x, p.y);
+            ctx.rotate(p.tilt + Math.sin(t * 0.001 + p.phase) * 0.08);
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = p.kind === "envelope" ? "#f8efe0" : "#fff9ee";
+            ctx.strokeStyle = "rgba(91,61,49,.55)";
+            ctx.lineWidth = Math.max(1, dpr * 0.7);
+            ctx.beginPath();
+            ctx.roundRect(-w / 2, -h / 2, w, h, Math.max(1, w * 0.04));
+            ctx.fill();
+            ctx.stroke();
+            if (p.kind === "envelope") {
+              ctx.beginPath();
+              ctx.moveTo(-w / 2, -h / 2);
+              ctx.lineTo(0, h * 0.08);
+              ctx.lineTo(w / 2, -h / 2);
+              ctx.stroke();
+            } else {
+              ctx.beginPath();
+              ctx.moveTo(-w * 0.3, -h * 0.22);
+              ctx.lineTo(w * 0.28, -h * 0.22);
+              ctx.moveTo(-w * 0.3, 0);
+              ctx.lineTo(w * 0.2, 0);
+              ctx.stroke();
+            }
+            ctx.restore();
+          }
+        }
+
+        sendGust() { this.gust = Math.min(5, this.gust + 2.4); }
+      }
+
+      const fields = [...document.querySelectorAll("[data-wind]")].map((canvas) => new WindField(canvas));
+      document.querySelector("[data-gust]")?.addEventListener("click", () => fields[0]?.sendGust());
+      addEventListener("resize", () => fields.forEach((field) => field.resize()), { passive: true });
+
+      if (!reduced) {
+        const observer = new IntersectionObserver((entries) => {
+          entries.forEach((entry) => entry.target.classList.toggle("visible", entry.isIntersecting));
+        }, { threshold: 0.12 });
+        document.querySelectorAll(".reveal").forEach((node) => observer.observe(node));
+      } else {
+        document.querySelectorAll(".reveal").forEach((node) => node.classList.add("visible"));
+      }
+
+      const header = document.querySelector("[data-header]");
+      addEventListener("scroll", () => header?.classList.toggle("scrolled", scrollY > 28), { passive: true });
+    </script>
+  </body>
+</html>

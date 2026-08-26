@@ -2,6 +2,8 @@
 .env
 dashboard/node_modules/
 dashboard/dist/
+site/node_modules/
+site/dist/
 /email-soft
 /output/
 
