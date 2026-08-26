@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -113,8 +115,16 @@ func serveHTML(w http.ResponseWriter, r *http.Request, fsys fs.FS, name string) 
 		return
 	}
 	s := string(data)
-	const link = `<link rel="stylesheet" href="/styles.css">`
-	if !strings.Contains(s, link) {
+	const plainHref = `href="/styles.css"`
+	href := "/styles.css"
+	if stylesheet, err := fs.ReadFile(fsys, "styles.css"); err == nil {
+		sum := sha256.Sum256(stylesheet)
+		href += fmt.Sprintf("?v=%x", sum[:6])
+	}
+	link := `<link rel="stylesheet" href="` + href + `">`
+	if strings.Contains(s, plainHref) {
+		s = strings.Replace(s, plainHref, `href="`+href+`"`, 1)
+	} else if !strings.Contains(s, link) {
 		s = strings.Replace(s, "</head>", link+"</head>", 1)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

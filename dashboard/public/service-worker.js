@@ -1,4 +1,4 @@
-const VERSION = "email-soft-shell-v3";
+const VERSION = "email-soft-shell-v4";
 const SHELL = [
   "/", "/today", "/board", "/calendar", "/notes", "/people",
   "/reading", "/receipts", "/screener", "/snoozed", "/settings/accounts", "/settings/security",
@@ -64,6 +64,22 @@ self.addEventListener("fetch", (event) => {
       } catch (_) {
         const cache = await caches.open(VERSION);
         return (await cache.match(url.pathname)) || (await cache.match("/")) || Response.error();
+      }
+    })());
+    return;
+  }
+
+  if (url.pathname === "/styles.css") {
+    event.respondWith((async () => {
+      try {
+        const fresh = await fetch(request, { cache: "reload" });
+        if (fresh.ok) {
+          const cache = await caches.open(VERSION);
+          await cache.put(request, fresh.clone());
+        }
+        return fresh;
+      } catch (_) {
+        return (await caches.match(request)) || (await caches.match("/styles.css")) || Response.error();
       }
     })());
     return;
