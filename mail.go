@@ -41,10 +41,18 @@ func connectApp(cfg *Config) *App {
 		log.Printf("app: open failed — API disabled: %v", err)
 		return nil
 	}
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
-		log.Printf("app: ping failed — API disabled: %v", err)
-		return nil
+	for {
+		if err := db.PingContext(ctx); err == nil {
+			break
+		} else if ctx.Err() != nil {
+			db.Close()
+			log.Printf("app: ping failed — API disabled: %v", err)
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(250 * time.Millisecond):
+		}
 	}
 	for _, stmt := range splitStatements(schemaSQL) {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {

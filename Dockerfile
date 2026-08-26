@@ -15,11 +15,11 @@ COPY --from=dashboard /src/dashboard/dist ./dashboard/dist
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /email-soft-bin .
 
 FROM alpine:3.22
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates su-exec tzdata
 RUN addgroup -S es && adduser -S -G es es
 WORKDIR /app
 COPY --from=build /email-soft-bin /app/email-soft
-USER es
+COPY --chmod=755 docker-entrypoint.sh /app/docker-entrypoint.sh
 EXPOSE 8080
-ENTRYPOINT ["/app/email-soft"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["serve"]
