@@ -42,32 +42,35 @@ the canonical mailbox and does not absorb campaign infrastructure.
 
 ## Quickstart (self-host)
 
+No configuration required:
+
 ```
-SECRET_KEY=$(openssl rand -hex 32) \
-EMAILSOFT_TOKEN=$(openssl rand -hex 24) \
-EMAILSOFT_USER_EMAIL=you@example.com \
-PUBLIC_URL=http://localhost:8080 \
 docker compose up -d
+docker compose logs app      # one-time setup token, valid 24h
 ```
 
-Then open `http://localhost:8080`. Use `EMAILSOFT_TOKEN` once to create the
-first passkey and save the recovery codes; the token stops authenticating API
-requests as soon as that passkey exists. Connect IMAP/JMAP with an app
-password, or enable the included Google/Microsoft OAuth flows with provider
-credentials.
+Open `http://localhost:8080` and finish setup in the browser: paste the
+token, enter your address, create a passkey, save the recovery codes. The
+token stops authenticating the moment the first passkey exists.
 
-Migrations run automatically at boot. To run them by hand: `email-soft migrate`.
+`SECRET_KEY` (seals credentials) and the setup token are generated on first
+boot and kept in the `appdata` volume; the browser origin is detected from
+your first visit and pinned — so behind a reverse proxy, reach the app
+through the final public URL when you run setup. Set the env vars below only
+to override any of this; env always wins. Migrations run automatically at
+boot (`email-soft migrate` runs them by hand).
 
 ## Environment
 
 | Variable | Required | Notes |
 |---|---|---|
 | `DATABASE_URL` | yes | Postgres, e.g. `postgres://user:pass@host:5432/emailsoft` |
-| `SECRET_KEY` | yes | Seals mail credentials, OAuth/passkey records, TOTP, and push subscriptions with AES-256-GCM. Changing it invalidates them. |
-| `EMAILSOFT_TOKEN` | first setup | One-time installation secret for registering the first passkey. It is not accepted after setup. |
-| `EMAILSOFT_USER_EMAIL` | recommended | Bootstraps the owner and drives whose-turn analysis; first-run setup can supply it. |
-| `PUBLIC_URL` | yes outside localhost | Exact browser origin, e.g. `https://mail.example.com`. WebAuthn and mutation-origin checks intentionally reject a different origin. Defaults to `http://localhost:8080`. |
-| `WEBAUTHN_RP_ID` | no | Relying-party domain; derived from `PUBLIC_URL`. |
+| `SECRET_KEY` | no | Seals mail credentials, OAuth/passkey records, TOTP, and push subscriptions with AES-256-GCM. Generated on first boot into `DATA_DIR/secret.key` when unset; changing it invalidates sealed data. |
+| `EMAILSOFT_TOKEN` | no | One-time installation token for registering the first passkey. Generated (24h expiry, printed to logs) when unset. Rejected after first setup; restart regenerates while no passkey exists. |
+| `EMAILSOFT_USER_EMAIL` | no | Owner address; normally entered on the setup page instead. |
+| `PUBLIC_URL` | no | Browser origin, e.g. `https://mail.example.com`. Auto-detected from the first setup visit and pinned in the database; the env var forces an origin. WebAuthn and mutation-origin checks reject a different origin. |
+| `DATA_DIR` | no | Where the generated key and setup token live (default `./data`). Mount it as a volume or restarts regenerate them. |
+| `WEBAUTHN_RP_ID` | no | Relying-party domain; derived from the effective origin. |
 | `PORT` / `ADDR` | no | Defaults to `:8080`. |
 
 Optional Google: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`. Redirect URI:

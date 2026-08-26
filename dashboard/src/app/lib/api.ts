@@ -12,6 +12,12 @@ export interface AuthStatus {
   email: string;
   bootstrap_available: boolean;
   passkey_supported: boolean;
+  /** First-run only: where the server believes the browser is, shown so a
+   *  wrong proxy header is visible before a passkey is bound to it. */
+  detected_origin?: string;
+  /** How this session was created: "passkey" | "recovery" | "totp" |
+   *  "bootstrap". Recovery/TOTP sessions get an add-a-passkey nudge. */
+  via?: string;
 }
 export const authStatus = signal<AuthStatus | null>(null);
 

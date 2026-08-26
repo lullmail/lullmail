@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/hex"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -49,5 +50,24 @@ func TestCookieSecurityFollowsPublicOrigin(t *testing.T) {
 	cookie := w.Result().Cookies()[0]
 	if !cookie.HttpOnly || !cookie.Secure || cookie.SameSite == 0 {
 		t.Fatalf("weak cookie: %#v", cookie)
+	}
+}
+
+func TestLoginMethodConstantsAndSchemaSync(t *testing.T) {
+	for _, m := range []string{loginMethodPasskey, loginMethodRecovery, loginMethodTOTP, loginMethodBootstrap} {
+		if got := normalizeLoginMethod(m); got != m {
+			t.Fatalf("normalizeLoginMethod(%q) = %q", m, got)
+		}
+	}
+	// NULL scans as "" — pre-migration rows must read as passkey, not nudge.
+	for _, m := range []string{"", "unknown", "PASSKEY"} {
+		if got := normalizeLoginMethod(m); got != loginMethodPasskey {
+			t.Fatalf("normalizeLoginMethod(%q) = %q, want %q", m, got, loginMethodPasskey)
+		}
+	}
+	want := "login_method text CHECK (login_method IN ('" +
+		strings.Join([]string{loginMethodPasskey, loginMethodRecovery, loginMethodTOTP, loginMethodBootstrap}, "','") + "'))"
+	if !strings.Contains(schemaSQL, want) {
+		t.Fatalf("schema.sql login_method CHECK out of sync with loginMethod* constants; want %q", want)
 	}
 }

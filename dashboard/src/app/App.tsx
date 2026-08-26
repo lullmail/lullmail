@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { lazy, Suspense } from "preact/compat";
-import { api, authed, authReady, refreshAuth } from "./lib/api";
+import { api, authed, authReady, authStatus, refreshAuth } from "./lib/api";
+import { signal } from "@preact/signals";
 import { path, routeFor, startRouter } from "./lib/router";
 import { installKeys } from "./lib/keys";
 import { refreshCounts } from "./lib/actions";
@@ -78,6 +79,25 @@ function columnClass(): string {
     : "column";
 }
 
+/** A recovery-code or TOTP sign-in means this device has no passkey. One
+    quiet line points at the Security page before the user forgets. */
+const passkeyNudgeDismissed = signal(false);
+
+function PasskeyNudge() {
+  const via = authStatus.value?.via;
+  if (passkeyNudgeDismissed.value || (via !== "recovery" && via !== "totp")) return null;
+  const method = via === "totp" ? "an authenticator code" : "a recovery code";
+  return (
+    <div class="nudge" role="status">
+      <span>
+        You signed in with {method}.{" "}
+        <a href="/settings/security">Add a passkey on this device</a> so next time is one touch.
+      </span>
+      <button type="button" onClick={() => { passkeyNudgeDismissed.value = true; }}>Dismiss</button>
+    </div>
+  );
+}
+
 /** Keeps the tab title and favicon in step with what is actually waiting. */
 function TabBadge() {
   const count = attentionTotal.value;
@@ -152,6 +172,7 @@ export default function App() {
     return (
       <div class="page classic">
         <Topline />
+        <PasskeyNudge />
         <Sidebar />
         <div class="list-pane"><div class="column"><Suspense fallback={<RouteSkeleton />}><CurrentView /></Suspense></div></div>
         <div class="reader-pane">
@@ -176,6 +197,7 @@ export default function App() {
   return (
     <div class="page">
       <Topline />
+      <PasskeyNudge />
       {/* A thread replaces the list rather than sitting beside it: the mail
           gets the whole window, and there is never an empty pane. */}
       {openThreadId ? (

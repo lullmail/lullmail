@@ -38,6 +38,28 @@ const (
 	ceremonyLifetime = 5 * time.Minute
 )
 
+// How a session was created; the values are pinned by the auth_sessions
+// login_method CHECK constraint in schema.sql. The dashboard uses them to
+// nudge fallback sessions toward adding a passkey on the current device.
+const (
+	loginMethodPasskey   = "passkey"
+	loginMethodRecovery  = "recovery"
+	loginMethodTOTP      = "totp"
+	loginMethodBootstrap = "bootstrap"
+)
+
+// normalizeLoginMethod maps a stored login_method onto the constants above.
+// Rows from before the column existed read as NULL; the nudge only targets
+// fallback logins, so unknown values read as passkey.
+func normalizeLoginMethod(method string) string {
+	switch method {
+	case loginMethodRecovery, loginMethodTOTP, loginMethodBootstrap:
+		return method
+	default:
+		return loginMethodPasskey
+	}
+}
+
 type authContextKey struct{}
 type sessionContextKey struct{}
 
@@ -161,14 +183,15 @@ func (a *App) authenticateRequest(r *http.Request) (string, string, error) {
 	}
 
 	// EMAILSOFT_TOKEN is an installation/bootstrap secret, not a permanent
-	// parallel login. It stops opening product data after the first passkey.
+	// parallel login. It stops opening product data after the first passkey,
+	// and a generated token additionally expires 24h after it was minted.
 	var credentials int
 	if err := a.db.QueryRowContext(r.Context(), `SELECT count(*) FROM auth_credentials`).Scan(&credentials); err != nil {
 		return "", "", err
 	}
-	if credentials == 0 && a.cfg.APIToken != "" {
+	if credentials == 0 && a.setupTokenValid() {
 		got := r.Header.Get("Authorization")
-		if subtle.ConstantTimeCompare([]byte(got), []byte("Bearer "+a.cfg.APIToken)) == 1 {
+		if constantTimeBearer(got, a.cfg.APIToken) {
 			uid, err := a.firstUserID(r.Context())
 			return uid, "bootstrap", err
 		}
@@ -212,25 +235,36 @@ func (a *App) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Status Failed", err.Error())
 		return
 	}
-	uid, _, err := a.authenticateRequest(r)
+	uid, session, err := a.authenticateRequest(r)
 	authenticated := err == nil
 	email := ""
+	via := ""
 	if authenticated {
 		_ = a.db.QueryRowContext(r.Context(), `SELECT email FROM users WHERE id=$1`, uid).Scan(&email)
+		via = a.sessionLoginMethod(r.Context(), session)
 	}
-	writeJSON(w, map[string]any{
+	status := map[string]any{
 		"configured": count > 0, "authenticated": authenticated, "email": email,
-		"bootstrap_available": count == 0 && a.cfg.APIToken != "",
+		"bootstrap_available": count == 0 && a.setupTokenValid(),
 		"passkey_supported":   true,
-	})
+	}
+	if via != "" {
+		status["via"] = via
+	}
+	if count == 0 && a.cfg.RPID == "" {
+		// First-run setup with no pinned origin: show the wizard where it
+		// thinks it is, so a wrong proxy header is visible before a passkey
+		// gets bound to it.
+		status["detected_origin"] = detectOrigin(r)
+	}
+	writeJSON(w, status)
 }
 
 func (a *App) bootstrapAuthorized(r *http.Request) bool {
-	if a.cfg.APIToken == "" {
+	if !a.setupTokenValid() {
 		return false
 	}
-	got := r.Header.Get("Authorization")
-	return subtle.ConstantTimeCompare([]byte(got), []byte("Bearer "+a.cfg.APIToken)) == 1
+	return constantTimeBearer(r.Header.Get("Authorization"), a.cfg.APIToken)
 }
 
 func (a *App) handleBootstrapBegin(w http.ResponseWriter, r *http.Request) {
@@ -242,6 +276,15 @@ func (a *App) handleBootstrapBegin(w http.ResponseWriter, r *http.Request) {
 	if err := a.db.QueryRowContext(r.Context(), `SELECT count(*) FROM auth_credentials`).Scan(&count); err != nil || count != 0 {
 		writeProblem(w, 409, "Already Configured", "a passkey already protects this installation")
 		return
+	}
+	// No origin pinned yet (PUBLIC_URL unset, fresh install): adopt the one
+	// this setup request actually arrived on. Nothing is secret before the
+	// first passkey exists; the completing request's origin gets stored.
+	if a.cfg.RPID == "" {
+		if !a.setOriginForSetup(detectOrigin(r)) {
+			writeProblem(w, 422, "Origin Unavailable", "the browser origin could not be detected — set PUBLIC_URL on the server")
+			return
+		}
 	}
 	var req struct {
 		Email string `json:"email"`
@@ -279,12 +322,24 @@ func (a *App) handleBootstrapFinish(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	// Setup is complete: pin the origin this ceremony used (unless PUBLIC_URL
+	// was set explicitly) and retire the one-time token for good.
+	if !a.cfg.PublicURLSet && a.cfg.RPID != "" {
+		if err := storeSetting(a.db, "public_url", a.cfg.PublicURL); err != nil {
+			writeProblem(w, 500, "Setup Failed", "could not persist the site origin: "+err.Error())
+			return
+		}
+	}
+	if a.cfg.DataDir != "" && !a.tokenFromEnv {
+		deleteSetupToken(a.cfg.DataDir)
+	}
+	a.setupTokenCreated = time.Time{}
 	codes, err := a.replaceRecoveryCodes(r.Context(), uid)
 	if err != nil {
 		writeProblem(w, 500, "Recovery Setup Failed", err.Error())
 		return
 	}
-	if err := a.createSession(w, r, uid); err != nil {
+	if err := a.createSession(w, r, uid, loginMethodBootstrap); err != nil {
 		writeProblem(w, 500, "Session Failed", err.Error())
 		return
 	}
@@ -306,7 +361,7 @@ func (a *App) beginRegistration(w http.ResponseWriter, r *http.Request, uid, kin
 	for _, c := range user.Credentials {
 		exclusions = append(exclusions, c.Descriptor())
 	}
-	creation, session, err := a.wa.BeginRegistration(user,
+	creation, session, err := a.webAuthn().BeginRegistration(user,
 		webauthn.WithExclusions(exclusions),
 		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired),
 		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
@@ -344,7 +399,7 @@ func (a *App) finishRegistration(w http.ResponseWriter, r *http.Request, kind st
 		writeProblem(w, 500, "Passkey Failed", err.Error())
 		return "", err
 	}
-	credential, err := a.wa.FinishRegistration(user, *session, r)
+	credential, err := a.webAuthn().FinishRegistration(user, *session, r)
 	if err != nil {
 		writeProblem(w, 400, "Passkey Rejected", "the browser response could not be verified")
 		return "", err
@@ -384,7 +439,7 @@ func (a *App) handleLoginBegin(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 409, "Setup Required", "create the first passkey with the setup token")
 		return
 	}
-	assertion, session, err := a.wa.BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
+	assertion, session, err := a.webAuthn().BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
 		writeProblem(w, 500, "Sign In Failed", err.Error())
 		return
@@ -428,7 +483,7 @@ func (a *App) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Sign In Failed", err.Error())
 		return
 	}
-	if err := a.createSession(w, r, user.ID); err != nil {
+	if err := a.createSession(w, r, user.ID, loginMethodPasskey); err != nil {
 		writeProblem(w, 500, "Session Failed", err.Error())
 		return
 	}
@@ -487,7 +542,7 @@ func (a *App) takeCeremony(r *http.Request, kind string) (string, *webauthn.Sess
 	return uid.String, &session, nil
 }
 
-func (a *App) createSession(w http.ResponseWriter, r *http.Request, uid string) error {
+func (a *App) createSession(w http.ResponseWriter, r *http.Request, uid, method string) error {
 	raw, err := opaqueToken(32)
 	if err != nil {
 		return err
@@ -497,12 +552,29 @@ func (a *App) createSession(w http.ResponseWriter, r *http.Request, uid string) 
 		ua = ua[:300]
 	}
 	_, err = a.db.ExecContext(r.Context(), `INSERT INTO auth_sessions
-		(id_hash,user_id,expires_at,user_agent) VALUES ($1,$2,$3,$4)`,
-		tokenHash(raw), uid, time.Now().Add(sessionLifetime), ua)
+		(id_hash,user_id,expires_at,user_agent,login_method) VALUES ($1,$2,$3,$4,$5)`,
+		tokenHash(raw), uid, time.Now().Add(sessionLifetime), ua, normalizeLoginMethod(method))
 	if err == nil {
 		a.setCookie(w, sessionCookie, raw, sessionLifetime)
 	}
 	return err
+}
+
+// sessionLoginMethod reports how the session backing a request was created.
+// The bootstrap token path has no session row; it is its own method. A row
+// that vanished mid-request (logout race) reports "".
+func (a *App) sessionLoginMethod(ctx context.Context, session string) string {
+	if session == "" {
+		return ""
+	}
+	if session == "bootstrap" {
+		return loginMethodBootstrap
+	}
+	var method sql.NullString
+	if a.db.QueryRowContext(ctx, `SELECT login_method FROM auth_sessions WHERE id_hash=$1`, session).Scan(&method) != nil {
+		return ""
+	}
+	return normalizeLoginMethod(method.String)
 }
 
 func (a *App) loadWebUser(ctx context.Context, uid string) (*webUser, error) {
@@ -645,7 +717,7 @@ func (a *App) handleRecoveryLogin(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 401, "Recovery Failed", "that recovery code is not valid or was already used")
 		return
 	}
-	if err := a.createSession(w, r, uid); err != nil {
+	if err := a.createSession(w, r, uid, loginMethodRecovery); err != nil {
 		writeProblem(w, 500, "Session Failed", err.Error())
 		return
 	}
@@ -707,7 +779,7 @@ func (a *App) handleTOTPLogin(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 401, "Sign In Failed", "invalid authenticator code")
 		return
 	}
-	if err := a.createSession(w, r, uid); err != nil {
+	if err := a.createSession(w, r, uid, loginMethodTOTP); err != nil {
 		writeProblem(w, 500, "Session Failed", err.Error())
 		return
 	}

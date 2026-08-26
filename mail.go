@@ -29,6 +29,10 @@ func connectApp(cfg *Config) *App {
 		log.Println("app: DATABASE_URL not set — API disabled")
 		return nil
 	}
+	if err := resolveSecretKey(cfg); err != nil {
+		log.Printf("app: SECRET_KEY setup failed — API disabled: %v", err)
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -71,13 +75,22 @@ func connectApp(cfg *Config) *App {
 		eng:          mail.NewEngine(store, slog.Default()),
 		sendq:        newSendQueue(),
 		authAttempts: map[string]authAttempt{},
+		tokenFromEnv: cfg.APIToken != "",
 	}
-	app.wa, err = newWebAuthn(cfg)
-	if err != nil {
-		store.Close()
-		db.Close()
-		log.Printf("app: webauthn setup failed — API disabled: %v", err)
-		return nil
+	// Restore a setup-pinned origin and surface the first-run token before
+	// WebAuthn is constructed: both decide whether this boot runs configured
+	// or in first-run setup mode.
+	app.prepareSetup()
+	if app.cfg.RPID != "" {
+		app.wa, err = newWebAuthn(cfg)
+		if err != nil {
+			store.Close()
+			db.Close()
+			log.Printf("app: webauthn setup failed — API disabled: %v", err)
+			return nil
+		}
+	} else {
+		log.Println("app: no origin pinned — first-run setup will detect it from the browser")
 	}
 	app.svc = mail.NewService(store, app.eng)
 	app.svc.Resolve = newResolver()

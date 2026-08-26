@@ -8,23 +8,27 @@ import (
 	"database/sql"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/neutron-build/neutron/mail"
 )
 
 type App struct {
-	cfg          *Config
-	db           *sql.DB
-	log          *slog.Logger
-	store        *mail.PgStore
-	eng          *mail.Engine
-	svc          *mail.Service
-	sched        *mail.Scheduler
-	sendq        *sendQueue
-	wa           *webauthn.WebAuthn
-	authMu       sync.Mutex
-	authAttempts map[string]authAttempt
+	cfg               *Config
+	db                *sql.DB
+	log               *slog.Logger
+	store             *mail.PgStore
+	eng               *mail.Engine
+	svc               *mail.Service
+	sched             *mail.Scheduler
+	sendq             *sendQueue
+	wa                *webauthn.WebAuthn
+	waMu              sync.Mutex
+	setupTokenCreated time.Time
+	tokenFromEnv      bool
+	authMu            sync.Mutex
+	authAttempts      map[string]authAttempt
 }
 
 func (a *App) Token(ctx context.Context, acct mail.AccountID) (mail.Credential, error) {

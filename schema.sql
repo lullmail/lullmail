@@ -30,8 +30,11 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
   created_at timestamptz NOT NULL DEFAULT now(),
   last_seen_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL,
-  user_agent text NOT NULL DEFAULT ''
+  user_agent text NOT NULL DEFAULT '',
+  login_method text CHECK (login_method IN ('passkey','recovery','totp','bootstrap'))
 );
+ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS login_method text
+  CHECK (login_method IN ('passkey','recovery','totp','bootstrap'));
 CREATE INDEX IF NOT EXISTS auth_sessions_user ON auth_sessions (user_id, expires_at);
 
 CREATE TABLE IF NOT EXISTS auth_challenges (
@@ -165,6 +168,14 @@ CREATE TABLE IF NOT EXISTS sticky_notes (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS sticky_notes_user ON sticky_notes (user_id);
+
+-- Installation-level settings written by first-run setup (currently: the
+-- pinned browser origin when PUBLIC_URL was not set). Small on purpose:
+-- anything richer belongs to a real feature table.
+CREATE TABLE IF NOT EXISTS app_settings (
+  key text PRIMARY KEY,
+  value text NOT NULL
+);
 
 -- Phase 2+ tables (aliases, calendar, contacts, campaigns) land in later
 -- migrations, only when their phase ships. See SPEC.md sections 6.2-6.5.
