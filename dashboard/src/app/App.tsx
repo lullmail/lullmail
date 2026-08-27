@@ -111,12 +111,12 @@ function TabBadge() {
       document.head.appendChild(link);
     }
     document.title = count > 0 ? "(" + count + ") email-soft" : "email-soft";
-    const bg = dark ? "#ecedf1" : "#15161a";
-    const fg = dark ? "#0f1013" : "#ffffff";
+    const bg = dark ? "#ecedf1" : "#20242b";
+    const fg = dark ? "#20242b" : "#f4efe6";
     const glyph =
       count > 0
         ? `<text x="32" y="43" font-family="system-ui,sans-serif" font-size="${count > 99 ? 24 : 34}" font-weight="700" text-anchor="middle" fill="${fg}">${count > 99 ? "99+" : count}</text>`
-        : `<text x="32" y="43" font-family="Georgia,serif" font-size="34" font-weight="700" text-anchor="middle" fill="${fg}">&#9993;</text>`;
+        : `<rect x="16" y="21" width="32" height="22" rx="3" fill="none" stroke="${fg}" stroke-width="3.5"/><path d="m16 21 16 12 16-12" fill="none" stroke="${fg}" stroke-width="3.5" stroke-linejoin="round"/>`;
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="${bg}"/>${glyph}</svg>`;
     link.href = "data:image/svg+xml," + encodeURIComponent(svg);
   }, [count, dark]);
