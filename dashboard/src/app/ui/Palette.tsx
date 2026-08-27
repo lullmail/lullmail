@@ -3,7 +3,7 @@
 // the same place instead of two rival result views.
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { api } from "../lib/api";
-import { accountQS, layout, palette, query, theme, toggleLayout, toggleTheme } from "../lib/store";
+import { accountQS, layout, palette, query, theme, toggleLayout } from "../lib/store";
 import { openThread } from "../lib/actions";
 import { navigate } from "../lib/router";
 import { fmtDate, splitFrom } from "../lib/fmt";
@@ -130,13 +130,9 @@ export function Palette() {
     const settings: [Item, string][] = [
       [{
         key: "theme",
-        label: theme.value === "dark"
-          ? "Switch to sepia theme"
-          : theme.value === "sepia"
-            ? "Switch to light theme"
-            : "Switch to dark theme",
-        run: () => { close(); toggleTheme(); },
-      }, "theme appearance sepia dark light mode"],
+        label: "Open appearance settings",
+        run: () => { close(); navigate("/settings/appearance"); },
+      }, "theme appearance sepia dark light mode terminal nord dracula"],
       [{
         key: "layout",
         label: layout.value === "classic"

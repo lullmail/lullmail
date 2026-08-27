@@ -5,7 +5,7 @@ import { signal } from "@preact/signals";
 import { path, routeFor, startRouter } from "./lib/router";
 import { installKeys } from "./lib/keys";
 import { refreshAccounts, refreshCounts } from "./lib/actions";
-import { accountCount, accountFilter, attentionTotal, compose, layout, palette, query, reader, resolveLayout, setSplitWidth, shortcuts, splitWidth, theme } from "./lib/store";
+import { accountCount, accountFilter, attentionTotal, compose, isDarkTheme, layout, palette, query, reader, resolveLayout, setSplitWidth, shortcuts, splitWidth, theme } from "./lib/store";
 import { Topline } from "./Topline";
 import { Sidebar } from "./Sidebar";
 import { Thread } from "./reader/Thread";
@@ -34,6 +34,7 @@ const PeopleView = lazy(() => import("./views/PeopleView").then((m) => ({ defaul
 const AccountsView = lazy(() => import("./views/AccountsView").then((m) => ({ default: m.AccountsView })));
 const SecurityView = lazy(() => import("./views/SecurityView").then((m) => ({ default: m.SecurityView })));
 const AppearanceView = lazy(() => import("./views/AppearanceView").then((m) => ({ default: m.AppearanceView })));
+const SettingsHomeView = lazy(() => import("./views/SettingsHomeView").then((m) => ({ default: m.SettingsHomeView })));
 
 /** Classic needs three columns' worth of room; below that the preference is
     honoured by falling back rather than by cramming. */
@@ -69,6 +70,7 @@ function CurrentView() {
     case "accounts": return <AccountsView />;
     case "security": return <SecurityView />;
     case "appearance": return <AppearanceView />;
+    case "settings-home": return <SettingsHomeView />;
     default: return <BucketView bucket={route.bucket || "imbox"} />;
   }
 }
@@ -110,7 +112,7 @@ function PasskeyNudge() {
 function TabBadge() {
   const count = attentionTotal.value;
   // Sepia is a light ground; the favicon inverts only for true dark.
-  const dark = theme.value === "dark";
+    const dark = isDarkTheme(theme.value);
   useEffect(() => {
     let link = document.querySelector<HTMLLinkElement>("link[rel='icon']");
     if (!link) {

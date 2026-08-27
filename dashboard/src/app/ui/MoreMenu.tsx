@@ -19,7 +19,7 @@ export function MoreMenu() {
   }, [open]);
 
   const pick = (fn: () => void) => () => { setOpen(false); fn(); };
-  const themeLabel = theme.value === "dark" ? "Dark" : theme.value === "sepia" ? "Sepia" : "Light";
+  const themeLabel = theme.value.charAt(0).toUpperCase() + theme.value.slice(1);
 
   return (
     <div style={{ position: "relative" }} ref={ref}>
@@ -46,15 +46,9 @@ export function MoreMenu() {
             <Icon name="keyboard" size={14} />
             Keyboard shortcuts<span class="note">?</span>
           </button>
-          <button class="menu-item" type="button" role="menuitem"
-            onClick={pick(() => navigate("/settings/accounts"))}>
+          <button class="menu-item" type="button" role="menuitem" onClick={pick(() => navigate("/settings"))}>
             <Icon name="settings" size={14} />
-            Accounts
-          </button>
-          <button class="menu-item" type="button" role="menuitem"
-            onClick={pick(() => navigate("/settings/security"))}>
-            <Icon name="settings" size={14} />
-            Security
+            Settings
           </button>
         </div>
       )}

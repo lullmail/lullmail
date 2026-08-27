@@ -26,8 +26,9 @@ export function head() {
       {
         id: "theme-init",
         content:
-          "(function(){try{var t=localStorage.getItem('es-theme');" +
-          "if(t!=='light'&&t!=='sepia'&&t!=='dark'){t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light';}" +
+          "(function(){try{var ok=['light','sepia','dark','terminal','amber','nord','dracula','rose','solarized','blueprint'];" +
+          "var t=localStorage.getItem('es-theme');" +
+          "if(ok.indexOf(t)<0){t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light';}" +
           "document.documentElement.setAttribute('data-theme',t);" +
           "var a=localStorage.getItem('es-accent');" +
           "if(a){document.documentElement.setAttribute('data-accent',a);}" +

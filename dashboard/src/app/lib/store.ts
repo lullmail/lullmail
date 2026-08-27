@@ -6,15 +6,26 @@ import type { Bucket, Counts, ListBucket, Message, Row, ScreenerSender } from ".
 
 /* ---- theme ---- */
 
-export type Theme = "light" | "sepia" | "dark";
+export type Theme =
+  | "light" | "sepia" | "dark"
+  | "terminal" | "amber" | "nord" | "dracula" | "rose" | "solarized" | "blueprint";
 
-/** Cycle order for the toggle; sepia sits between the two ends. */
-const THEMES: Theme[] = ["light", "sepia", "dark"];
+export const THEMES: Theme[] = ["light", "sepia", "dark"];
+
+/** Everything with a dark ground: badge/favicon inversions, sticky-note
+    washes, and any code that assumes light-on-dark rendering. */
+const DARK_THEMES = new Set<Theme>(["dark", "terminal", "amber", "nord", "dracula", "rose", "blueprint"]);
+
+export function isDarkTheme(t: Theme): boolean {
+  return DARK_THEMES.has(t);
+}
+
+const ALL_THEMES = new Set<Theme>([...THEMES, "terminal", "amber", "nord", "dracula", "rose", "solarized", "blueprint"]);
 
 function initialTheme(): Theme {
   if (typeof document === "undefined") return "light";
-  const attr = document.documentElement.getAttribute("data-theme");
-  if (attr === "sepia" || attr === "dark") return attr;
+  const attr = document.documentElement.getAttribute("data-theme") as Theme | null;
+  if (attr && ALL_THEMES.has(attr)) return attr;
   return "light";
 }
 

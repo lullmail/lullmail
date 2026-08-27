@@ -10,6 +10,7 @@ declare module "@neutron-build/core" {
     | "/reading"
     | "/receipts"
     | "/screener"
+    | "/settings"
     | "/settings/accounts"
     | "/settings/appearance"
     | "/settings/security"

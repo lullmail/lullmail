@@ -8,11 +8,49 @@ import { navigate } from "../lib/router";
 // live: base theme, accent, and whether subjects speak in the editorial serif
 // or the interface sans.
 
-const THEMES: { id: Theme; name: string; bg: string; panel: string; ink: string; line: string }[] = [
-  { id: "light", name: "Light", bg: "#f6f5f2", panel: "#ffffff", ink: "#1c1d21", line: "#e4e2dc" },
-  { id: "sepia", name: "Sepia", bg: "#e7dfd2", panel: "#f2ece1", ink: "#4a4238", line: "#d8cdba" },
-  { id: "dark", name: "Dark", bg: "#15161a", panel: "#1e2026", ink: "#ecedf1", line: "#2d3038" },
+// Each card previews the theme with ITS OWN tokens — including its default
+// accent — so the swatch is honest even before it is applied.
+
+interface ThemeCard { id: Theme; name: string; blurb: string; bg: string; panel: string; ink: string; line: string; accent: string }
+
+const FOUNDATIONS: ThemeCard[] = [
+  { id: "light", name: "Light", blurb: "Paper white, quiet grey ink", bg: "#fbfbfd", panel: "#ffffff", ink: "#15161a", line: "#e9eaef", accent: "#d8402a" },
+  { id: "sepia", name: "Sepia", blurb: "A warm room, aged paper", bg: "#e7dfd2", panel: "#efe8db", ink: "#3d3833", line: "#d8cfbe", accent: "#c25a24" },
+  { id: "dark", name: "Dark", blurb: "Night, no theatrics", bg: "#0f1013", panel: "#15161a", ink: "#eceef2", line: "#23252b", accent: "#ff6a44" },
 ];
+
+const CHARACTERS: ThemeCard[] = [
+  { id: "terminal", name: "Terminal", blurb: "Green phosphor on a switched-off screen", bg: "#060906", panel: "#0a0f0a", ink: "#b8f5b4", line: "#142014", accent: "#3dff88" },
+  { id: "amber", name: "Amber", blurb: "The warmer CRT — honey instead of green", bg: "#0f0a04", panel: "#171108", ink: "#f2c078", line: "#241b0f", accent: "#ffab40" },
+  { id: "nord", name: "Nord", blurb: "Polar night and frost", bg: "#2e3440", panel: "#343c4b", ink: "#eceff4", line: "#3b4252", accent: "#88c0d0" },
+  { id: "dracula", name: "Dracula", blurb: "Night market — purple ground, lavender accent", bg: "#282a36", panel: "#2e313f", ink: "#f8f8f2", line: "#3a3d4e", accent: "#bd93f9" },
+  { id: "rose", name: "Rosé", blurb: "Muted rose and gold on plum", bg: "#191724", panel: "#1f1d2e", ink: "#e0def4", line: "#2a2740", accent: "#ebbcba" },
+  { id: "solarized", name: "Solarized", blurb: "The classic warm cream", bg: "#fdf6e3", panel: "#fffdf4", ink: "#2c3f45", line: "#e9e0c8", accent: "#b58900" },
+  { id: "blueprint", name: "Blueprint", blurb: "Drafting blue with a pencil-yellow accent", bg: "#0d2440", panel: "#112c4d", ink: "#dbe9ff", line: "#1c3a63", accent: "#ffd23f" },
+];
+
+function ThemeCards({ cards }: { cards: ThemeCard[] }) {
+  return (
+    <div class="theme-cards">
+      {cards.map((t) => (
+        <button
+          key={t.id}
+          type="button"
+          class={"theme-card" + (theme.value === t.id ? " active" : "")}
+          onClick={() => setTheme(t.id)}
+          title={t.blurb}
+        >
+          <div class="theme-card-surface" style={{ background: t.bg }}>
+            <span class="theme-chip" style={{ background: t.panel, border: `1px solid ${t.line}` }} />
+            <span class="theme-chip" style={{ background: t.ink, opacity: 0.85 }} />
+            <span class="theme-chip" style={{ background: t.accent }} />
+          </div>
+          <span class="theme-card-name" style={{ color: "var(--ink)" }}>{t.name}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
 
 const ACCENT_SWATCH: Record<Accent, string> = {
   ember: "#d8402a",
@@ -34,6 +72,7 @@ export function AppearanceView() {
     <>
       <PageHead kicker="Settings" title="Appearance" sub="Applied the moment you pick. Your mail, your colors." />
       <div class="settings-tabs">
+        <a href="/settings">Settings</a>
         <a href="/settings/accounts">Mailboxes</a>
         <a href="/settings/appearance" class="active">Appearance</a>
         <a href="/settings/security">Security</a>
@@ -42,27 +81,21 @@ export function AppearanceView() {
       <section class="settings-section">
         <div class="settings-section-head">
           <div>
-            <h2>Theme</h2>
-            <p>The ground everything sits on — paper, warm paper, or night.</p>
+            <h2>Foundations</h2>
+            <p>The ground everything sits on — start here, then tune below.</p>
           </div>
         </div>
-        <div class="theme-cards">
-          {THEMES.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              class={"theme-card" + (theme.value === t.id ? " active" : "")}
-              onClick={() => setTheme(t.id)}
-            >
-              <div class="theme-card-surface" style={{ background: t.bg }}>
-                <span class="theme-chip" style={{ background: t.panel, border: `1px solid ${t.line}` }} />
-                <span class="theme-chip" style={{ background: t.ink, opacity: 0.85 }} />
-                <span class="theme-chip" style={{ background: ACCENT_SWATCH[accent.value] }} />
-              </div>
-              <span class="theme-card-name" style={{ color: "var(--ink)" }}>{t.name}</span>
-            </button>
-          ))}
+        <ThemeCards cards={FOUNDATIONS} />
+      </section>
+
+      <section class="settings-section">
+        <div class="settings-section-head">
+          <div>
+            <h2>Characters</h2>
+            <p>Palettes with opinions. Pairs with any accent and either subject voice.</p>
+          </div>
         </div>
+        <ThemeCards cards={CHARACTERS} />
       </section>
 
       <section class="settings-section">

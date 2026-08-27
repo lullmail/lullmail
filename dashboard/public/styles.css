@@ -113,6 +113,184 @@
   color-scheme: light;
 }
 
+/* ---- character themes: full palettes with opinions. Users who want "theirs"
+   pick one of these and tune accent/type on top. ---- */
+
+/* Terminal: green phosphor on a switched-off screen. */
+:root[data-theme="terminal"] {
+  --bg: #060906;
+  --panel: #0a0f0a;
+  --raise: #0f170f;
+  --ink: #b8f5b4;
+  --ink-2: #7ccf7c;
+  --ink-3: #559355;
+  --line: #142014;
+  --line-strong: #233423;
+  --hover: #121c12;
+  --sel: #17251a;
+  --accent: #3dff88;
+  --accent-ink: #04160a;
+  --accent-soft: rgba(61, 255, 136, 0.1);
+  --danger: #ff6d5e;
+  --danger-soft: rgba(255, 109, 94, 0.1);
+  --ok: #3dff88;
+  --scroll: #1d2b1d;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-3: 0 1px 2px rgba(0, 0, 0, 0.5), 0 24px 64px rgba(0, 0, 0, 0.6);
+  --veil: rgba(2, 5, 2, 0.6);
+  color-scheme: dark;
+}
+
+/* Amber: the warmer CRT — honey phosphor instead of green. */
+:root[data-theme="amber"] {
+  --bg: #0f0a04;
+  --panel: #171108;
+  --raise: #1e170b;
+  --ink: #f2c078;
+  --ink-2: #c99a56;
+  --ink-3: #8f6f3e;
+  --line: #241b0f;
+  --line-strong: #38301c;
+  --hover: #1d150a;
+  --sel: #251c10;
+  --accent: #ffab40;
+  --accent-ink: #1a1206;
+  --accent-soft: rgba(255, 171, 64, 0.1);
+  --danger: #ff7a6b;
+  --danger-soft: rgba(255, 122, 107, 0.1);
+  --ok: #a8c46a;
+  --scroll: #2c2213;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-3: 0 1px 2px rgba(0, 0, 0, 0.5), 0 24px 64px rgba(0, 0, 0, 0.6);
+  --veil: rgba(8, 5, 2, 0.6);
+  color-scheme: dark;
+}
+
+/* Nord: the fjord palette — polar night ground, frost accents. */
+:root[data-theme="nord"] {
+  --bg: #2e3440;
+  --panel: #343c4b;
+  --raise: #3b4252;
+  --ink: #eceff4;
+  --ink-2: #d1d9e4;
+  --ink-3: #9aa7bb;
+  --line: #3b4252;
+  --line-strong: #4c566a;
+  --hover: #3f4859;
+  --sel: #434c5e;
+  --accent: #88c0d0;
+  --accent-ink: #1d242c;
+  --accent-soft: rgba(136, 192, 208, 0.12);
+  --danger: #e98076;
+  --danger-soft: rgba(233, 128, 118, 0.12);
+  --ok: #a3be8c;
+  --scroll: #434c5e;
+  --shadow-1: 0 1px 2px rgba(20, 25, 35, 0.4);
+  --shadow-3: 0 1px 2px rgba(20, 25, 35, 0.4), 0 24px 64px rgba(12, 16, 24, 0.55);
+  --veil: rgba(16, 20, 28, 0.55);
+  color-scheme: dark;
+}
+
+/* Dracula: the night market — purple ground, lavender accent. */
+:root[data-theme="dracula"] {
+  --bg: #282a36;
+  --panel: #2e313f;
+  --raise: #343849;
+  --ink: #f8f8f2;
+  --ink-2: #ced0e0;
+  --ink-3: #8b95bb;
+  --line: #3a3d4e;
+  --line-strong: #4d5268;
+  --hover: #383b4b;
+  --sel: #40435a;
+  --accent: #bd93f9;
+  --accent-ink: #1e1526;
+  --accent-soft: rgba(189, 147, 249, 0.12);
+  --danger: #ff79c6;
+  --danger-soft: rgba(255, 121, 198, 0.1);
+  --ok: #50fa7b;
+  --scroll: #414560;
+  --shadow-1: 0 1px 2px rgba(15, 16, 25, 0.4);
+  --shadow-3: 0 1px 2px rgba(15, 16, 25, 0.4), 0 24px 64px rgba(10, 10, 18, 0.55);
+  --veil: rgba(18, 18, 28, 0.55);
+  color-scheme: dark;
+}
+
+/* Rosé: muted rose and gold on plum night. */
+:root[data-theme="rose"] {
+  --bg: #191724;
+  --panel: #1f1d2e;
+  --raise: #26233a;
+  --ink: #e0def4;
+  --ink-2: #b8b4d4;
+  --ink-3: #84809f;
+  --line: #2a2740;
+  --line-strong: #3a3655;
+  --hover: #252238;
+  --sel: #2d2a45;
+  --accent: #ebbcba;
+  --accent-ink: #241b1a;
+  --accent-soft: rgba(235, 188, 190, 0.11);
+  --danger: #eb6f92;
+  --danger-soft: rgba(235, 111, 146, 0.1);
+  --ok: #9ccfd8;
+  --scroll: #322e4d;
+  --shadow-1: 0 1px 2px rgba(10, 8, 20, 0.45);
+  --shadow-3: 0 1px 2px rgba(10, 8, 20, 0.45), 0 24px 64px rgba(8, 6, 16, 0.6);
+  --veil: rgba(12, 10, 22, 0.6);
+  color-scheme: dark;
+}
+
+/* Solarized: the classic warm cream with restrained ink. */
+:root[data-theme="solarized"] {
+  --bg: #fdf6e3;
+  --panel: #fffdf4;
+  --raise: #f2ead2;
+  --ink: #2c3f45;
+  --ink-2: #586e75;
+  --ink-3: #93a1a1;
+  --line: #e9e0c8;
+  --line-strong: #d3cab0;
+  --hover: #f4ecd6;
+  --sel: #efe6cb;
+  --accent: #b58900;
+  --accent-ink: #fffbef;
+  --accent-soft: #f0e4bd;
+  --danger: #cb4b16;
+  --danger-soft: #f6e3d7;
+  --ok: #859900;
+  --scroll: #d8cfb4;
+  --shadow-1: 0 1px 2px rgba(101, 88, 60, 0.08);
+  --shadow-3: 0 1px 2px rgba(101, 88, 60, 0.08), 0 24px 64px rgba(101, 88, 60, 0.2);
+  --veil: rgba(88, 76, 48, 0.32);
+  color-scheme: light;
+}
+
+/* Blueprint: drafting-table blue with a pencil-yellow accent. */
+:root[data-theme="blueprint"] {
+  --bg: #0d2440;
+  --panel: #112c4d;
+  --raise: #15345c;
+  --ink: #dbe9ff;
+  --ink-2: #b3cbef;
+  --ink-3: #7d9cc7;
+  --line: #1c3a63;
+  --line-strong: #2b4f80;
+  --hover: #16335a;
+  --sel: #1c3f6e;
+  --accent: #ffd23f;
+  --accent-ink: #0d2440;
+  --accent-soft: rgba(255, 210, 63, 0.12);
+  --danger: #ff8f7a;
+  --danger-soft: rgba(255, 143, 122, 0.1);
+  --ok: #7fd4a8;
+  --scroll: #25466f;
+  --shadow-1: 0 1px 2px rgba(5, 14, 28, 0.45);
+  --shadow-3: 0 1px 2px rgba(5, 14, 28, 0.45), 0 24px 64px rgba(3, 10, 22, 0.6);
+  --veil: rgba(5, 15, 30, 0.58);
+  color-scheme: dark;
+}
+
 /* ============================================================ base */
 
 * { box-sizing: border-box; }
@@ -1015,12 +1193,13 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 [data-accent="rose"]    { --accent: #d84a7a; --accent-ink: #ffffff; }
 [data-accent="teal"]    { --accent: #12909a; --accent-ink: #ffffff; }
 [data-accent="graphite"]{ --accent: #4a5568; --accent-ink: #ffffff; }
-[data-theme="dark"][data-accent="ocean"]    { --accent: #6b9aff; --accent-ink: #101528; }
-[data-theme="dark"][data-accent="forest"]   { --accent: #57b87e; --accent-ink: #0e1a12; }
-[data-theme="dark"][data-accent="violet"]   { --accent: #a98bff; --accent-ink: #171029; }
-[data-theme="dark"][data-accent="rose"]     { --accent: #ff7aa5; --accent-ink: #29101c; }
-[data-theme="dark"][data-accent="teal"]     { --accent: #4fc7cf; --accent-ink: #0c1e20; }
-[data-theme="dark"][data-accent="graphite"] { --accent: #9aa7ba; --accent-ink: #141a24; }
+/* Dark-accent variants apply to every dark-grounded theme. */
+:is([data-theme="dark"], [data-theme="terminal"], [data-theme="amber"], [data-theme="nord"], [data-theme="dracula"], [data-theme="rose"], [data-theme="blueprint"])[data-accent="ocean"]    { --accent: #6b9aff; --accent-ink: #101528; }
+:is([data-theme="dark"], [data-theme="terminal"], [data-theme="amber"], [data-theme="nord"], [data-theme="dracula"], [data-theme="rose"], [data-theme="blueprint"])[data-accent="forest"]   { --accent: #57b87e; --accent-ink: #0e1a12; }
+:is([data-theme="dark"], [data-theme="terminal"], [data-theme="amber"], [data-theme="nord"], [data-theme="dracula"], [data-theme="rose"], [data-theme="blueprint"])[data-accent="violet"]   { --accent: #a98bff; --accent-ink: #171029; }
+:is([data-theme="dark"], [data-theme="terminal"], [data-theme="amber"], [data-theme="nord"], [data-theme="dracula"], [data-theme="rose"], [data-theme="blueprint"])[data-accent="rose"]     { --accent: #ff7aa5; --accent-ink: #29101c; }
+:is([data-theme="dark"], [data-theme="terminal"], [data-theme="amber"], [data-theme="nord"], [data-theme="dracula"], [data-theme="rose"], [data-theme="blueprint"])[data-accent="teal"]     { --accent: #4fc7cf; --accent-ink: #0c1e20; }
+:is([data-theme="dark"], [data-theme="terminal"], [data-theme="amber"], [data-theme="nord"], [data-theme="dracula"], [data-theme="rose"], [data-theme="blueprint"])[data-accent="graphite"] { --accent: #9aa7ba; --accent-ink: #141a24; }
 [data-type="sans"] { --serif: var(--sans); }
 
 .theme-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--sp-3); }
@@ -1192,7 +1371,7 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
   --st3: #d6e8cd; --st4: #e2d8ef;
   --st-ink: #2a2519;
 }
-:root[data-theme="dark"] {
+:is([data-theme="dark"], [data-theme="terminal"], [data-theme="amber"], [data-theme="nord"], [data-theme="dracula"], [data-theme="rose"], [data-theme="blueprint"]) {
   --st0: #5f5624; --st1: #6e453b; --st2: #37536b;
   --st3: #3f5e39; --st4: #4e4166;
   --st-ink: #f1ecdd;
