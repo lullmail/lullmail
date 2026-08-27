@@ -116,16 +116,21 @@ export function Topline() {
           <AccountPicker />
         </div>
 
-        {!classic && (
-          <nav class="nav">
-            {DAY.map((item) => <NavLink key={item[1]} item={item} here={here} />)}
-            <span class="nav-rule" />
-            {MAIL.map((item) => <NavLink key={item[1]} item={item} here={here} />)}
-            {(screenerWaiting > 0 || here === "screener") && (
-              <NavLink item={["/screener", "screener", "Screener", "screener"]} here={here} />
-            )}
-          </nav>
-        )}
+        {/* The day's surfaces sit in the center header in BOTH layouts — a
+            clock on the wall, not a drawer. The mail places join them only
+            in document mode; Classic keeps those in the sidebar. */}
+        <nav class="nav">
+          {DAY.map((item) => <NavLink key={item[1]} item={item} here={here} />)}
+          {!classic && (
+            <>
+              <span class="nav-rule" />
+              {MAIL.map((item) => <NavLink key={item[1]} item={item} here={here} />)}
+              {(screenerWaiting > 0 || here === "screener") && (
+                <NavLink item={["/screener", "screener", "Screener", "screener"]} here={here} />
+              )}
+            </>
+          )}
+        </nav>
 
         <div class="topline-side right topline-acts">
           {/* Replaces the permanent search field: one glyph, same palette. */}

@@ -34,15 +34,10 @@ export function Sidebar() {
   return (
     <aside class="sidebar">
       <nav>
-        {/* The day's surfaces lead, Calendar first; then the mail's places;
-            then people. Settings live in the overflow menu, not the rail. */}
-        <div class="side-label">Day</div>
-        <Item href="/today" nav="today" label="Today" here={here} />
-        <Item href="/calendar" nav="calendar" label="Calendar" here={here} />
-        <Item href="/board" nav="board" label="Board" here={here} />
-        <Item href="/notes" nav="notes" label="Notes" here={here} />
-
+        {/* The day's surfaces live in the top header; this rail is the mail's
+            places and people. Settings stay in the overflow menu. */}
         <div class="side-label">Mailbox</div>
+        <Item href="/today" nav="today" label="Today" here={here} />
         {MAILBOX.map(([href, nav, label, key]) => (
           <Item key={nav} href={href} nav={nav} label={label} here={here} count={key ? c[key] : undefined} />
         ))}
