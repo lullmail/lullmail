@@ -93,9 +93,11 @@ export function emailHasOwnColors(html: string): boolean {
 }
 
 function frameDoc(html: string, themed: boolean): string {
-  // The frame root wears the app's page color, so transparent mail looks
-  // native in dark mode instead of flashing white edges.
-  const bg = cssVar("--bg") || "transparent";
+  // Themed mail wears our canvas and our ink. Self-colored mail gets a white
+  // canvas instead: its own backgrounds and default-black text then read
+  // exactly as authored. Without this, a reply with one styled quote or
+  // signature renders black-on-dark in a dark theme.
+  const bg = themed ? (cssVar("--bg") || "transparent") : "#ffffff";
   const ink = themed ? cssVar("--ink") : "";
   const quoteInk = themed ? cssVar("--ink-2") : "";
   return (
