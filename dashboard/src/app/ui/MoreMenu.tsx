@@ -32,7 +32,7 @@ export function MoreMenu() {
       </button>
       {open && (
         <div class="menu menu-right" role="menu">
-          <button class="menu-item" type="button" role="menuitem" onClick={pick(toggleTheme)}>
+          <button class="menu-item" type="button" role="menuitem" onClick={pick(() => navigate("/settings/appearance"))}>
             <Icon name={theme.value === "dark" ? "sun" : "moon"} size={14} />
             Appearance<span class="note">{themeLabel}</span>
           </button>

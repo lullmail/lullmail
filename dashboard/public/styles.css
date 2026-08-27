@@ -925,8 +925,6 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 }
 .page.classic .topline { grid-column: 1 / -1; grid-row: 1; position: static; }
 .page.classic .nudge { grid-column: 1 / -1; grid-row: 2; }
-/* The lens lives in the rail in classic; the topline keeps only the wordmark. */
-.page.classic .acct-toggle { display: none; }
 /* Nav lives in the sidebar here, so the flanks stop competing for the centre. */
 .page.classic .topline-side { flex: none; }
 .page.classic .topline-side.left { flex: 1; }
@@ -1003,13 +1001,56 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
   min-width: 17px; height: 17px; padding: 0 5px; border-radius: var(--r-pill);
   background: var(--accent); color: var(--accent-ink);
 }
-/* The account section: buttons, not links, but they must not look different. */
-.side-acct-one .side-acct-domain {
-  flex: none; max-width: 45%;
-  font-size: 9.5px; color: var(--ink-3); letter-spacing: 0.02em;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+
+/* ============================================================ appearance
+
+   Users make it theirs: accent palettes ride on top of any base theme via
+   [data-accent] on the root; the type flavor swaps the editorial serif
+   subjects for the interface sans via [data-type]. Everything downstream
+   already reads tokens, so these few lines re-skin the whole product. */
+
+[data-accent="ocean"]   { --accent: #2f6fed; --accent-ink: #ffffff; }
+[data-accent="forest"]  { --accent: #2e7d4f; --accent-ink: #ffffff; }
+[data-accent="violet"]  { --accent: #7a4fd8; --accent-ink: #ffffff; }
+[data-accent="rose"]    { --accent: #d84a7a; --accent-ink: #ffffff; }
+[data-accent="teal"]    { --accent: #12909a; --accent-ink: #ffffff; }
+[data-accent="graphite"]{ --accent: #4a5568; --accent-ink: #ffffff; }
+[data-theme="dark"][data-accent="ocean"]    { --accent: #6b9aff; --accent-ink: #101528; }
+[data-theme="dark"][data-accent="forest"]   { --accent: #57b87e; --accent-ink: #0e1a12; }
+[data-theme="dark"][data-accent="violet"]   { --accent: #a98bff; --accent-ink: #171029; }
+[data-theme="dark"][data-accent="rose"]     { --accent: #ff7aa5; --accent-ink: #29101c; }
+[data-theme="dark"][data-accent="teal"]     { --accent: #4fc7cf; --accent-ink: #0c1e20; }
+[data-theme="dark"][data-accent="graphite"] { --accent: #9aa7ba; --accent-ink: #141a24; }
+[data-type="sans"] { --serif: var(--sans); }
+
+.theme-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--sp-3); }
+.theme-card {
+  padding: 0; border: 1.5px solid var(--line-strong); border-radius: var(--r-lg);
+  overflow: hidden; background: none; cursor: pointer; font: inherit; text-align: left;
+  transition: border-color 0.1s ease, box-shadow 0.1s ease;
 }
-.side-acct-all .side-text { font-weight: 640; }
+.theme-card:hover { border-color: var(--ink-3); }
+.theme-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.theme-card-surface { padding: 12px 14px; display: grid; gap: 7px; }
+.theme-card-name { padding: 9px 14px; font-size: var(--t-md); font-weight: 660; border-top: 1px solid var(--line); }
+.theme-chip { height: 10px; border-radius: var(--r-pill); }
+.accent-dots { display: flex; flex-wrap: wrap; gap: var(--sp-3); }
+.accent-dot {
+  width: 44px; height: 44px; border-radius: 50%; border: 2px solid transparent;
+  cursor: pointer; padding: 0; position: relative;
+}
+.accent-dot.active { border-color: var(--ink); }
+.accent-dot.active::after {
+  content: ""; position: absolute; inset: -6px; border: 1.5px solid var(--line-strong); border-radius: 50%;
+}
+.type-row { display: flex; gap: var(--sp-2); }
+.type-card {
+  flex: 1; padding: var(--sp-4) var(--sp-3); border: 1.5px solid var(--line-strong);
+  border-radius: var(--r-lg); background: none; cursor: pointer; font: inherit; text-align: center;
+}
+.type-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.type-card-sample { font-size: 22px; line-height: 1.2; }
+.type-card-note { display: block; margin-top: 4px; color: var(--ink-3); font-size: var(--t-xs); }
 
 .reader-empty {
   height: 100%; display: flex; flex-direction: column;

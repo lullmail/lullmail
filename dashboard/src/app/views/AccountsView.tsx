@@ -249,7 +249,7 @@ export function AccountsView() {
         title="Accounts"
         sub="Mailboxes this app mirrors. Credentials are encrypted at rest."
       />
-      <div class="settings-tabs"><a class="active" href="/settings/accounts">Mailboxes</a><a href="/settings/security">Security</a></div>
+      <div class="settings-tabs"><a class="active" href="/settings/accounts">Mailboxes</a><a href="/settings/appearance">Appearance</a><a href="/settings/security">Security</a></div>
       {loading && !data && <ListSkeleton rows={2} />}
       {error && <Empty title="That didn't load." sub={error} />}
       {data?.map((a) => <AccountCard account={a} onChange={reload} key={a.id} />)}

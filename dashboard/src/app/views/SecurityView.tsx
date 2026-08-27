@@ -136,7 +136,7 @@ export function SecurityView() {
   return (
     <>
       <PageHead kicker="Settings" title="Security" sub={security.email + " · passkeys are primary; recovery stays in your hands."} />
-      <div class="settings-tabs"><a href="/settings/accounts">Mailboxes</a><a class="active" href="/settings/security">Security</a></div>
+      <div class="settings-tabs"><a href="/settings/accounts">Mailboxes</a><a href="/settings/appearance">Appearance</a><a class="active" href="/settings/security">Security</a></div>
 
       <section class="settings-section">
         <div class="settings-section-head"><div><h2>Passkeys</h2><p>Device-bound credentials with user verification. Add two before you need the second.</p></div>

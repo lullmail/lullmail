@@ -33,6 +33,7 @@ const CalendarView = lazy(() => import("./views/CalendarView").then((m) => ({ de
 const PeopleView = lazy(() => import("./views/PeopleView").then((m) => ({ default: m.PeopleView })));
 const AccountsView = lazy(() => import("./views/AccountsView").then((m) => ({ default: m.AccountsView })));
 const SecurityView = lazy(() => import("./views/SecurityView").then((m) => ({ default: m.SecurityView })));
+const AppearanceView = lazy(() => import("./views/AppearanceView").then((m) => ({ default: m.AppearanceView })));
 
 /** Classic needs three columns' worth of room; below that the preference is
     honoured by falling back rather than by cramming. */
@@ -67,6 +68,7 @@ function CurrentView() {
     case "people": return <PeopleView />;
     case "accounts": return <AccountsView />;
     case "security": return <SecurityView />;
+    case "appearance": return <AppearanceView />;
     default: return <BucketView bucket={route.bucket || "imbox"} />;
   }
 }

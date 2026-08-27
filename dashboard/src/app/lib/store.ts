@@ -25,7 +25,11 @@ export const theme = signal<Theme>(
 );
 
 export function toggleTheme() {
-  const next = THEMES[(THEMES.indexOf(initialTheme()) + 1) % THEMES.length];
+  const next = THEMES[(THEMES.indexOf(theme.value) + 1) % THEMES.length];
+  setTheme(next);
+}
+
+export function setTheme(next: Theme) {
   theme.value = next;
   document.documentElement.setAttribute("data-theme", next);
   try {
@@ -33,6 +37,44 @@ export function toggleTheme() {
   } catch {
     /* private mode: the choice just won't survive a reload */
   }
+}
+
+/* ---- appearance: accent + type flavor ---- */
+
+export type Accent = "ember" | "ocean" | "forest" | "violet" | "rose" | "teal" | "graphite";
+const ACCENTS: Accent[] = ["ember", "ocean", "forest", "violet", "rose", "teal", "graphite"];
+
+function initialAccent(): Accent {
+  if (typeof document === "undefined") return "ember";
+  const attr = document.documentElement.getAttribute("data-accent");
+  return ACCENTS.includes(attr as Accent) ? (attr as Accent) : "ember";
+}
+
+export const accent = signal<Accent>("ember");
+
+export function setAccent(next: Accent) {
+  accent.value = next;
+  document.documentElement.setAttribute("data-accent", next);
+  try {
+    localStorage.setItem("es-accent", next);
+  } catch { /* private mode */ }
+}
+
+export type TypeFlavor = "editorial" | "clean";
+
+function initialType(): TypeFlavor {
+  if (typeof document === "undefined") return "editorial";
+  return document.documentElement.getAttribute("data-type") === "sans" ? "clean" : "editorial";
+}
+
+export const typeFlavor = signal<TypeFlavor>("editorial");
+
+export function setTypeFlavor(next: TypeFlavor) {
+  typeFlavor.value = next;
+  document.documentElement.setAttribute("data-type", next === "clean" ? "sans" : "serif");
+  try {
+    localStorage.setItem("es-type", next);
+  } catch { /* private mode */ }
 }
 
 /* ---- layout ---- */
@@ -56,6 +98,8 @@ export const layout = signal<Layout>("document");
 export function resolveLayout() {
   layout.value = initialLayout();
   accountFilter.value = initialAccountFilter();
+  accent.value = initialAccent();
+  typeFlavor.value = initialType();
   try {
     const split = parseInt(localStorage.getItem("es-classic-split") || "0", 10);
     if (split >= 320) splitWidth.value = split;

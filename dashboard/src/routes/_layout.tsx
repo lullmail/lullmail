@@ -28,7 +28,12 @@ export function head() {
         content:
           "(function(){try{var t=localStorage.getItem('es-theme');" +
           "if(t!=='light'&&t!=='sepia'&&t!=='dark'){t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light';}" +
-          "document.documentElement.setAttribute('data-theme',t);}catch(e){}})();",
+          "document.documentElement.setAttribute('data-theme',t);" +
+          "var a=localStorage.getItem('es-accent');" +
+          "if(a){document.documentElement.setAttribute('data-accent',a);}" +
+          "var y=localStorage.getItem('es-type');" +
+          "if(y==='clean'){document.documentElement.setAttribute('data-type','sans');}" +
+          "}catch(e){}})();",
       },
     ],
   };

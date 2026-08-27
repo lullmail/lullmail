@@ -11,6 +11,7 @@ declare module "@neutron-build/core" {
     | "/receipts"
     | "/screener"
     | "/settings/accounts"
+    | "/settings/appearance"
     | "/settings/security"
     | "/snoozed"
     | "/today"
