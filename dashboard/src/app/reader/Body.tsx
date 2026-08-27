@@ -132,9 +132,24 @@ function HtmlBody({ html, messageId, sender }: { html: string; messageId: string
     };
     frame.addEventListener("load", fit);
     window.addEventListener("resize", fit);
+    // Mail bodies keep growing after load — web fonts, images, lazy scripts.
+    // A single load-time measurement strands the tail of the message in an
+    // internally-scrolling box, which reads as "only the top shows".
+    let observer: ResizeObserver | null = null;
+    const observe = () => {
+      const body = frame.contentDocument?.body;
+      if (!body || typeof ResizeObserver === "undefined") return;
+      observer?.disconnect();
+      observer = new ResizeObserver(fit);
+      observer.observe(body);
+    };
+    frame.addEventListener("load", observe);
+    observe();
     return () => {
       frame.removeEventListener("load", fit);
+      frame.removeEventListener("load", observe);
       window.removeEventListener("resize", fit);
+      observer?.disconnect();
     };
   }, [safe, themeKey]);
 
