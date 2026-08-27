@@ -17,6 +17,7 @@ function standalone(): boolean {
 
 /** Register the offline shell and expose the platform's install affordance. */
 export function startPWA(): () => void {
+  const cleanup: (() => void)[] = [];
   const updateNetwork = () => { offline.value = !navigator.onLine; };
   const beforeInstall = (event: Event) => {
     event.preventDefault();
@@ -41,9 +42,23 @@ export function startPWA(): () => void {
     navigator.serviceWorker.register("/service-worker.js").catch(() => {
       // The app remains usable online; installability is progressive.
     });
+    // An SPA never navigates, so the browser never re-checks the worker — a
+    // tab open across deploys silently runs yesterday's code forever. Poll
+    // for updates, and when a new version takes control, reload once.
+    let reloading = false;
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (reloading) return;
+      reloading = true;
+      location.reload();
+    });
+    const updateTimer = setInterval(() => {
+      navigator.serviceWorker.getRegistration().then((reg) => reg?.update()).catch(() => {});
+    }, 60_000);
+    cleanup.push(() => clearInterval(updateTimer));
   }
 
   return () => {
+    cleanup.forEach((off) => off());
     window.removeEventListener("online", updateNetwork);
     window.removeEventListener("offline", updateNetwork);
     window.removeEventListener("beforeinstallprompt", beforeInstall);
