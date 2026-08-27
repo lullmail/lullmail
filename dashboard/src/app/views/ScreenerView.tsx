@@ -1,14 +1,15 @@
 import { useEffect } from "preact/hooks";
 import { api } from "../lib/api";
 import { useLoad } from "../lib/useLoad";
-import { resetSelection, setList } from "../lib/store";
+import { accountFilter, accountQS, resetSelection, setList } from "../lib/store";
 import type { ScreenerSender } from "../lib/types";
 import { Empty, ListSkeleton, PageHead } from "../ui/bits";
 import { ScreenerCard } from "../ui/ScreenerCard";
 
 export function ScreenerView() {
-  const { data, loading, error } = useLoad<ScreenerSender[]>("screener", (signal) =>
-    api<ScreenerSender[]>("/screener", { signal })
+  const lens = accountFilter.value;
+  const { data, loading, error } = useLoad<ScreenerSender[]>("screener:" + lens, (signal) =>
+    api<ScreenerSender[]>(accountQS("/screener"), { signal })
   );
 
   useEffect(() => { resetSelection(); }, []);

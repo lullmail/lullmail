@@ -1,7 +1,7 @@
 import { useEffect } from "preact/hooks";
 import { api } from "../lib/api";
 import { useLoad } from "../lib/useLoad";
-import { list, resetSelection, setList } from "../lib/store";
+import { accountFilter, accountQS, list, resetSelection, setList } from "../lib/store";
 import type { ListBucket, Row } from "../lib/types";
 import { Empty, ListSkeleton, PageHead } from "../ui/bits";
 import { MsgList } from "../ui/MsgRow";
@@ -48,8 +48,9 @@ const COPY: Record<ListBucket, { title: string; sub: string; emptyTitle: string;
 
 export function BucketView({ bucket }: { bucket: ListBucket }) {
   const copy = COPY[bucket];
-  const { data, loading, error } = useLoad<Row[]>("bucket:" + bucket, (signal) =>
-    api<Row[]>("/buckets/" + bucket, { signal })
+  const lens = accountFilter.value;
+  const { data, loading, error } = useLoad<Row[]>("bucket:" + bucket + ":" + lens, (signal) =>
+    api<Row[]>(accountQS("/buckets/" + bucket), { signal })
   );
 
   useEffect(() => { resetSelection(); }, [bucket]);

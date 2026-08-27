@@ -69,7 +69,7 @@ func (a *App) handleBoard(w http.ResponseWriter, r *http.Request) {
 		a.log.Error("board sweep failed", "err", err)
 	}
 
-	needsYou, waiting := a.briefThreads(r.Context(), uid)
+	needsYou, waiting := a.briefThreads(r.Context(), uid, r.URL.Query().Get("account"))
 	cards := make([]boardCard, 0, len(needsYou))
 	derived := map[string]bool{}
 	for _, t := range needsYou {

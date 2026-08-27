@@ -1,5 +1,5 @@
-import { useEffect, useState } from "preact/hooks";
-import { counts, layout, openCompose, palette } from "./lib/store";
+import { useEffect, useRef, useState } from "preact/hooks";
+import { accountFilter, accounts, counts, layout, openCompose, palette, setAccountFilter } from "./lib/store";
 import { path, routeFor } from "./lib/router";
 import { Icon } from "./ui/Icon";
 import { MoreMenu } from "./ui/MoreMenu";
@@ -41,6 +41,56 @@ function NavLink({ item, here }: { item: NavItem; here: string }) {
   );
 }
 
+/** The per-mailbox lens. One mailbox is the product's normal state — this
+    only appears once a second mailbox exists, and "All" is always offered. */
+function AccountPicker() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const list = accounts.value;
+  if (list.length < 2) return null;
+
+  useEffect(() => {
+    if (!open) return;
+    const away = (ev: MouseEvent) => {
+      if (!ref.current?.contains(ev.target as Node)) setOpen(false);
+    };
+    const t = setTimeout(() => document.addEventListener("click", away), 0);
+    return () => { clearTimeout(t); document.removeEventListener("click", away); };
+  }, [open]);
+
+  const current = list.find((a) => a.id === accountFilter.value);
+  const label = current ? current.address.split("@")[0] : "All";
+  const pick = (id: string) => () => { setOpen(false); setAccountFilter(id); };
+
+  return (
+    <div style={{ position: "relative" }} ref={ref}>
+      <button class="acct-toggle" type="button" aria-expanded={open} aria-label="Choose mailbox"
+        title={current ? current.address : "All mailboxes"}
+        onClick={() => setOpen((v) => !v)}>
+        {label}<Icon name="chevron" size={12} />
+      </button>
+      {open && (
+        <div class="menu menu-left" role="menu">
+          <button class={"menu-item" + (!current ? " lens-on" : "")} type="button" role="menuitem" onClick={pick("")}>
+            All mailboxes
+          </button>
+          <div class="menu-rule" />
+          {list.map((a) => {
+            const [local, domain] = a.address.split("@");
+            return (
+              <button key={a.id} class={"menu-item" + (current?.id === a.id ? " lens-on" : "")} type="button"
+                role="menuitem" onClick={pick(a.id)}>
+                <span class="lens-label">{local || a.address}</span>
+                <span class="note">{domain}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Topline() {
   const here = path.value ? routeFor(path.value).nav : "";
   const [stuck, setStuck] = useState(false);
@@ -60,6 +110,7 @@ export function Topline() {
       <div class="topline-in">
         <div class="topline-side left">
           <a href="/today" class="wordmark">email-soft</a>
+          <AccountPicker />
         </div>
 
         {!classic && (

@@ -5,7 +5,7 @@ import { signal } from "@preact/signals";
 import { path, routeFor, startRouter } from "./lib/router";
 import { installKeys } from "./lib/keys";
 import { refreshCounts } from "./lib/actions";
-import { accountCount, attentionTotal, compose, layout, palette, query, reader, resolveLayout, shortcuts, theme } from "./lib/store";
+import { accountCount, accountFilter, accounts, attentionTotal, compose, layout, palette, query, reader, resolveLayout, shortcuts, theme } from "./lib/store";
 import { Topline } from "./Topline";
 import { Sidebar } from "./Sidebar";
 import { Thread } from "./reader/Thread";
@@ -146,8 +146,15 @@ export default function App() {
   useEffect(() => {
     if (!mounted || !authed.value) return;
     refreshCounts();
-    api<unknown[]>("/accounts").then((rows) => { accountCount.value = rows.length; }).catch(() => {});
+    api<{ id: string; address: string }[]>("/accounts")
+      .then((rows) => { accounts.value = rows; accountCount.value = rows.length; })
+      .catch(() => {});
   }, [mounted, authed.value]);
+
+  // The lens is global: every badge follows it, not just the visible list.
+  useEffect(() => {
+    if (mounted && authed.value) refreshCounts();
+  }, [accountFilter.value]);
 
   if (!mounted || !authReady.value) {
     return (

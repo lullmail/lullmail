@@ -7,7 +7,7 @@
 import { api, ApiError } from "./api";
 import type { BoardCard, Bucket, Counts, ListBucket, Message, Row, StickyNote } from "./types";
 import {
-  closeReader, counts, list, openCompose, reader, rememberListScroll, resetSelection, showError, showToast,
+  accountQS, closeReader, counts, list, openCompose, reader, rememberListScroll, resetSelection, showError, showToast,
 } from "./store";
 
 /** The one place bucket names are written. Storage values are unchanged. */
@@ -35,7 +35,7 @@ export function reload() {
 
 export async function refreshCounts() {
   try {
-    counts.value = await api<Counts>("/counts", { fresh: true });
+    counts.value = await api<Counts>(accountQS("/counts"), { fresh: true });
   } catch {
     /* counts are decoration; a failure here must not disturb the view */
   }

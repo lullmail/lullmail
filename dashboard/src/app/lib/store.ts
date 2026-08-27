@@ -55,6 +55,7 @@ export const layout = signal<Layout>("document");
 
 export function resolveLayout() {
   layout.value = initialLayout();
+  accountFilter.value = initialAccountFilter();
   keyUses.value = readNum("es-keyuses");
   hintsOff.value = readNum("es-hints-off") === 1;
 }
@@ -79,6 +80,40 @@ export function toggleLayout() {
 
 /** null = not checked yet. 0 means show the setup screen, not six empty buckets. */
 export const accountCount = signal<number | null>(null);
+
+/* ---- the per-mailbox lens ----
+   The unified view is the product; the lens is a scope, not a mode switch.
+   Empty string = every mailbox together (the default). */
+
+export interface AccountLite { id: string; address: string }
+export const accounts = signal<AccountLite[]>([]);
+
+function initialAccountFilter(): string {
+  if (typeof localStorage === "undefined") return "";
+  try {
+    return localStorage.getItem("es-account") || "";
+  } catch {
+    return "";
+  }
+}
+
+export const accountFilter = signal<string>("");
+
+export function setAccountFilter(id: string) {
+  accountFilter.value = id;
+  try {
+    localStorage.setItem("es-account", id);
+  } catch {
+    /* private mode: the lens just won't survive a reload */
+  }
+}
+
+/** Appends the lens to any list path. Read at call time so views refetch. */
+export function accountQS(path: string): string {
+  const id = accountFilter.value;
+  if (!id) return path;
+  return path + (path.includes("?") ? "&" : "?") + "account=" + encodeURIComponent(id);
+}
 
 /** How many keyboard actions the user has actually used. The hint bar retires
     itself once they clearly know — teaching chrome should be temporary. */

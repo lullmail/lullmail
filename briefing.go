@@ -29,12 +29,17 @@ type briefThread struct {
 // requires: Imbox bucket, unread, and the thread's latest message is from
 // someone else. "You're waiting" requires the user to have spoken last in a
 // thread someone else started.
-func (a *App) briefThreads(ctx context.Context, uid string) (needsYou, waiting []briefThread) {
+func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, waiting []briefThread) {
 	// The user's own addresses, for whose-turn analysis.
 	myAddr := map[string]bool{}
 	{
-		rows, err := a.db.QueryContext(ctx,
-			`SELECT lower(address) FROM email_accounts WHERE user_id = $1`, uid)
+		myQuery := `SELECT lower(address) FROM email_accounts WHERE user_id = $1`
+		myArgs := []any{uid}
+		if account != "" {
+			myQuery += ` AND id = $2`
+			myArgs = append(myArgs, account)
+		}
+		rows, err := a.db.QueryContext(ctx, myQuery, myArgs...)
 		if err == nil {
 			for rows.Next() {
 				var s string
@@ -46,14 +51,20 @@ func (a *App) briefThreads(ctx context.Context, uid string) (needsYou, waiting [
 	}
 
 	// Latest message of every Imbox thread the user owns.
-	rows, err := a.db.QueryContext(ctx, `
+	listQuery := `
 		SELECT DISTINCT ON (m.thread_id)
 		       m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at, COALESCE(m.preview,'')
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
-		WHERE h.bucket = 'imbox'
-		ORDER BY m.thread_id, m.received_at DESC NULLS LAST`, uid)
+		WHERE h.bucket = 'imbox'`
+	listArgs := []any{uid}
+	if account != "" {
+		listQuery += ` AND ea.id = $2`
+		listArgs = append(listArgs, account)
+	}
+	listQuery += ` ORDER BY m.thread_id, m.received_at DESC NULLS LAST`
+	rows, err := a.db.QueryContext(ctx, listQuery, listArgs...)
 	if err != nil {
 		return nil, nil
 	}
@@ -133,16 +144,26 @@ func (a *App) handleBriefing(w http.ResponseWriter, r *http.Request) {
 	if err := a.sweepSnoozed(r.Context(), uid); err != nil {
 		a.log.Error("briefing sweep failed", "err", err)
 	}
-	needsYou, waiting := a.briefThreads(r.Context(), uid)
+	account := r.URL.Query().Get("account")
+	needsYou, waiting := a.briefThreads(r.Context(), uid, account)
 
 	// Feed + Paper Trail unread counts, screener total.
 	var feedN, paperN, screenerN int
-	a.db.QueryRowContext(r.Context(), `
+	briefCounts := `
 		SELECT
 		  count(*) FILTER (WHERE h.bucket='feed' AND h.read_at IS NULL),
 		  count(*) FILTER (WHERE h.bucket='paper_trail' AND h.read_at IS NULL),
 		  count(*) FILTER (WHERE h.bucket='screener')
-		FROM hey_messages h WHERE h.user_id = $1`, uid).Scan(&feedN, &paperN, &screenerN)
+		FROM hey_messages h
+		JOIN mail_messages m ON m.id = h.message_id
+		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+		WHERE h.user_id = $1`
+	briefArgs := []any{uid}
+	if account != "" {
+		briefCounts += ` AND ea.id = $2`
+		briefArgs = append(briefArgs, account)
+	}
+	a.db.QueryRowContext(r.Context(), briefCounts, briefArgs...).Scan(&feedN, &paperN, &screenerN)
 
 	writeJSON(w, map[string]any{
 		"needs_you":    orEmpty(needsYou),

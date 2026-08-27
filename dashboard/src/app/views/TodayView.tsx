@@ -1,7 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { api } from "../lib/api";
 import { useLoad } from "../lib/useLoad";
-import { cursor, resetSelection, setList } from "../lib/store";
+import { accountFilter, accountQS, cursor, resetSelection, setList } from "../lib/store";
 import { markDone, openThread, sendMail } from "../lib/actions";
 import type { Briefing, BriefThread, Row, ScreenerSender } from "../lib/types";
 import { countOf, daysSince, fmtDate, relativeAge, splitFrom } from "../lib/fmt";
@@ -102,10 +102,11 @@ function WaitingRow({ thread }: { thread: BriefThread }) {
 }
 
 export function TodayView() {
-  const { data, loading, error } = useLoad<[Briefing, ScreenerSender[]]>("today", async (signal) =>
+  const lens = accountFilter.value;
+  const { data, loading, error } = useLoad<[Briefing, ScreenerSender[]]>("today:" + lens, async (signal) =>
     Promise.all([
-      api<Briefing>("/briefing", { signal }),
-      api<ScreenerSender[]>("/screener", { signal }).catch(() => [] as ScreenerSender[]),
+      api<Briefing>(accountQS("/briefing"), { signal }),
+      api<ScreenerSender[]>(accountQS("/screener"), { signal }).catch(() => [] as ScreenerSender[]),
     ])
   );
 

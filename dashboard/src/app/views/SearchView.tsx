@@ -1,7 +1,7 @@
 import { useEffect } from "preact/hooks";
 import { api } from "../lib/api";
 import { useLoad } from "../lib/useLoad";
-import { list, resetSelection, setList } from "../lib/store";
+import { accountFilter, accountQS, list, resetSelection, setList } from "../lib/store";
 import type { Row } from "../lib/types";
 import { countOf } from "../lib/fmt";
 import { Empty, ListSkeleton, PageHead } from "../ui/bits";
@@ -10,8 +10,9 @@ import { BulkBar } from "../ui/BulkBar";
 
 /** One result surface for search, wherever the query was typed. */
 export function SearchView({ q }: { q: string }) {
-  const { data, loading, error } = useLoad<Row[]>("search:" + q, (signal) =>
-    api<Row[]>("/search?q=" + encodeURIComponent(q), { signal })
+  const lens = accountFilter.value;
+  const { data, loading, error } = useLoad<Row[]>("search:" + q + ":" + lens, (signal) =>
+    api<Row[]>(accountQS("/search?q=" + encodeURIComponent(q)), { signal })
   );
 
   useEffect(() => { resetSelection(); }, [q]);

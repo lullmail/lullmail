@@ -159,7 +159,7 @@ func (a *App) handleCounts(w http.ResponseWriter, r *http.Request) {
 		a.log.Error("counts sweep failed", "err", err)
 	}
 	var imbox, screener, feed, paper, aside, later int64
-	err = a.db.QueryRowContext(r.Context(), `
+	countsQuery := `
 		SELECT
 		  count(*) FILTER (WHERE h.bucket='imbox' AND h.read_at IS NULL),
 		  count(*) FILTER (WHERE h.bucket='screener'),
@@ -167,8 +167,17 @@ func (a *App) handleCounts(w http.ResponseWriter, r *http.Request) {
 		  count(*) FILTER (WHERE h.bucket='paper_trail' AND h.read_at IS NULL),
 		  count(*) FILTER (WHERE h.bucket='set_aside'),
 		  count(*) FILTER (WHERE h.bucket='later')
-		FROM hey_messages h WHERE h.user_id = $1`, uid,
-	).Scan(&imbox, &screener, &feed, &paper, &aside, &later)
+		FROM hey_messages h
+		JOIN mail_messages m ON m.id = h.message_id
+		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+		WHERE h.user_id = $1`
+	countsArgs := []any{uid}
+	if account := r.URL.Query().Get("account"); account != "" {
+		countsQuery += ` AND ea.id = $2`
+		countsArgs = append(countsArgs, account)
+	}
+	err = a.db.QueryRowContext(r.Context(), countsQuery, countsArgs...).
+		Scan(&imbox, &screener, &feed, &paper, &aside, &later)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return
@@ -178,6 +187,15 @@ func (a *App) handleCounts(w http.ResponseWriter, r *http.Request) {
 		"paper_trail": int(paper), "set_aside": int(aside), "later": int(later),
 		"snoozed": int(aside + later),
 	})
+}
+
+// accountClause is the ?account= lens for queries that already join
+// email_accounts as ea: empty (all mailboxes) or narrowed to one.
+func accountClause(r *http.Request) string {
+	if account := r.URL.Query().Get("account"); account != "" {
+		return ` AND ea.id = '` + strings.ReplaceAll(account, "'", "''") + `'`
+	}
+	return ""
 }
 
 // handleSearch full-text-ish search over the mirror: subject, participants,
@@ -203,8 +221,9 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
-		WHERE m.subject ILIKE $2 OR m.from_addrs ILIKE $2 OR m.to_addrs ILIKE $2 OR m.preview ILIKE $2
-		ORDER BY m.received_at DESC NULLS LAST
+		WHERE (m.subject ILIKE $2 OR m.from_addrs ILIKE $2 OR m.to_addrs ILIKE $2 OR m.preview ILIKE $2)`+
+		accountClause(r)+
+		` ORDER BY m.received_at DESC NULLS LAST
 		LIMIT 60`, uid, like)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
@@ -264,8 +283,9 @@ func (a *App) handleScreener(w http.ResponseWriter, r *http.Request) {
 		  AND NOT EXISTS (
 		    SELECT 1 FROM hey_senders s
 		    WHERE s.user_id = h.user_id
-		      AND s.sender_key = lower(m.from_addrs::json->0->>'email'))
-		GROUP BY 1
+		      AND s.sender_key = lower(m.from_addrs::json->0->>'email'))`+
+		accountClause(r)+
+		` GROUP BY 1
 		ORDER BY newest DESC`, uid)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
@@ -440,6 +460,9 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
 		return
 	}
+	// The per-mailbox lens: ?account=<email_accounts.id> narrows any list to
+	// one mailbox. Empty means all mailboxes — the default unified view.
+	account := r.URL.Query().Get("account")
 	// The Snoozed list (and the calendar fed by it) must never show a return
 	// date already past — sweep before listing.
 	if r.PathValue("bucket") == "snoozed" {
@@ -447,7 +470,7 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 			a.log.Error("bucket sweep failed", "err", err)
 		}
 	}
-	rows, err := a.db.QueryContext(r.Context(), `
+	query := `
 		SELECT m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at,
 		       h.read_at IS NOT NULL AS is_read, m.has_attachment, COALESCE(m.preview,''), h.bucket,
 		       h.set_aside_until,
@@ -455,8 +478,14 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 	          WHERE t.account_id = m.account_id AND t.thread_id = m.thread_id) AS thread_len
 		FROM hey_messages h
 		JOIN mail_messages m ON m.id = h.message_id
-		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = h.user_id
-		WHERE h.user_id = $1 AND h.bucket = ANY($2)
+		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+		WHERE h.user_id = $1 AND h.bucket = ANY($2)`
+	args := []any{uid, buckets}
+	if account != "" {
+		query += ` AND ea.id = $3`
+		args = append(args, account)
+	}
+	query += `
 		  AND m.id = (
 		    SELECT m2.id FROM hey_messages h2
 		    JOIN mail_messages m2 ON m2.id = h2.message_id
@@ -464,7 +493,8 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 		      AND m2.account_id = m.account_id AND m2.thread_id = m.thread_id
 		    ORDER BY m2.received_at DESC NULLS LAST LIMIT 1)
 		ORDER BY m.received_at DESC NULLS LAST
-		LIMIT 200`, uid, buckets)
+		LIMIT 200`
+	rows, err := a.db.QueryContext(r.Context(), query, args...)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return
