@@ -2,7 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import { api, download } from "../lib/api";
 import { useLoad } from "../lib/useLoad";
 import { setList, showError, showToast, syncNote } from "../lib/store";
-import { refreshCounts } from "../lib/actions";
+import { refreshAccounts, refreshCounts } from "../lib/actions";
 import type { Account } from "../lib/types";
 import { countOf, fmtDate } from "../lib/fmt";
 import { Empty, ListSkeleton, PageHead } from "../ui/bits";
@@ -220,6 +220,10 @@ export function AccountsView() {
   const { data, loading, error, reload } = useLoad<Account[]>("accounts", (signal) =>
     api<Account[]>("/accounts", { signal })
   );
+
+  // Connects and disconnects change what the picker, the welcome gate and the
+  // lens see — the app-wide stores must follow this view's reloads.
+  useEffect(() => { refreshAccounts(); }, [data]);
 
   useEffect(() => {
     setList({ kind: "none", key: "", loading, error, rows: [], senders: [], origin: null });

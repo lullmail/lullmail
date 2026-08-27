@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { api } from "../lib/api";
 import { useLoad } from "../lib/useLoad";
-import { resetSelection } from "../lib/store";
+import { accountFilter, accountQS, resetSelection, setList } from "../lib/store";
 import { openThread } from "../lib/actions";
 import type { Row } from "../lib/types";
 import { Empty, ListSkeleton, PageHead } from "../ui/bits";
@@ -56,11 +56,12 @@ export function CalendarView() {
   const [zoom, setZoom] = useState<Zoom>("month");
   const [anchor, setAnchor] = useState<Date>(today);
 
-  const { data, loading, error } = useLoad<Row[]>("cal:snoozed", (signal) =>
-    api<Row[]>("/buckets/snoozed", { signal }).catch(() => [] as Row[])
+  const lens = accountFilter.value;
+  const { data, loading, error } = useLoad<Row[]>("cal:snoozed:" + lens, (signal) =>
+    api<Row[]>(accountQS("/buckets/snoozed"), { signal }).catch(() => [] as Row[])
   );
 
-  useEffect(() => { resetSelection(); }, []);
+  useEffect(() => { resetSelection(); setList({ kind: "none", key: "calendar", loading: false, error: null, rows: [], senders: [], origin: null }); }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

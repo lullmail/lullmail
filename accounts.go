@@ -187,6 +187,8 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 		uid, string(mirrorID), req.Provider, req.Address, req.Label, req.Username,
 		req.Host, req.Port, req.SMTPHost, req.SMTPPort, ciphertext, req.BackfillDays)
 	if err != nil {
+		// Do not orphan the mirror row: nothing would own or clean it.
+		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM mail_accounts WHERE id=$1`, mirrorID)
 		writeProblem(w, http.StatusInternalServerError, "Insert Failed", err.Error())
 		return
 	}
@@ -241,12 +243,11 @@ func (a *App) updateRetention(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 	result, err := a.db.ExecContext(r.Context(), `UPDATE email_accounts SET retention_days=$1 WHERE id=$2 AND user_id=$3`, req.Days, id, uid)
-	n, _ := result.RowsAffected()
 	if err != nil {
 		writeProblem(w, 500, "Retention Failed", err.Error())
 		return
 	}
-	if n != 1 {
+	if n, _ := result.RowsAffected(); n != 1 {
 		writeProblem(w, 404, "Not Found", "no such account")
 		return
 	}
@@ -287,10 +288,10 @@ func (a *App) applyRetention(ctx context.Context, uid string) error {
 			query string
 			args  []any
 		}{
-			{`DELETE FROM hey_messages WHERE user_id=$1 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$2 AND received_at < now()-($3 * interval '1 day'))`, []any{uid, p.mirror, p.days}},
-			{`DELETE FROM mail_message_mailboxes WHERE account_id=$1 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$1 AND received_at < now()-($2 * interval '1 day'))`, []any{p.mirror, p.days}},
-			{`DELETE FROM mail_bodies WHERE account_id=$1 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$1 AND received_at < now()-($2 * interval '1 day'))`, []any{p.mirror, p.days}},
-			{`DELETE FROM mail_messages WHERE account_id=$1 AND received_at < now()-($2 * interval '1 day')`, []any{p.mirror, p.days}},
+			{`DELETE FROM hey_messages WHERE user_id=$1 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$2 AND (received_at AT TIME ZONE 'UTC') < now()-($3 * interval '1 day'))`, []any{uid, p.mirror, p.days}},
+			{`DELETE FROM mail_message_mailboxes WHERE account_id=$1 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$1 AND (received_at AT TIME ZONE 'UTC') < now()-($2 * interval '1 day'))`, []any{p.mirror, p.days}},
+			{`DELETE FROM mail_bodies WHERE account_id=$1 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$1 AND (received_at AT TIME ZONE 'UTC') < now()-($2 * interval '1 day'))`, []any{p.mirror, p.days}},
+			{`DELETE FROM mail_messages WHERE account_id=$1 AND (received_at AT TIME ZONE 'UTC') < now()-($2 * interval '1 day')`, []any{p.mirror, p.days}},
 		}
 		for _, deletion := range deletes {
 			if _, err := tx.ExecContext(ctx, deletion.query, deletion.args...); err != nil {

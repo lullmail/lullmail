@@ -30,7 +30,7 @@ function QuickActs({ row }: { row: Row }) {
           />
         )}
       </div>
-      <button class="btn-icon" type="button" title="Reply later (l)" onClick={stop(() => moveTo([row], "later"))}>
+      <button class="btn-icon" type="button" title="Move to Snoozed" onClick={stop(() => moveTo([row], "later"))}>
         <Icon name="later" size={15} />
       </button>
     </div>

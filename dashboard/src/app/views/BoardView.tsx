@@ -1,7 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { api } from "../lib/api";
 import { useLoad } from "../lib/useLoad";
-import { cursor, resetSelection, setList } from "../lib/store";
+import { accountFilter, accountQS, cursor, resetSelection, setList } from "../lib/store";
 import { addCard, markDone, openThread, removeCard, setCardDone } from "../lib/actions";
 import type { Board, BoardCard, Row } from "../lib/types";
 import { daysSince, fmtDate, relativeAge, splitFrom } from "../lib/fmt";
@@ -178,10 +178,11 @@ function Column({ title, count, sub, children }: {
 }
 
 export function BoardView() {
-  const { data, loading, error } = useLoad<[Board, Row[]]>("board", async (signal) =>
+  const lens = accountFilter.value;
+  const { data, loading, error } = useLoad<[Board, Row[]]>("board:" + lens, async (signal) =>
     Promise.all([
-      api<Board>("/board", { signal }),
-      api<Row[]>("/buckets/snoozed", { signal }).catch(() => [] as Row[]),
+      api<Board>(accountQS("/board"), { signal }),
+      api<Row[]>(accountQS("/buckets/snoozed"), { signal }).catch(() => [] as Row[]),
     ])
   );
 

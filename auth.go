@@ -658,6 +658,17 @@ func (a *App) saveUsedCredential(ctx context.Context, uid string, credential *we
 	return nil
 }
 
+// revokeOtherSessions signs out every session except the one making the
+// request. Credential events (passkey removed, recovery codes replaced) are
+// the owner saying "something may be compromised" — stale sessions must not
+// outlive that.
+func (a *App) revokeOtherSessions(r *http.Request, uid string) {
+	if cookie, err := r.Cookie(sessionCookie); err == nil {
+		_, _ = a.db.ExecContext(r.Context(),
+			`DELETE FROM auth_sessions WHERE user_id=$1 AND id_hash<>$2`, uid, tokenHash(cookie.Value))
+	}
+}
+
 func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookie); err == nil {
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM auth_sessions WHERE id_hash=$1`, tokenHash(cookie.Value))
@@ -725,8 +736,12 @@ func (a *App) handleRecoveryLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := a.db.ExecContext(r.Context(), `UPDATE auth_recovery_codes SET used_at=now()
 		WHERE user_id=$1 AND code_hash=$2 AND used_at IS NULL`, uid, a.recoveryDigest(req.Code))
+	if err != nil {
+		writeProblem(w, 500, "Recovery Failed", err.Error())
+		return
+	}
 	n, _ := result.RowsAffected()
-	if err != nil || n != 1 {
+	if n != 1 {
 		writeProblem(w, 401, "Recovery Failed", "that recovery code is not valid or was already used")
 		return
 	}
@@ -841,11 +856,15 @@ func (a *App) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := a.db.ExecContext(r.Context(), `DELETE FROM auth_credentials WHERE id=$1 AND user_id=$2`, r.PathValue("id"), uid)
-	n, _ := result.RowsAffected()
-	if err != nil || n != 1 {
+	if err != nil {
+		writeProblem(w, 500, "Delete Failed", err.Error())
+		return
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
 		writeProblem(w, 404, "Not Found", "no such passkey")
 		return
 	}
+	a.revokeOtherSessions(r, uid)
 	writeJSON(w, map[string]any{"ok": true})
 }
 
@@ -856,6 +875,7 @@ func (a *App) handleRecoveryRegenerate(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Recovery Failed", err.Error())
 		return
 	}
+	a.revokeOtherSessions(r, uid)
 	writeJSON(w, map[string]any{"recovery_codes": codes})
 }
 
@@ -936,8 +956,11 @@ func (a *App) handleSessions(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		current, _ := r.Context().Value(sessionContextKey{}).(string)
 		result, err := a.db.ExecContext(r.Context(), `DELETE FROM auth_sessions WHERE id_hash=$1 AND user_id=$2`, id, uid)
-		n, _ := result.RowsAffected()
-		if err != nil || n != 1 {
+		if err != nil {
+			writeProblem(w, 500, "Delete Failed", err.Error())
+			return
+		}
+		if n, _ := result.RowsAffected(); n != 1 {
 			writeProblem(w, 404, "Not Found", "no such session")
 			return
 		}

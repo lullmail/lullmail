@@ -3,7 +3,7 @@
 // the same place instead of two rival result views.
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { api } from "../lib/api";
-import { layout, palette, query, theme, toggleLayout, toggleTheme } from "../lib/store";
+import { accountQS, layout, palette, query, theme, toggleLayout, toggleTheme } from "../lib/store";
 import { openThread } from "../lib/actions";
 import { navigate } from "../lib/router";
 import { fmtDate, splitFrom } from "../lib/fmt";
@@ -49,14 +49,14 @@ export function Palette() {
   const close = () => { palette.value = false; };
 
   useEffect(() => {
-    api<Mailbox[]>("/mailboxes").then(setMailboxes).catch(() => {});
-    api<Row[]>("/recent").then(setRecent).catch(() => {});
+    api<Mailbox[]>(accountQS("/mailboxes")).then(setMailboxes).catch(() => {});
+    api<Row[]>(accountQS("/recent")).then(setRecent).catch(() => {});
   }, []);
 
   useEffect(() => {
     if (!folder) { setFolderRows(null); return; }
     setFolderRows(null);
-    api<Row[]>("/folder?name=" + encodeURIComponent(folder))
+    api<Row[]>(accountQS("/folder?name=" + encodeURIComponent(folder)))
       .then(setFolderRows)
       .catch(() => setFolderRows([]));
   }, [folder]);

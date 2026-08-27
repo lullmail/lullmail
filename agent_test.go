@@ -8,7 +8,8 @@ import (
 
 func TestAgentScopeFence(t *testing.T) {
 	allowed := []string{
-		"/accounts", "/mail/whatever", "/screener", "/counts", "/briefing",
+		"/accounts", "/accounts/x/sync", "/mail/whatever", "/screener",
+		"/screener/decide", "/screener/undecide", "/counts", "/briefing",
 		"/threads/t1", "/messages/m1/action", "/send", "/buckets/imbox",
 		"/notes", "/people", "/personal/export",
 	}

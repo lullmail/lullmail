@@ -26,6 +26,7 @@ var agentAllowed = map[string]bool{
 	"/accounts/":       true, // item routes: sync, retention, delete
 	"/mail/":           true, // raw mirror surface (bodies, search)
 	"/screener":        true,
+	"/screener/":       true, // decide + undecide (the MCP adapter's screener_decide)
 	"/counts":          true,
 	"/search":          true,
 	"/briefing":        true,

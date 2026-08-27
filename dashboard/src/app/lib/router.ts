@@ -6,6 +6,7 @@
 // reader, the list scroll position and the keyboard selection on every click.
 import { signal } from "@preact/signals";
 import type { ListBucket } from "./types";
+import { query } from "./store";
 
 export type PageKind = "today" | "board" | "notes" | "calendar" | "bucket" | "screener" | "people" | "accounts" | "security" | "search";
 
@@ -47,11 +48,14 @@ export function routeFor(pathname: string): Route {
 // would keep the build-time highlight forever. startRouter fills this in.
 export const path = signal<string>("");
 
+// Navigation leaves search: the palette's query is a takeover, and any route
+// change — link, g-key, back — is the user saying "show me this instead".
 export function navigate(to: string) {
-  const next = normalise(to);
-  if (next === path.value) return;
-  window.history.pushState({}, "", next);
-  path.value = next;
+	const next = normalise(to);
+	query.value = "";
+	if (next === path.value) return;
+	window.history.pushState({}, "", next);
+	path.value = next;
 }
 
 /** Intercepts same-origin left-clicks so anchors stay real links but stop reloading. */
@@ -59,6 +63,7 @@ export function startRouter() {
   if (typeof window === "undefined") return;
   path.value = normalise(window.location.pathname);
   window.addEventListener("popstate", () => {
+    query.value = "";
     path.value = normalise(window.location.pathname);
   });
   document.addEventListener("click", (ev) => {

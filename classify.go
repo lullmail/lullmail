@@ -29,7 +29,7 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
 		WHERE h.message_id IS NULL
-		  AND m.received_at > now() - make_interval(days => ea.backfill_days)`, uid)
+		  AND (m.received_at AT TIME ZONE 'UTC') > now() - make_interval(days => ea.backfill_days)`, uid)
 	if err != nil {
 		return err
 	}
@@ -96,13 +96,15 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 	var batch []pending
 	for rows.Next() {
 		var acct, id, fromJSON string
-		var received, connected time.Time
+		var received, connected sql.NullTime
 		if err := rows.Scan(&acct, &id, &fromJSON, &received, &connected); err != nil {
 			return err
 		}
+		// A NULL INTERNALDATE must not wedge the whole pass; undated mail is
+		// treated as new (it screens like any unknown sender).
 		batch = append(batch, pending{
 			acct: acct, id: id, sender: firstSenderEmail(fromJSON),
-			historical: received.Before(connected),
+			historical: received.Valid && connected.Valid && received.Time.Before(connected.Time),
 		})
 	}
 	if len(batch) == 0 {
@@ -121,12 +123,40 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 			`SELECT route, allowed FROM hey_senders WHERE user_id = $1 AND sender_key = $2`,
 			uid, p.sender).Scan(&route, &allowed)
 		bucket := classifySender(decided == nil, allowed, route, correspondents[p.sender], p.historical)
+		// Broken envelopes (no parsable From) can never be decided or shown;
+		// they file to Receipts instead of inflating the Screener forever.
+		if p.sender == "" {
+			bucket = "paper_trail"
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO hey_messages (user_id, message_id, bucket)
 			VALUES ($1, $2, $3) ON CONFLICT (user_id, message_id) DO NOTHING`,
 			uid, p.id, bucket); err != nil {
 			return err
 		}
+	}
+	// Self-heal the decide-vs-classify race: a decision committed while this
+	// batch was being read parks mail in 'screener' that the re-route already
+	// missed. Re-running the re-route here closes the window.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE hey_messages h SET bucket = CASE WHEN s.allowed THEN s.route ELSE 'dropped' END
+		FROM hey_senders s, mail_messages m
+		WHERE h.user_id = $1 AND h.bucket = 'screener'
+		  AND h.message_id = m.id AND s.user_id = $1 AND s.sender_key <> ''
+		  AND s.sender_key = lower(COALESCE(m.from_addrs, '[]')::json->0->>'email')`, uid); err != nil {
+		return err
+	}
+	// Malformed-From mail parked in 'screener' before the rule above existed
+	// also moves to Receipts, so the badge stops counting the unshowable.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE hey_messages h SET bucket = 'paper_trail'
+		FROM mail_messages m
+		WHERE h.user_id = $1 AND h.bucket = 'screener' AND h.message_id = m.id
+		  AND (m.from_addrs IS NULL
+		       OR json_typeof(COALESCE(m.from_addrs, '[]')::json) <> 'array'
+		       OR COALESCE(m.from_addrs, '[]')::json->0->>'email' IS NULL
+		       OR lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = '')`, uid); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -142,8 +172,9 @@ func classifySender(decided, allowed bool, route string, correspondent, historic
 		if allowed {
 			return route
 		}
-		// Blocked senders park outside every view on purpose.
-		return "screener"
+		// Blocked senders park in 'dropped' — outside every view AND outside
+		// the screener count, so the badge never shows invisible mail.
+		return "dropped"
 	case correspondent:
 		return "imbox"
 	case historical:
@@ -380,16 +411,18 @@ func (a *App) handleDecide(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Decide Failed", err.Error())
 		return
 	}
-	// Re-route their Screener mail. Substring match against the JSON column
-	// is deliberately loose (false positives need an email that contains
-	// another decided sender's address); tightening needs a generated
-	// sender column if it ever matters.
+	// Re-route their Screener mail. Exact first-From match: a substring LIKE
+	// here made blocking a@x.com also swallow not-a@x.com.
+	parked := req.Route
+	if !req.Allow {
+		parked = "dropped"
+	}
 	if _, err := tx.ExecContext(r.Context(), `
 		UPDATE hey_messages SET bucket = $3
 		WHERE user_id = $1 AND bucket = 'screener' AND message_id IN (
 		  SELECT m.id FROM mail_messages m
-		  WHERE m.from_addrs LIKE '%' || $2 || '%')`,
-		uid, req.Sender, req.Route); err != nil {
+		  WHERE lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = $2)`,
+		uid, req.Sender, parked); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Reroute Failed", err.Error())
 		return
 	}
@@ -422,6 +455,26 @@ func (a *App) handleUndecide(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
 		return
 	}
+	// The recall set is the buckets the decision itself placed (its route, or
+	// 'dropped' for blocked) plus anything still sitting in the Screener —
+	// mail the user filed by hand afterwards keeps the bucket they chose.
+	var prevRoute string
+	var prevAllowed bool
+	err = a.db.QueryRowContext(r.Context(),
+		`SELECT route, allowed FROM hey_senders WHERE user_id = $1 AND sender_key = $2`,
+		uid, req.Sender).Scan(&prevRoute, &prevAllowed)
+	if err == sql.ErrNoRows {
+		writeJSON(w, map[string]any{"sender": req.Sender, "route": "screener"})
+		return
+	}
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	wasParked := prevRoute
+	if !prevAllowed {
+		wasParked = "dropped"
+	}
 	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Begin Failed", err.Error())
@@ -434,15 +487,12 @@ func (a *App) handleUndecide(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Undecide Failed", err.Error())
 		return
 	}
-	// Mirror of handleDecide's re-route, in the other direction. Only mail the
-	// decision itself placed is recalled: a thread the user has since filed by
-	// hand keeps the bucket they chose.
 	if _, err := tx.ExecContext(r.Context(), `
 		UPDATE hey_messages SET bucket = 'screener'
-		WHERE user_id = $1 AND message_id IN (
+		WHERE user_id = $1 AND bucket = ANY($3) AND message_id IN (
 		  SELECT m.id FROM mail_messages m
-		  WHERE m.from_addrs LIKE '%' || $2 || '%')`,
-		uid, req.Sender); err != nil {
+		  WHERE lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = $2)`,
+		uid, req.Sender, []string{"screener", wasParked}); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Reroute Failed", err.Error())
 		return
 	}

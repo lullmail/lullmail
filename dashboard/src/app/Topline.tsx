@@ -47,7 +47,6 @@ function AccountPicker() {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const list = accounts.value;
-  if (list.length < 2) return null;
 
   useEffect(() => {
     if (!open) return;
@@ -57,6 +56,9 @@ function AccountPicker() {
     const t = setTimeout(() => document.addEventListener("click", away), 0);
     return () => { clearTimeout(t); document.removeEventListener("click", away); };
   }, [open]);
+
+  // Hooks above must run unconditionally; hiding is a render concern.
+  if (list.length < 2) return null;
 
   const current = list.find((a) => a.id === accountFilter.value);
   const label = current ? current.address.split("@")[0] : "All";

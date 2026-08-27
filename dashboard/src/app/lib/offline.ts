@@ -109,7 +109,19 @@ export async function clearOfflineData(): Promise<void> {
 }
 
 export function startOfflineData(): () => void {
-  const replay = () => { replayMutations().then(() => clearResponseCache()).catch(() => {}); };
+  // A replay changed real state; whatever is on screen should catch up now,
+  // not on the next navigation or the 45s counts tick. Dynamic import:
+  // actions imports this module's cache helpers, and a static back-edge
+  // would cycle.
+  const replay = () => {
+    replayMutations().then(async (n) => {
+      if (n > 0) {
+        const { reload, refreshCounts } = await import("./actions");
+        reload(); refreshCounts();
+      }
+      return clearResponseCache();
+    }).catch(() => {});
+  };
   window.addEventListener("online", replay); replay();
   return () => window.removeEventListener("online", replay);
 }

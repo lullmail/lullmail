@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api } from "../lib/api";
 import { useLoad } from "../lib/useLoad";
-import { resetSelection } from "../lib/store";
+import { resetSelection, setList } from "../lib/store";
 import { createNote, saveNote, throwAwayNote } from "../lib/actions";
 import type { StickyNote } from "../lib/types";
 import { ListSkeleton, PageHead } from "../ui/bits";
@@ -109,7 +109,8 @@ export function NotesView() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const wallRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => { resetSelection(); }, []);
+  // The keyboard layer must not keep acting on the previous view's mail rows.
+  useEffect(() => { resetSelection(); setList({ kind: "none", key: "notes", loading: false, error: null, rows: [], senders: [], origin: null }); }, []);
 
   const posOf = (n: StickyNote) => positions[n.id] || { x: n.x, y: n.y };
 

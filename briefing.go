@@ -189,6 +189,8 @@ func (a *App) handleRecent(w http.ResponseWriter, r *http.Request) {
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
+		WHERE true`+
+		accountClause(r)+`
 		ORDER BY m.thread_id, m.received_at DESC NULLS LAST
 		LIMIT 40`, uid)
 }
@@ -215,7 +217,8 @@ func (a *App) handleFolder(w http.ResponseWriter, r *http.Request) {
 		JOIN mail_messages m ON m.account_id = mm.account_id AND m.id = mm.message_id
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
-		WHERE lower(mb.name) = lower($2)
+		WHERE lower(mb.name) = lower($2)`+
+		accountClause(r)+`
 		ORDER BY m.thread_id, m.received_at DESC NULLS LAST
 		LIMIT 100`, uid, name)
 }
@@ -232,6 +235,8 @@ func (a *App) handleMailboxList(w http.ResponseWriter, r *http.Request) {
 		SELECT DISTINCT ON (lower(mb.name)) lower(mb.name), mb.role
 		FROM mail_mailboxes mb
 		JOIN email_accounts ea ON ea.mirror_account_id = mb.account_id AND ea.user_id = $1
+		WHERE true`+
+		accountClause(r)+`
 		ORDER BY lower(mb.name)`, uid)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())

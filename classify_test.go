@@ -12,7 +12,7 @@ func TestClassifySender(t *testing.T) {
 		want             string
 	}{
 		{"allowed decision routes in", true, true, "feed", false, false, "feed"},
-		{"blocked decision parks", true, false, "", false, false, "screener"},
+		{"blocked decision parks in dropped", true, false, "", false, false, "dropped"},
 		{"correspondent always reaches the inbox", false, false, "", true, false, "imbox"},
 		{"correspondent history still reaches the inbox", false, false, "", true, true, "imbox"},
 		{"unknown history files to receipts", false, false, "", false, true, "paper_trail"},

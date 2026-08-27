@@ -2,7 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import { api, authApi, authed, refreshAuth } from "../lib/api";
 import { createPasskey } from "../lib/passkeys";
 import { fmtDate } from "../lib/fmt";
-import { showError, showToast } from "../lib/store";
+import { resetSelection, setList, showError, showToast } from "../lib/store";
 import { Empty, ListSkeleton, PageHead } from "../ui/bits";
 import { navigate } from "../lib/router";
 import { clearOfflineData } from "../lib/offline";
@@ -39,7 +39,11 @@ export function SecurityView() {
       setSecurity(next); setSessions(active); setPush(pushState); setAgentTokens(tokens);
     } catch (e) { showError(e instanceof Error ? e.message : "Security settings failed"); }
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    resetSelection();
+    setList({ kind: "none", key: "security", loading: false, error: null, rows: [], senders: [], origin: null });
+    load();
+  }, []);
 
   const addPasskey = async () => {
     const name = window.prompt("Name this passkey", "This device")?.trim();
@@ -163,7 +167,7 @@ export function SecurityView() {
       <section class="settings-section">
         <div class="settings-section-head"><div><h2>Active sessions</h2><p>Thirty-day server-side sessions. Revoke anything you do not recognise.</p></div><button class="btn btn-outline btn-sm" type="button" onClick={logout}>Sign out here</button></div>
         {sessions.length === 0 && <Empty title="No active sessions." />}
-        {sessions.map((session) => <div class="security-row" key={session.id}><div><strong>{session.current ? "This session" : "Signed-in device"}</strong><span>{session.user_agent || "Unknown browser"} · seen {fmtDate(session.last_seen_at)}</span></div><button class="btn btn-quiet-danger btn-sm" type="button" onClick={async () => { await api("/security/sessions/" + session.id, { method: "DELETE" }); if (session.current) { authed.value = false; await refreshAuth(); } else await load(); }}>Revoke</button></div>)}
+        {sessions.map((session) => <div class="security-row" key={session.id}><div><strong>{session.current ? "This session" : "Signed-in device"}</strong><span>{session.user_agent || "Unknown browser"} · seen {fmtDate(session.last_seen_at)}</span></div><button class="btn btn-quiet-danger btn-sm" type="button" onClick={async () => { await api("/security/sessions/" + encodeURIComponent(session.id), { method: "DELETE" }); if (session.current) { authed.value = false; await refreshAuth(); } else await load(); }}>Revoke</button></div>)}
       </section>
 
       <section class="settings-section">

@@ -7,7 +7,7 @@
 import { api, ApiError } from "./api";
 import type { BoardCard, Bucket, Counts, ListBucket, Message, Row, StickyNote } from "./types";
 import {
-  accountQS, closeReader, counts, list, openCompose, reader, rememberListScroll, resetSelection, showError, showToast,
+  accountCount, accountFilter, accountQS, accounts, closeReader, counts, list, openCompose, reader, rememberListScroll, resetSelection, setAccountFilter, showError, showToast,
 } from "./store";
 
 /** The one place bucket names are written. Storage values are unchanged. */
@@ -38,6 +38,24 @@ export async function refreshCounts() {
     counts.value = await api<Counts>(accountQS("/counts"), { fresh: true });
   } catch {
     /* counts are decoration; a failure here must not disturb the view */
+  }
+}
+
+/** Reload the mailbox list everywhere it is consumed (picker, welcome gate,
+    lens validation) — one source of truth for connect/disconnect events. */
+export async function refreshAccounts() {
+  try {
+    const rows = await api<{ id: string; address: string }[]>("/accounts", { fresh: true });
+    accounts.value = rows;
+    accountCount.value = rows.length;
+    // A lens pointing at a mailbox that no longer exists (disconnected while
+    // lensed, or another owner's id in this browser) is a silent dead-end:
+    // every list would fetch an empty account forever. Fall back to All.
+    if (accountFilter.value && !rows.some((a) => a.id === accountFilter.value)) {
+      setAccountFilter("");
+    }
+  } catch {
+    /* the welcome gate keeps its last known count */
   }
 }
 
