@@ -1,4 +1,4 @@
-const title = "email-soft — Email doesn't need your whole day";
+const title = "email-soft — Less time on email";
 const description = "A focused email client that screens new senders, shows what needs you today, and brings unfinished mail back at the right time.";
 
 export const config = { mode: "static" };
@@ -47,7 +47,7 @@ export default function Home() {
 
             <div class="hero-copy">
               <p class="overline">A focused email client for the mailbox you already use.</p>
-              <h1 id="hero-title"><span>Email doesn't need </span><em>your whole day.</em></h1>
+              <h1 id="hero-title"><span>Less time</span><em>on email.</em></h1>
               <p class="hero-lede">Choose who gets through. See what actually needs you. Set the rest aside until the right day.</p>
               <a class="arrow-link light" href="#product">See how it works <span aria-hidden="true">↓</span></a>
             </div>
