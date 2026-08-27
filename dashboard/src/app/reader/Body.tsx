@@ -114,14 +114,28 @@ function HtmlBody({ html, messageId, sender }: { html: string; messageId: string
     if (!frame) return;
     const fit = () => {
       try {
-        const h = frame.contentDocument?.body?.scrollHeight || 300;
-        frame.style.height = Math.min(Math.max(h + 12, 40), 900) + "px";
+        const content = (frame.contentDocument?.body?.scrollHeight || 300) + 12;
+        // In the Classic reader pane the message owns the pane: fill the
+        // remaining height so short mail doesn't hug the top, and let longer
+        // mail extend past it so the pane scrolls as one document. The 900px
+        // content cap is a document-mode rule; in a pane it strands space.
+        const pane = frame.closest(".reader-pane");
+        if (pane) {
+          const fill = pane.clientHeight - (frame.getBoundingClientRect().top - pane.getBoundingClientRect().top) - 16;
+          frame.style.height = Math.max(content, fill, 200) + "px";
+          return;
+        }
+        frame.style.height = Math.min(Math.max(content, 40), 900) + "px";
       } catch {
         frame.style.height = "300px";
       }
     };
     frame.addEventListener("load", fit);
-    return () => frame.removeEventListener("load", fit);
+    window.addEventListener("resize", fit);
+    return () => {
+      frame.removeEventListener("load", fit);
+      window.removeEventListener("resize", fit);
+    };
   }, [safe, themeKey]);
 
   return (
