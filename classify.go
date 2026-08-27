@@ -18,10 +18,12 @@ import (
 
 // classifyUser assigns a bucket to every unclassified mirror message within
 // the account's backfill window. Unknown senders land in the Screener; a
-// decision made later re-routes everything still sitting there.
+// decision made later re-routes everything still sitting there. Senders the
+// owner has already emailed from a connected mailbox skip the Screener
+// entirely — replying to someone is a decision.
 func (a *App) classifyUser(ctx context.Context, uid string) error {
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT m.account_id, m.id, m.from_addrs
+		SELECT m.account_id, m.id, COALESCE(m.from_addrs, '')
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
@@ -31,6 +33,25 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		return err
 	}
 	defer rows.Close()
+
+	// Correspondents: every address the owner has sent mail to. Backfill
+	// makes this load-bearing — an imported mailbox should not re-screen
+	// years of existing conversation partners.
+	correspondents := map[string]bool{}
+	if cr, err := a.db.QueryContext(ctx, `
+		SELECT DISTINCT lower(t->>'email')
+		FROM mail_messages m
+		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+		CROSS JOIN LATERAL json_array_elements(COALESCE(m.to_addrs, '[]')::json) t
+		WHERE lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = lower(ea.address)`, uid); err == nil {
+		for cr.Next() {
+			var addr sql.NullString
+			if cr.Scan(&addr) == nil && addr.Valid && addr.String != "" {
+				correspondents[addr.String] = true
+			}
+		}
+		cr.Close()
+	}
 
 	type pending struct{ acct, id, sender string }
 	var batch []pending
@@ -57,8 +78,14 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 			`SELECT route, allowed FROM hey_senders WHERE user_id = $1 AND sender_key = $2`,
 			uid, p.sender).Scan(&route, &allowed)
 		bucket := "screener"
-		if decided == nil && allowed {
-			bucket = route
+		if decided == nil {
+			// Explicit decision wins: allowed routes in, blocked parks
+			// outside every view on purpose.
+			if allowed {
+				bucket = route
+			}
+		} else if correspondents[p.sender] {
+			bucket = "imbox"
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO hey_messages (user_id, message_id, bucket)
@@ -133,8 +160,8 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	like := "%" + q + "%"
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT m.thread_id, m.id, m.subject, m.from_addrs, m.received_at,
-		       h.read_at IS NOT NULL AS is_read, m.has_attachment, m.preview,
+		SELECT m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at,
+		       h.read_at IS NOT NULL AS is_read, m.has_attachment, COALESCE(m.preview,''),
 		       COALESCE(h.bucket,''),
 		       (SELECT count(*) FROM mail_messages t
 		          WHERE t.account_id = m.account_id AND t.thread_id = m.thread_id) AS thread_len
@@ -191,12 +218,13 @@ func (a *App) handleScreener(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT lower(m.from_addrs::json->0->>'email') AS sender,
 		       count(*) AS waiting,
-		       max(m.received_at) AS newest,
-		       max(m.subject) AS sample_subject
+		       COALESCE(max(m.received_at)::text, '') AS newest,
+		       COALESCE(max(m.subject), '') AS sample_subject
 		FROM hey_messages h
 		JOIN mail_messages m ON m.id = h.message_id
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = h.user_id
 		WHERE h.user_id = $1 AND h.bucket = 'screener'
+		  AND COALESCE(m.from_addrs, '') <> ''
 		  AND NOT EXISTS (
 		    SELECT 1 FROM hey_senders s
 		    WHERE s.user_id = h.user_id
@@ -384,8 +412,8 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT m.thread_id, m.id, m.subject, m.from_addrs, m.received_at,
-		       h.read_at IS NOT NULL AS is_read, m.has_attachment, m.preview, h.bucket,
+		SELECT m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at,
+		       h.read_at IS NOT NULL AS is_read, m.has_attachment, COALESCE(m.preview,''), h.bucket,
 		       h.set_aside_until,
 		       (SELECT count(*) FROM mail_messages t
 	          WHERE t.account_id = m.account_id AND t.thread_id = m.thread_id) AS thread_len

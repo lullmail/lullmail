@@ -21,7 +21,7 @@ export function ScreenerView() {
     <>
       <PageHead
         title="The Screener"
-        sub="New senders wait here. Decide once — everything they ever send goes where you say, and you can take it back."
+        sub="New senders wait here — people you've already emailed go straight to your Inbox. Decide once, and everything they ever send follows."
       />
       {!!data?.length && (
         <div class="keys-hint">

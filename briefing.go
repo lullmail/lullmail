@@ -48,7 +48,7 @@ func (a *App) briefThreads(ctx context.Context, uid string) (needsYou, waiting [
 	// Latest message of every Imbox thread the user owns.
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT DISTINCT ON (m.thread_id)
-		       m.thread_id, m.id, m.subject, m.from_addrs, m.received_at, m.preview
+		       m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at, COALESCE(m.preview,'')
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
