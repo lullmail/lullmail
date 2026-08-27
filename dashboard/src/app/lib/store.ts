@@ -56,6 +56,10 @@ export const layout = signal<Layout>("document");
 export function resolveLayout() {
   layout.value = initialLayout();
   accountFilter.value = initialAccountFilter();
+  try {
+    const split = parseInt(localStorage.getItem("es-classic-split") || "0", 10);
+    if (split >= 320) splitWidth.value = split;
+  } catch { /* private mode */ }
   keyUses.value = readNum("es-keyuses");
   hintsOff.value = readNum("es-hints-off") === 1;
 }
@@ -113,6 +117,20 @@ export function accountQS(path: string): string {
   const id = accountFilter.value;
   if (!id) return path;
   return path + (path.includes("?") ? "&" : "?") + "account=" + encodeURIComponent(id);
+}
+
+/* ---- classic pane split ----
+   Zero means "default from the grid" — the user has never dragged. */
+
+export const splitWidth = signal<number>(0);
+
+export function setSplitWidth(px: number) {
+  splitWidth.value = px;
+  try {
+    localStorage.setItem("es-classic-split", String(px));
+  } catch {
+    /* private mode */
+  }
 }
 
 /** How many keyboard actions the user has actually used. The hint bar retires

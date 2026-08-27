@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { cleanLinks, stripRemoteImages } from "./Body";
+import { cleanLinks, emailHasOwnColors, stripRemoteImages } from "./Body";
 import { canQueue } from "../lib/offline";
 
 describe("mail privacy", () => {
@@ -33,5 +33,14 @@ describe("offline queue safety", () => {
     expect(canQueue("/send", "POST")).toBe(false);
     expect(canQueue("/account", "DELETE")).toBe(false);
     expect(canQueue("/security/totp", "DELETE")).toBe(false);
+  });
+});
+
+describe("email theming", () => {
+  it("detects mail that brings its own colors, in several authoring styles", () => {
+    expect(emailHasOwnColors(`<body bgcolor="#ffffff">hi</body>`)).toBe(true);
+    expect(emailHasOwnColors(`<div style="background:#fff">hi</div>`)).toBe(true);
+    expect(emailHasOwnColors(`<span style="color:#333">hi</span>`)).toBe(true);
+    expect(emailHasOwnColors(`<p>Plain personal mail.</p>`)).toBe(false);
   });
 });

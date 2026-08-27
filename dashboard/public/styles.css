@@ -917,12 +917,16 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 .page.classic {
   display: grid;
   grid-template-rows: 54px auto minmax(0, 1fr);
-  grid-template-columns: 224px minmax(320px, 1fr) minmax(0, 1.12fr);
+  /* The rail is deliberately narrow; the list pane defaults wide, then takes
+     whatever the dragged splitter last chose (--list-w, persisted). */
+  grid-template-columns: 196px minmax(320px, var(--list-w, 42vw)) 7px minmax(0, 1fr);
   height: 100vh;
   overflow: hidden;
 }
 .page.classic .topline { grid-column: 1 / -1; grid-row: 1; position: static; }
 .page.classic .nudge { grid-column: 1 / -1; grid-row: 2; }
+/* The lens lives in the rail in classic; the topline keeps only the wordmark. */
+.page.classic .acct-toggle { display: none; }
 /* Nav lives in the sidebar here, so the flanks stop competing for the centre. */
 .page.classic .topline-side { flex: none; }
 .page.classic .topline-side.left { flex: 1; }
@@ -932,8 +936,20 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
   grid-row: 3; grid-column: 2; min-width: 0;
   overflow-y: auto; border-right: 1px solid var(--line);
 }
+.pane-split {
+  grid-row: 3; grid-column: 3;
+  cursor: col-resize; touch-action: none;
+  position: relative;
+}
+.pane-split::after {
+  content: ""; position: absolute; inset: 0 auto 0 3px; width: 1px;
+  background: var(--line);
+}
+.pane-split:hover::after, .pane-split:active::after {
+  width: 2px; inset: 0 auto 0 2.5px; background: var(--accent);
+}
 .page.classic .reader-pane {
-  grid-row: 3; grid-column: 3; min-width: 0;
+  grid-row: 3; grid-column: 4; min-width: 0;
   display: flex; flex-direction: column;
   overflow: hidden; background: var(--panel);
 }
@@ -965,13 +981,14 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 .side-spacer { margin-top: auto; }
 .side-label {
   padding: var(--sp-5) var(--sp-3) var(--sp-1);
-  font-size: 10.5px; font-weight: 760; letter-spacing: 0.14em;
+  font-size: 11px; font-weight: 760; letter-spacing: 0.14em;
   text-transform: uppercase; color: var(--ink-3);
 }
 .side-item {
   display: flex; align-items: center; gap: var(--sp-2);
-  padding: 7px var(--sp-3); border-radius: var(--r-sm);
-  font-size: var(--t-base); font-weight: 560; color: var(--ink-2);
+  width: 100%; min-height: 40px; padding: 7px var(--sp-3);
+  border-radius: var(--r-sm); border: 0; background: none; cursor: pointer;
+  font-size: var(--t-md); font-weight: 560; color: var(--ink-2); text-align: left;
   transition: background 0.1s ease, color 0.1s ease;
 }
 .side-item:hover { background: var(--hover); color: var(--ink); }
@@ -979,13 +996,20 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
   background: var(--raise); color: var(--ink); font-weight: 700;
   box-shadow: inset 2px 0 0 var(--accent);
 }
-.side-text { flex: 1; min-width: 0; }
+.side-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .side-count { font-size: var(--t-xs); font-weight: 720; color: var(--ink-3); flex: none; }
 .side-count.urgent {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 17px; height: 17px; padding: 0 5px; border-radius: var(--r-pill);
   background: var(--accent); color: var(--accent-ink);
 }
+/* The account section: buttons, not links, but they must not look different. */
+.side-acct-one .side-acct-domain {
+  flex: none; max-width: 45%;
+  font-size: 9.5px; color: var(--ink-3); letter-spacing: 0.02em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.side-acct-all .side-text { font-weight: 640; }
 
 .reader-empty {
   height: 100%; display: flex; flex-direction: column;

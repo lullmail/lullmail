@@ -82,18 +82,34 @@ function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
-function frameDoc(html: string): string {
+/** True when the email brings no colors of its own (no bgcolor, no inline
+    background/color styles) — the only case where injecting ours is safe.
+    Forcing dark-theme ink onto an email that ships its own white background
+    is how "barely visible" previews happen. */
+export function emailHasOwnColors(html: string): boolean {
+  if (typeof DOMParser === "undefined") return false;
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  if (doc.body.querySelector("[bgcolor]")) return true;
+  return !!doc.body.querySelector("[style*='background'],[style*='color']");
+}
+
+function frameDoc(html: string, themed: boolean): string {
+  // The frame root wears the app's page color, so transparent mail looks
+  // native in dark mode instead of flashing white edges.
+  const bg = cssVar("--bg") || "transparent";
+  const ink = themed ? cssVar("--ink") : "";
+  const quoteInk = themed ? cssVar("--ink-2") : "";
   return (
     "<!doctype html><html><head><meta charset='utf-8'><base target='_blank'>" +
     "<style>" +
     ":root{--ph-line:" + (cssVar("--line-strong") || "#ccc") + ";--ph-ink:" + (cssVar("--ink-3") || "#999") + "}" +
-    "html,body{margin:0;padding:0;background:transparent}" +
-    "body{font-family:" + cssVar("--sans") + ";color:" + cssVar("--ink") +
+    "html{margin:0;padding:0;background:" + bg + "}" +
+    "body{margin:0;padding:0;font-family:" + cssVar("--sans") + (ink ? ";color:" + ink : "") +
     ";font-size:15px;line-height:1.62;padding:2px 0 8px;word-wrap:break-word;overflow-wrap:anywhere}" +
     "img{max-width:100%;height:auto}" +
     "a{color:" + (cssVar("--accent") || "#4a72d8") + "}" +
     "blockquote{border-left:3px solid " + cssVar("--line-strong") +
-    ";margin:8px 0;padding:2px 12px;color:" + cssVar("--ink-2") + "}" +
+    ";margin:8px 0;padding:2px 12px" + (quoteInk ? ";color:" + quoteInk : "") + "}" +
     "pre{white-space:pre-wrap}table{max-width:100%}" +
     "</style></head><body>" + html + "</body></html>"
   );
@@ -105,6 +121,7 @@ function HtmlBody({ html, messageId, sender }: { html: string; messageId: string
   const ok = reader.value.imagesOk.has(messageId) || imageSenders.value.has(senderKey);
   const cleaned = cleanLinks(html);
   const { html: safe, blocked } = ok ? { html: cleaned, blocked: 0 } : stripRemoteImages(cleaned);
+  const themed = !emailHasOwnColors(safe);
   // Read as a signal, not off the DOM: the injected colours are literals baked
   // into srcdoc, so this component has to re-render when the theme changes.
   const themeKey = theme.value;
@@ -173,7 +190,7 @@ function HtmlBody({ html, messageId, sender }: { html: string; messageId: string
         class="mail-frame"
         title="Message body"
         sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
-        srcdoc={frameDoc(safe)}
+        srcdoc={frameDoc(safe, themed)}
       />
     </>
   );

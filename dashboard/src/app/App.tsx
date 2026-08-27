@@ -5,7 +5,7 @@ import { signal } from "@preact/signals";
 import { path, routeFor, startRouter } from "./lib/router";
 import { installKeys } from "./lib/keys";
 import { refreshAccounts, refreshCounts } from "./lib/actions";
-import { accountCount, accountFilter, attentionTotal, compose, layout, palette, query, reader, resolveLayout, shortcuts, theme } from "./lib/store";
+import { accountCount, accountFilter, attentionTotal, compose, layout, palette, query, reader, resolveLayout, setSplitWidth, shortcuts, splitWidth, theme } from "./lib/store";
 import { Topline } from "./Topline";
 import { Sidebar } from "./Sidebar";
 import { Thread } from "./reader/Thread";
@@ -129,6 +129,36 @@ function TabBadge() {
   return null;
 }
 
+/** The draggable hairline between the list and the reading pane. One number
+    in the store (persisted), one grid variable — the panes do the rest. */
+function PaneSplit() {
+  const onDown = (ev: PointerEvent) => {
+    const handle = ev.currentTarget as HTMLElement;
+    const page = handle.closest(".page");
+    const list = page?.querySelector<HTMLElement>(".list-pane");
+    if (!page || !list) return;
+    ev.preventDefault();
+    handle.setPointerCapture(ev.pointerId);
+    const pageRect = page.getBoundingClientRect();
+    const sidebarW = page.querySelector<HTMLElement>(".sidebar")?.offsetWidth || 0;
+    const max = page.clientWidth - sidebarW - 6 - 300; // reader keeps a floor
+    document.body.style.cursor = "col-resize";
+    const onMove = (e: PointerEvent) => {
+      const w = Math.round(Math.min(Math.max(e.clientX - list.getBoundingClientRect().left, 320), Math.max(max, 320)));
+      setSplitWidth(w);
+    };
+    const onUp = () => {
+      handle.releasePointerCapture(ev.pointerId);
+      document.body.style.cursor = "";
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+  };
+  return <div class="pane-split" onPointerDown={onDown} role="separator" aria-orientation="vertical" aria-label="Resize list and reading panes" />;
+}
+
 export default function App() {
   const openThreadId = reader.value.threadId;
   const wide = useWide();
@@ -184,11 +214,15 @@ export default function App() {
 
   if (classic) {
     return (
-      <div class="page classic">
+      <div
+        class="page classic"
+        style={splitWidth.value ? ({ "--list-w": splitWidth.value + "px" } as any) : undefined}
+      >
         <Topline />
         <PasskeyNudge />
         <Sidebar />
         <div class="list-pane"><div class="column"><Suspense fallback={<RouteSkeleton />}><CurrentView /></Suspense></div></div>
+        <PaneSplit />
         <div class="reader-pane">
           {openThreadId ? (
             <Thread backTo={routeFor(path.value).title} variant="pane" />
