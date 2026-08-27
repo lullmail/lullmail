@@ -82,15 +82,14 @@ function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
-/** True when the email brings no colors of its own (no bgcolor, no inline
-    background/color styles) — the only case where injecting ours is safe.
-    Forcing dark-theme ink onto an email that ships its own white background
-    is how "barely visible" previews happen. */
+/** An email "brings its own colors" when it paints a background anywhere —
+    bgcolor or inline background styles. Those get to keep their palette; we
+    never force dark-theme ink onto a white-shipping email. Everything else
+    is themed by us, ink and canvas both, so contrast is guaranteed. */
 export function emailHasOwnColors(html: string): boolean {
   if (typeof DOMParser === "undefined") return false;
   const doc = new DOMParser().parseFromString(html, "text/html");
-  if (doc.body.querySelector("[bgcolor]")) return true;
-  return !!doc.body.querySelector("[style*='background'],[style*='color']");
+  return !!doc.body.querySelector("[bgcolor], [style*='background']");
 }
 
 function frameDoc(html: string, themed: boolean): string {

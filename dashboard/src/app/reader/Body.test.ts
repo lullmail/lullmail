@@ -37,10 +37,13 @@ describe("offline queue safety", () => {
 });
 
 describe("email theming", () => {
-  it("detects mail that brings its own colors, in several authoring styles", () => {
+  it("detects mail that paints its own background, in several authoring styles", () => {
     expect(emailHasOwnColors(`<body bgcolor="#ffffff">hi</body>`)).toBe(true);
     expect(emailHasOwnColors(`<div style="background:#fff">hi</div>`)).toBe(true);
-    expect(emailHasOwnColors(`<span style="color:#333">hi</span>`)).toBe(true);
+    expect(emailHasOwnColors(`<table style="background-color:#f6f6f6"><tr><td>x</td></tr></table>`)).toBe(true);
+    // Color-only styling does NOT count: without a painted background the
+    // text sits on our themed canvas, where forced colors would clash.
+    expect(emailHasOwnColors(`<span style="color:#333">hi</span>`)).toBe(false);
     expect(emailHasOwnColors(`<p>Plain personal mail.</p>`)).toBe(false);
   });
 });
