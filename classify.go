@@ -17,13 +17,14 @@ import (
 )
 
 // classifyUser assigns a bucket to every unclassified mirror message within
-// the account's backfill window. Unknown senders land in the Screener; a
-// decision made later re-routes everything still sitting there. Senders the
-// owner has already emailed from a connected mailbox skip the Screener
-// entirely — replying to someone is a decision.
+// the account's backfill window. The Screener is a forward-looking gate, not
+// a chore: mail that arrived before the mailbox was connected is history —
+// correspondents go to the Inbox, everything else files to Receipts — and
+// only mail arriving after connection screens. Senders the owner has already
+// emailed skip the Screener entirely; replying to someone is a decision.
 func (a *App) classifyUser(ctx context.Context, uid string) error {
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT m.account_id, m.id, COALESCE(m.from_addrs, '')
+		SELECT m.account_id, m.id, COALESCE(m.from_addrs, ''), m.received_at, ea.created_at
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
@@ -88,14 +89,21 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		a.log.Error("correspondent extraction (threads) failed", "err", err)
 	}
 
-	type pending struct{ acct, id, sender string }
+	type pending struct {
+		acct, id, sender string
+		historical       bool
+	}
 	var batch []pending
 	for rows.Next() {
 		var acct, id, fromJSON string
-		if err := rows.Scan(&acct, &id, &fromJSON); err != nil {
+		var received, connected time.Time
+		if err := rows.Scan(&acct, &id, &fromJSON, &received, &connected); err != nil {
 			return err
 		}
-		batch = append(batch, pending{acct, id, firstSenderEmail(fromJSON)})
+		batch = append(batch, pending{
+			acct: acct, id: id, sender: firstSenderEmail(fromJSON),
+			historical: received.Before(connected),
+		})
 	}
 	if len(batch) == 0 {
 		return nil
@@ -112,16 +120,7 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		decided := tx.QueryRowContext(ctx,
 			`SELECT route, allowed FROM hey_senders WHERE user_id = $1 AND sender_key = $2`,
 			uid, p.sender).Scan(&route, &allowed)
-		bucket := "screener"
-		if decided == nil {
-			// Explicit decision wins: allowed routes in, blocked parks
-			// outside every view on purpose.
-			if allowed {
-				bucket = route
-			}
-		} else if correspondents[p.sender] {
-			bucket = "imbox"
-		}
+		bucket := classifySender(decided == nil, allowed, route, correspondents[p.sender], p.historical)
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO hey_messages (user_id, message_id, bucket)
 			VALUES ($1, $2, $3) ON CONFLICT (user_id, message_id) DO NOTHING`,
@@ -130,6 +129,28 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// classifySender is the one place the routing rules are written. Precedence:
+// an explicit decision always wins; then correspondence (replying to someone
+// is a decision); then the history rule — mail that predates the mailbox's
+// connection is reference, not a decision queue, so it files to Receipts.
+// Only mail arriving after connection screens.
+func classifySender(decided, allowed bool, route string, correspondent, historical bool) string {
+	switch {
+	case decided:
+		if allowed {
+			return route
+		}
+		// Blocked senders park outside every view on purpose.
+		return "screener"
+	case correspondent:
+		return "imbox"
+	case historical:
+		return "paper_trail"
+	default:
+		return "screener"
+	}
 }
 
 // firstSenderEmail pulls the first From address out of the mirror's JSON.

@@ -22,7 +22,7 @@ export function ScreenerView() {
     <>
       <PageHead
         title="The Screener"
-        sub="New senders wait here — people you've already emailed go straight to your Inbox. Decide once, and everything they ever send follows."
+        sub="New senders arriving from here on wait for one decision. Your imported history skipped this — people you'd emailed went to Inbox, the rest to Receipts."
       />
       {!!data?.length && (
         <div class="keys-hint">
