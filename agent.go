@@ -22,7 +22,8 @@ const agentTokenPrefix = "es_"
 // session-only: a leaked agent token must not be able to mint siblings or
 // lock the owner out.
 var agentAllowed = map[string]bool{
-	"/accounts":        true, // list/connect/update/delete mailboxes
+	"/accounts":        true, // list/connect
+	"/accounts/":       true, // item routes: sync, retention, delete
 	"/mail/":           true, // raw mirror surface (bodies, search)
 	"/screener":        true,
 	"/counts":          true,
