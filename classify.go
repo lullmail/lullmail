@@ -251,7 +251,7 @@ func (a *App) handleScreener(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT lower(m.from_addrs::json->0->>'email') AS sender,
+		SELECT COALESCE(lower(m.from_addrs::json->0->>'email'), '') AS sender,
 		       count(*) AS waiting,
 		       COALESCE(max(m.received_at)::text, '') AS newest,
 		       COALESCE(max(m.subject), '') AS sample_subject
@@ -259,7 +259,9 @@ func (a *App) handleScreener(w http.ResponseWriter, r *http.Request) {
 		JOIN mail_messages m ON m.id = h.message_id
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = h.user_id
 		WHERE h.user_id = $1 AND h.bucket = 'screener'
-		  AND COALESCE(m.from_addrs, '') <> ''
+		  AND json_typeof(m.from_addrs::json) = 'array'
+		  AND json_array_length(m.from_addrs::json) > 0
+		  AND m.from_addrs::json->0->>'email' IS NOT NULL
 		  AND NOT EXISTS (
 		    SELECT 1 FROM hey_senders s
 		    WHERE s.user_id = h.user_id
