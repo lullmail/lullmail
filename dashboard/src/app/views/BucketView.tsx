@@ -61,10 +61,10 @@ export function BucketView({ bucket }: { bucket: ListBucket }) {
 
   useEffect(() => {
     setList({
-      kind: "rows", key: "bucket:" + bucket, loading, error,
+      kind: "rows", key: "bucket:" + bucket + ":" + lens, loading, error,
       rows: data || [], senders: [], origin: bucket,
     });
-  }, [data, loading, error, bucket]);
+  }, [data, loading, error, bucket, lens]);
 
   return (
     <>
@@ -76,7 +76,7 @@ export function BucketView({ bucket }: { bucket: ListBucket }) {
       {data && data.length === 0 && !loading && (
         <Empty title={copy.emptyTitle} sub={copy.emptySub} />
       )}
-      {data && data.length > 0 && <MsgList rows={published === "bucket:" + bucket ? list.value.rows : data} />}
+      {data && data.length > 0 && <MsgList rows={published === "bucket:" + bucket + ":" + lens ? list.value.rows : data} />}
     </>
   );
 }

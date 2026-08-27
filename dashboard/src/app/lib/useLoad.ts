@@ -1,7 +1,7 @@
 // One fetching hook for every view: aborts superseded requests, exposes a
 // reload, and registers that reload as the app-wide one so any action can
 // refresh whatever view is on screen.
-import { useCallback, useEffect, useState } from "preact/hooks";
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { ApiError, isAbort } from "./api";
 import { setReloader } from "./actions";
 import { authed } from "./api";
@@ -18,12 +18,20 @@ export function useLoad<T>(key: string, fn: (signal: AbortSignal) => Promise<T>)
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
+  const prevKey = useRef(key);
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);
 
   useEffect(() => {
     const ac = new AbortController();
     let live = true;
+    // A new key is a new question (lens switch, route change): the previous
+    // answer must not sit on screen — actionable but wrong — while the
+    // replacement loads.
+    if (prevKey.current !== key) {
+      prevKey.current = key;
+      setData(null);
+    }
     setLoading(true);
     setError(null);
     fn(ac.signal)

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { lazy, Suspense } from "preact/compat";
 import { api, authed, authReady, authStatus, refreshAuth } from "./lib/api";
 import { signal } from "@preact/signals";
@@ -80,8 +80,11 @@ function columnClass(): string {
 }
 
 /** A recovery-code or TOTP sign-in means this device has no passkey. One
-    quiet line points at the Security page before the user forgets. */
-const passkeyNudgeDismissed = signal(false);
+    quiet line points at the Security page before the user forgets. Dismissal
+    lasts the browser session — a new session can reasonably re-nudge. */
+const passkeyNudgeDismissed = signal(
+  typeof sessionStorage !== "undefined" && sessionStorage.getItem("es-nudge-off") === "1"
+);
 
 function PasskeyNudge() {
   const via = authStatus.value?.via;
@@ -93,7 +96,10 @@ function PasskeyNudge() {
         You signed in with {method}.{" "}
         <a href="/settings/security">Add a passkey on this device</a> so next time is one touch.
       </span>
-      <button type="button" onClick={() => { passkeyNudgeDismissed.value = true; }}>Dismiss</button>
+      <button type="button" onClick={() => {
+        passkeyNudgeDismissed.value = true;
+        try { sessionStorage.setItem("es-nudge-off", "1"); } catch { /* private mode */ }
+      }}>Dismiss</button>
     </div>
   );
 }
@@ -150,7 +156,10 @@ export default function App() {
   }, [mounted, authed.value]);
 
   // The lens is global: every badge follows it, not just the visible list.
+  // The mount pass is covered by the auth effect above, so skip it.
+  const firstLens = useRef(true);
   useEffect(() => {
+    if (firstLens.current) { firstLens.current = false; return; }
     if (mounted && authed.value) refreshCounts();
   }, [accountFilter.value]);
 

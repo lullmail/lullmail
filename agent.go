@@ -7,6 +7,7 @@ package main
 // enforced here, in the router, not left to the token holder's good behavior.
 
 import (
+	"context"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
@@ -24,7 +25,6 @@ const agentTokenPrefix = "es_"
 var agentAllowed = map[string]bool{
 	"/accounts":        true, // list/connect
 	"/accounts/":       true, // item routes: sync, retention, delete
-	"/mail/":           true, // raw mirror surface (bodies, search)
 	"/screener":        true,
 	"/screener/":       true, // decide + undecide (the MCP adapter's screener_decide)
 	"/counts":          true,
@@ -43,6 +43,9 @@ var agentAllowed = map[string]bool{
 	"/outbox/":         true,
 	"/classify":        true,
 	"/personal/export": true,
+	// The raw /mail/ engine surface is deliberately NOT agent-reachable:
+	// it is account-id keyed with its own semantics, and everything an agent
+	// legitimately needs exists as an owned /api route above.
 }
 
 // agentAllowedPath reports whether an /api-relative path is inside the agent
@@ -106,7 +109,11 @@ func (a *App) requireAgent(next http.Handler) http.Handler {
 			writeProblem(w, http.StatusForbidden, "Forbidden", "agent tokens cannot reach this surface")
 			return
 		}
+		// The token's owner is the authenticated principal for the scoped
+		// handlers — otherwise every agent request silently acts as the
+		// installation's first user instead of the user who minted it.
 		ctx := contextWithAgent(r.Context(), uid)
+		ctx = context.WithValue(ctx, authContextKey{}, uid)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

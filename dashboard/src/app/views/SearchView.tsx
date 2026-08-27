@@ -18,8 +18,8 @@ export function SearchView({ q }: { q: string }) {
   useEffect(() => { resetSelection(); }, [q]);
 
   useEffect(() => {
-    setList({ kind: "rows", key: "search:" + q, loading, error, rows: data || [], senders: [], origin: null });
-  }, [data, loading, error]);
+    setList({ kind: "rows", key: "search:" + q + ":" + lens, loading, error, rows: data || [], senders: [], origin: null });
+  }, [data, loading, error, q, lens]);
 
   return (
     <>
@@ -34,7 +34,7 @@ export function SearchView({ q }: { q: string }) {
       {data && data.length === 0 && !loading && (
         <Empty title="Nothing matched." sub="Try a sender, a subject, or a word from a preview." />
       )}
-      {data && data.length > 0 && <MsgList rows={list.value.key === "search:" + q ? list.value.rows : data} q={q} />}
+      {data && data.length > 0 && <MsgList rows={list.value.key === "search:" + q + ":" + lens ? list.value.rows : data} q={q} />}
     </>
   );
 }

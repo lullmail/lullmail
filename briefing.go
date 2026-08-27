@@ -312,7 +312,8 @@ func (a *App) handlePeople(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN mail_messages m ON lower(m.from_addrs::json->0->>'email') = s.sender_key
 		LEFT JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = s.user_id
 		LEFT JOIN hey_messages h ON h.message_id = m.id AND h.user_id = s.user_id
-		WHERE s.user_id = $1
+		WHERE s.user_id = $1`+
+		accountClause(r)+`
 		GROUP BY s.sender_key, s.route, s.allowed
 		ORDER BY last_at DESC NULLS LAST`, uid)
 	if err != nil {

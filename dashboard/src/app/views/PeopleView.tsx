@@ -1,7 +1,7 @@
 import { useEffect } from "preact/hooks";
 import { api } from "../lib/api";
 import { useLoad } from "../lib/useLoad";
-import { setList } from "../lib/store";
+import { accountFilter, accountQS, setList } from "../lib/store";
 import { decide, undecide, BUCKET_LABEL } from "../lib/actions";
 import type { Bucket, Person } from "../lib/types";
 import { countOf, fmtDate, splitFrom } from "../lib/fmt";
@@ -56,8 +56,9 @@ function PersonRow({ person }: { person: Person }) {
 }
 
 export function PeopleView() {
-  const { data, loading, error } = useLoad<Person[]>("people", (signal) =>
-    api<Person[]>("/people", { signal })
+  const lens = accountFilter.value;
+  const { data, loading, error } = useLoad<Person[]>("people:" + lens, (signal) =>
+    api<Person[]>(accountQS("/people"), { signal })
   );
 
   useEffect(() => {

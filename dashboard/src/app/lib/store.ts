@@ -238,11 +238,29 @@ export function toggleChecked(id: string) {
   checked.value = next;
 }
 
-/** Rows the verbs apply to: the explicit checkbox selection, else the cursor row. */
+/** Rows the verbs apply to: the explicit checkbox selection, else the cursor
+    row. In document mode an open thread owns the page, so the verbs target
+    it — otherwise j/k silently moved a cursor nobody can see, and the next
+    e/s/i/p acted on a different thread than the one on screen. */
 export function targetRows(): Row[] {
   const l = list.value;
   if (l.kind !== "rows") return [];
   if (checked.value.size) return l.rows.filter((r) => checked.value.has(r.message_id));
+  if (reader.value.threadId && layout.value !== "classic") {
+    const messages = reader.value.messages;
+    const last = messages[messages.length - 1];
+    if (!last) return [];
+    return [{
+      thread_id: reader.value.threadId,
+      message_id: last.id,
+      subject: last.subject,
+      from: last.from,
+      received_at: last.received_at,
+      read: true,
+      preview: "",
+      bucket: last.bucket as Row["bucket"],
+    }];
+  }
   const at = l.rows[cursor.value];
   return at ? [at] : [];
 }

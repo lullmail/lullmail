@@ -135,9 +135,26 @@ export async function markRead(rows: Row[], read: boolean) {
   }
 }
 
+/** Rows the verbs apply to. Captured with their original snooze so an undo
+    restores the exact deferral, not a generic three days. */
+interface Before { row: Row; from: Bucket; days?: number }
+
+function snoozeUndoState(r: Row): { from: Bucket; days?: number } {
+  const from = originOf(r);
+  if (from === "later") return { from };
+  if (from === "set_aside" && r.snooze_until) {
+    const until = new Date(r.snooze_until).getTime();
+    if (!isNaN(until)) {
+      const days = Math.max(1, Math.ceil((until - Date.now()) / 86400000));
+      return { from, days };
+    }
+  }
+  return { from };
+}
+
 export async function moveTo(rows: Row[], to: Bucket) {
   if (!rows.length) return;
-  const before = rows.map((r) => ({ row: r, from: originOf(r) }));
+  const before: Before[] = rows.map((r) => ({ row: r, ...snoozeUndoState(r) }));
   try {
     await actMany(rows, to);
     if (rows.some((r) => r.thread_id === reader.value.threadId)) closeReader();
@@ -151,7 +168,7 @@ export async function moveTo(rows: Row[], to: Bucket) {
 /** days = 0 means someday: snoozed with no return date. */
 export async function snooze(rows: Row[], days: number) {
   if (!rows.length) return;
-  const before = rows.map((r) => ({ row: r, from: originOf(r) }));
+  const before: Before[] = rows.map((r) => ({ row: r, ...snoozeUndoState(r) }));
   try {
     await actMany(rows, days > 0 ? "set_aside" : "later", days > 0 ? days : undefined);
     if (rows.some((r) => r.thread_id === reader.value.threadId)) closeReader();
@@ -163,9 +180,10 @@ export async function snooze(rows: Row[], days: number) {
   }
 }
 
-async function restore(before: { row: Row; from: Bucket }[]) {
+async function restore(before: Before[]) {
   try {
-    await Promise.all(before.map(({ row, from }) => actOn(row.message_id, from)));
+    await Promise.all(before.map(({ row, from, days }) =>
+      actOn(row.message_id, from, from === "set_aside" ? days : undefined)));
     afterMutation();
   } catch (e) {
     fail(e, "Could not undo");

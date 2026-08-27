@@ -242,12 +242,34 @@ func (a *App) handleCounts(w http.ResponseWriter, r *http.Request) {
 }
 
 // accountClause is the ?account= lens for queries that already join
-// email_accounts as ea: empty (all mailboxes) or narrowed to one.
+// email_accounts as ea: empty (all mailboxes) or narrowed to one. The value
+// must be a uuid or the clause is dropped — interpolation stays safe by
+// construction rather than by escaping discipline.
 func accountClause(r *http.Request) string {
-	if account := r.URL.Query().Get("account"); account != "" {
-		return ` AND ea.id = '` + strings.ReplaceAll(account, "'", "''") + `'`
+	account := r.URL.Query().Get("account")
+	if !isUUID(account) {
+		return ""
 	}
-	return ""
+	return ` AND ea.id = '` + account + `'`
+}
+
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, c := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // handleSearch full-text-ish search over the mirror: subject, participants,
@@ -897,12 +919,18 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 		q = `UPDATE hey_messages SET read_at = NULL WHERE user_id=$1 AND message_id=$2`
 		args = []any{uid, msg}
 	case "imbox", "paper_trail", "feed", "later", "screener":
-		q = `UPDATE hey_messages SET bucket=$3 WHERE user_id=$1 AND message_id=$2`
+		// Leaving set_aside must drop the return date too, or the Snoozed
+		// list shows a stale (possibly past) promise the message no longer keeps.
+		q = `UPDATE hey_messages SET bucket=$3, set_aside_until=NULL WHERE user_id=$1 AND message_id=$2`
 		args = []any{uid, msg, req.Action}
 	case "set_aside":
 		days := req.UntilDays
 		if days == 0 {
 			days = 3
+		}
+		if days < 1 || days > 3650 {
+			writeProblem(w, http.StatusUnprocessableEntity, "Invalid Snooze", "until_days must be 1 through 3650")
+			return
 		}
 		q = `UPDATE hey_messages SET bucket='set_aside', set_aside_until = now() + make_interval(days => $3)
 		     WHERE user_id=$1 AND message_id=$2`

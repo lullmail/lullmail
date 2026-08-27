@@ -85,6 +85,15 @@ func (a *App) allowAuthAttempt(r *http.Request) bool {
 	a.authMu.Lock()
 	defer a.authMu.Unlock()
 	now := time.Now()
+	// The map is keyed by client host and nothing else prunes it; a sweep on
+	// a size threshold keeps a many-source internet from growing it forever.
+	if len(a.authAttempts) > 512 {
+		for h, at := range a.authAttempts {
+			if now.Sub(at.Window) > 5*time.Minute {
+				delete(a.authAttempts, h)
+			}
+		}
+	}
 	attempt := a.authAttempts[host]
 	if attempt.Window.IsZero() || now.Sub(attempt.Window) > 5*time.Minute {
 		attempt = authAttempt{Window: now}
@@ -209,6 +218,12 @@ func (a *App) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		uid, session, err := a.authenticateRequest(r)
 		if err != nil {
+			// Only "no credential matched" is an auth failure; a database
+			// outage mislabeled as 401 sends clients hunting the wrong bug.
+			if !errors.Is(err, sql.ErrNoRows) {
+				writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+				return
+			}
 			writeProblem(w, http.StatusUnauthorized, "Unauthorized", "sign in to continue")
 			return
 		}
@@ -446,6 +461,12 @@ func (a *App) finishRegistration(w http.ResponseWriter, r *http.Request, kind st
 }
 
 func (a *App) handleLoginBegin(w http.ResponseWriter, r *http.Request) {
+	// Ceremonies are rows; an unthrottled begin lets strangers grow the
+	// table (the purge tick bounds it, but the tap still gets shut).
+	if !a.allowAuthAttempt(r) {
+		writeProblem(w, 429, "Too Many Attempts", "wait five minutes before trying again")
+		return
+	}
 	var count int
 	_ = a.db.QueryRowContext(r.Context(), `SELECT count(*) FROM auth_credentials`).Scan(&count)
 	if count == 0 {

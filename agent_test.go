@@ -8,7 +8,7 @@ import (
 
 func TestAgentScopeFence(t *testing.T) {
 	allowed := []string{
-		"/accounts", "/accounts/x/sync", "/mail/whatever", "/screener",
+		"/accounts", "/accounts/x/sync", "/screener",
 		"/screener/decide", "/screener/undecide", "/counts", "/briefing",
 		"/threads/t1", "/messages/m1/action", "/send", "/buckets/imbox",
 		"/notes", "/people", "/personal/export",
@@ -22,6 +22,7 @@ func TestAgentScopeFence(t *testing.T) {
 		"/auth/status", "/security", "/security/passkeys/begin",
 		"/security/agent-tokens", "/security/sessions", "/security/totp",
 		"/account", "/push", "/oauth/gmail/start", "/board/../security",
+		"/mail/v1/accounts", "/mail/v1/accounts/a/search",
 	}
 	for _, path := range blocked {
 		if agentAllowedPath(path) {

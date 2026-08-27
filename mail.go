@@ -10,6 +10,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -125,6 +126,7 @@ func (a *App) startBackground() {
 	go func() {
 		t := time.NewTicker(2 * time.Minute)
 		defer t.Stop()
+		a.purgeExpired()
 		for {
 			uid, err := a.userID(ctx)
 			if err == nil {
@@ -143,8 +145,77 @@ func (a *App) startBackground() {
 				a.sendPushForUser(ctx, uid)
 			}
 			<-t.C
+			a.purgeExpired()
 		}
 	}()
+}
+
+// purgeExpired keeps auth tables bounded: ceremonies and OAuth states are
+// consumed-or-deleted today, so anything expired is garbage; sessions are
+// filtered on read but would otherwise live in the table forever.
+func (a *App) purgeExpired() {
+	for _, q := range []string{
+		`DELETE FROM auth_challenges WHERE expires_at < now()`,
+		`DELETE FROM oauth_states WHERE expires_at < now()`,
+		`DELETE FROM auth_sessions WHERE expires_at < now()`,
+	} {
+		if _, err := a.db.Exec(q); err != nil {
+			a.log.Error("purge failed", "err", err, "query", q)
+		}
+	}
+}
+
+// ownedMirror fences the engine's account-keyed surface behind
+// email_accounts ownership. The bare account list answers directly (it has
+// no {account} segment to check) with only the caller's accounts.
+func (a *App) ownedMirror(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uid, err := a.userID(r.Context())
+		if err != nil {
+			writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+			return
+		}
+		if r.URL.Path == "/v1/accounts" {
+			rows, err := a.db.QueryContext(r.Context(), `
+				SELECT ma.id, ma.provider, ma.email, ma.name, ma.needs_reauth
+				FROM mail_accounts ma
+				JOIN email_accounts ea ON ea.mirror_account_id = ma.id AND ea.user_id = $1
+				ORDER BY ma.id`, uid)
+			if err != nil {
+				writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+				return
+			}
+			defer rows.Close()
+			accounts := []map[string]any{}
+			for rows.Next() {
+				var id, provider, email, name string
+				var reauth bool
+				if err := rows.Scan(&id, &provider, &email, &name, &reauth); err != nil {
+					writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
+					return
+				}
+				accounts = append(accounts, map[string]any{
+					"id": id, "provider": provider, "email": email, "name": name, "needs_reauth": reauth,
+				})
+			}
+			writeJSON(w, map[string]any{"accounts": accounts})
+			return
+		}
+		// /v1/accounts/{account}/... — every downstream handler is keyed by
+		// this segment, so one check covers reads, sends, and mutations.
+		rest := strings.TrimPrefix(r.URL.Path, "/v1/accounts/")
+		account, _, _ := strings.Cut(rest, "/")
+		if account != "" {
+			var owned bool
+			if err := a.db.QueryRowContext(r.Context(),
+				`SELECT EXISTS(SELECT 1 FROM email_accounts WHERE mirror_account_id=$1 AND user_id=$2)`,
+				account, uid).Scan(&owned); err == nil && owned {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		writeProblem(w, http.StatusNotFound, "No Such Account", "that mailbox is not connected for this user")
+	})
 }
 
 func (a *App) mountAPI(mux *http.ServeMux) {
@@ -153,8 +224,10 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	a.mountAuth(public)
 	a.mountOAuthCallbacks(public)
 
-	// neutron-mail surface, for the dashboard's use (bodies, raw search).
-	api.Handle("/mail/", http.StripPrefix("/mail", a.svc.Handler()))
+	// neutron-mail surface. Owned-envelope middleware first: the engine is
+	// account-id keyed with no user concept of its own, so ownership is
+	// enforced here before any handler sees a request.
+	api.Handle("/mail/", http.StripPrefix("/mail", a.ownedMirror(a.svc.Handler())))
 
 	api.HandleFunc("GET /accounts", a.handleAccounts)
 	api.HandleFunc("POST /accounts", a.handleAccounts)
