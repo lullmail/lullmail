@@ -110,7 +110,7 @@ func connectApp(cfg *Config) *App {
 	app.sched.Tokens = app
 	app.sched.Resolve = newResolver()
 
-	if err := app.ensureUser(ctx); err != nil {
+	if err := app.ensureUser(ctx, ""); err != nil {
 		log.Printf("app: user bootstrap failed (continuing): %v", err)
 	}
 	return app

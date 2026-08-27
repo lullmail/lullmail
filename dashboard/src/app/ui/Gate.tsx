@@ -102,7 +102,7 @@ export function Gate() {
 function SetupWizard({ status }: { status: AuthStatus }) {
   const [step, setStep] = useState(0);
   const [token, setToken] = useState("");
-  const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
@@ -118,10 +118,10 @@ function SetupWizard({ status }: { status: AuthStatus }) {
 
   const setUp = async (ev: Event) => {
     ev.preventDefault();
-    if (!email.trim().includes("@")) { setError("Enter the email that will own this mailbox."); return; }
+    if (!name.trim()) { setError("Enter your name to continue."); return; }
     setBusy(true); setError("");
     try {
-      const options = await authApi<Record<string, unknown>>("/auth/bootstrap/begin", { body: { email: email.trim() } }, token.trim());
+      const options = await authApi<Record<string, unknown>>("/auth/bootstrap/begin", { body: { name: name.trim() } }, token.trim());
       const credential = await createPasskey(options);
       const result = await authApi<{ recovery_codes: string[] }>("/auth/bootstrap/finish?name=" + encodeURIComponent("Primary passkey"), { body: credential }, token.trim());
       setRecoveryCodes(result.recovery_codes);
@@ -133,7 +133,7 @@ function SetupWizard({ status }: { status: AuthStatus }) {
 
   const downloadCodes = () => {
     const today = new Date().toISOString().slice(0, 10);
-    const text = ["email-soft recovery codes", "", "Account: " + email.trim(), "Generated: " + today, "", ...recoveryCodes, ""].join("\n");
+    const text = ["email-soft recovery codes", "", "Owner: " + (name.trim() || "you"), "Generated: " + today, "", ...recoveryCodes, ""].join("\n");
     const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -201,10 +201,10 @@ function SetupWizard({ status }: { status: AuthStatus }) {
           {step === 2 && (
             <form onSubmit={setUp}>
               <h1 id="setup-title">Who's this mailbox for?</h1>
-              <p class="gate-sub">It's just you. Enter your email so email-soft knows which mail is yours, then create your passkey. You'll connect your actual mailbox (Gmail, Outlook, or IMAP) in the next screen after setup.</p>
-              <label class="sr-only" for="setup-email">Your email</label>
-              <input id="setup-email" type="email" placeholder="you@example.com" autocomplete="email" value={email}
-                onInput={(e) => setEmail((e.target as HTMLInputElement).value)} />
+              <p class="gate-sub">It's just you. Enter your name, then create your passkey. Your actual mailboxes (Gmail, Outlook, or IMAP) get connected inside the app right after.</p>
+              <label class="sr-only" for="setup-name">Your name</label>
+              <input id="setup-name" type="text" placeholder="Your name" autocomplete="name" value={name}
+                onInput={(e) => setName((e.target as HTMLInputElement).value)} />
               <p class="gate-hint">You'll use this passkey whenever you sign in. Recovery codes are available if you lose access to it.</p>
               <div class="gate-nav">
                 <button class="btn btn-outline" type="button" disabled={busy} onClick={() => goTo(1)}>Back</button>

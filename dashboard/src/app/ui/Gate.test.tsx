@@ -35,6 +35,6 @@ describe("first-run setup", () => {
     act(() => host.querySelector<HTMLFormElement>("form")!.requestSubmit());
 
     expect(host.textContent).toContain("Who's this mailbox for?");
-    expect(host.querySelector("#setup-email")).not.toBeNull();
+    expect(host.querySelector("#setup-name")).not.toBeNull();
   });
 });

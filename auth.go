@@ -287,27 +287,34 @@ func (a *App) handleBootstrapBegin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var req struct {
+		Name  string `json:"name"`
 		Email string `json:"email"`
 	}
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req)
 	if _, err := a.firstUserID(r.Context()); err == sql.ErrNoRows {
+		name := strings.TrimSpace(req.Name)
 		email := strings.TrimSpace(req.Email)
-		if email == "" {
+		if email == "" && name == "" {
 			email = a.cfg.UserEmail
 		}
-		if _, err := url.Parse("mailto:" + email); err != nil || !strings.Contains(email, "@") {
-			writeProblem(w, 422, "Invalid Email", "enter the mailbox owner's email address")
+		if email == "" && name != "" {
+			email = ownerEmailFromName(name)
+		}
+		if email == "" {
+			writeProblem(w, 422, "Name Missing", "enter your name so email-soft knows whose mail this is")
 			return
 		}
 		a.cfg.UserEmail = email
-		if err := a.ensureUser(r.Context()); err != nil {
+		if err := a.ensureUser(r.Context(), name); err != nil {
 			writeProblem(w, 500, "Setup Failed", err.Error())
 			return
 		}
+	} else if name := strings.TrimSpace(req.Name); name != "" {
+		_ = a.setOwnerName(r.Context(), name)
 	}
 	uid, err := a.firstUserID(r.Context())
 	if err != nil {
-		writeProblem(w, 422, "Owner Missing", "set EMAILSOFT_USER_EMAIL or enter an email address")
+		writeProblem(w, 422, "Owner Missing", "enter your name to finish setup")
 		return
 	}
 	a.beginRegistration(w, r, uid, "bootstrap")
@@ -1022,7 +1029,10 @@ func (a *App) handleFullAccountDelete(w http.ResponseWriter, r *http.Request) {
 
 // ensureUser bootstraps an installation owner, but never an authentication
 // secret. The setup token is still required to register the first passkey.
-func (a *App) ensureUser(ctx context.Context) error {
+// email is a stable internal identifier (owners now supply a name; real
+// addresses come from connected accounts); name becomes display_name, which
+// is what the browser shows in the passkey prompt.
+func (a *App) ensureUser(ctx context.Context, name string) error {
 	if a.cfg.UserEmail == "" {
 		return nil
 	}
@@ -1030,9 +1040,43 @@ func (a *App) ensureUser(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, err = a.db.ExecContext(ctx, `INSERT INTO users (email,webauthn_handle) VALUES ($1,$2)
-		ON CONFLICT (email) DO UPDATE SET webauthn_handle=COALESCE(users.webauthn_handle,excluded.webauthn_handle)`, a.cfg.UserEmail, handle)
+	_, err = a.db.ExecContext(ctx, `INSERT INTO users (email,webauthn_handle,display_name) VALUES ($1,$2,$3)
+		ON CONFLICT (email) DO UPDATE SET webauthn_handle=COALESCE(users.webauthn_handle,excluded.webauthn_handle)`,
+		a.cfg.UserEmail, handle, name)
 	return err
+}
+
+// setOwnerName updates the display name of the single installation owner.
+func (a *App) setOwnerName(ctx context.Context, name string) error {
+	uid, err := a.firstUserID(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = a.db.ExecContext(ctx, `UPDATE users SET display_name=$1 WHERE id=$2`, name, uid)
+	return err
+}
+
+// ownerEmailFromName builds a stable internal identifier from the owner's
+// name. It never appears in mail flows; whose-turn analysis reads the user's
+// real addresses from connected accounts instead.
+func ownerEmailFromName(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case b.Len() > 0:
+			b.WriteRune('-')
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if slug == "" {
+		slug = "owner"
+	}
+	if len(slug) > 40 {
+		slug = slug[:40]
+	}
+	return slug + "@owner.local"
 }
 
 func (a *App) firstUserID(ctx context.Context) (string, error) {
