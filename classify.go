@@ -34,23 +34,58 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 	}
 	defer rows.Close()
 
-	// Correspondents: every address the owner has sent mail to. Backfill
-	// makes this load-bearing — an imported mailbox should not re-screen
-	// years of existing conversation partners.
+	// Correspondents: people the owner has already exchanged mail with —
+	// explicit recipients of user-sent messages, plus anyone sharing a
+	// thread with one (the mirror's to_addrs is spotty on sent mail, but
+	// thread_id is reliable). Backfill makes this load-bearing: an imported
+	// mailbox should not re-screen years of existing conversation partners.
 	correspondents := map[string]bool{}
-	if cr, err := a.db.QueryContext(ctx, `
-		SELECT DISTINCT lower(t->>'email')
-		FROM mail_messages m
-		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-		CROSS JOIN LATERAL json_array_elements(COALESCE(m.to_addrs, '[]')::json) t
-		WHERE lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = lower(ea.address)`, uid); err == nil {
+	collect := func(query string) error {
+		cr, err := a.db.QueryContext(ctx, query, uid)
+		if err != nil {
+			return err
+		}
+		defer cr.Close()
 		for cr.Next() {
 			var addr sql.NullString
 			if cr.Scan(&addr) == nil && addr.Valid && addr.String != "" {
 				correspondents[addr.String] = true
 			}
 		}
-		cr.Close()
+		return cr.Err()
+	}
+	// arrayOf guards json_array_elements against the mirror occasionally
+	// storing a JSON scalar in the address columns.
+	arrayOf := func(col string) string {
+		return `CASE WHEN json_typeof(COALESCE(` + col + `, '[]')::json) = 'array'
+		       THEN COALESCE(` + col + `, '[]')::json ELSE '[]'::json END`
+	}
+	if err := collect(`
+		SELECT DISTINCT lower(t->>'email')
+		FROM mail_messages m
+		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+		CROSS JOIN LATERAL json_array_elements(` + arrayOf("m.to_addrs") + `) t
+		WHERE lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = lower(ea.address)`); err != nil {
+		a.log.Error("correspondent extraction (recipients) failed", "err", err)
+	}
+	if err := collect(`
+		SELECT DISTINCT lower(t->>'email')
+		FROM mail_messages m
+		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+		CROSS JOIN LATERAL json_array_elements(` + arrayOf("m.cc_addrs") + `) t
+		WHERE lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = lower(ea.address)`); err != nil {
+		a.log.Error("correspondent extraction (cc) failed", "err", err)
+	}
+	if err := collect(`
+		SELECT DISTINCT lower(COALESCE(other.from_addrs, '[]')::json->0->>'email')
+		FROM mail_messages mine
+		JOIN email_accounts ea ON ea.mirror_account_id = mine.account_id AND ea.user_id = $1
+		JOIN mail_messages other ON other.account_id = mine.account_id AND other.thread_id = mine.thread_id
+		WHERE mine.thread_id IS NOT NULL
+		  AND lower(COALESCE(mine.from_addrs, '[]')::json->0->>'email') = lower(ea.address)
+		  AND lower(COALESCE(other.from_addrs, '[]')::json->0->>'email') <> lower(ea.address)
+		  AND COALESCE(other.from_addrs, '') <> ''`); err != nil {
+		a.log.Error("correspondent extraction (threads) failed", "err", err)
 	}
 
 	type pending struct{ acct, id, sender string }
