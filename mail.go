@@ -172,6 +172,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	api.HandleFunc("DELETE /security/totp", a.handleTOTPDelete)
 	api.HandleFunc("GET /security/sessions", a.handleSessions)
 	api.HandleFunc("DELETE /security/sessions/{id}", a.handleSessions)
+	a.mountAgentTokens(api)
 	api.HandleFunc("DELETE /account", a.handleFullAccountDelete)
 	api.HandleFunc("GET /personal/export", a.handlePersonalExport)
 	api.HandleFunc("GET /push", a.handlePush)
@@ -223,7 +224,9 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 
 	// Auth ceremony/status routes are public; all product data is session
 	// protected. The bootstrap token stops working after the first passkey.
-	public.Handle("/", a.requireAuth(api))
+	// Agent Bearer tokens enter through requireAgent, which additionally
+	// fences them away from the auth/security surface.
+	public.Handle("/", a.requireAgent(api))
 	mux.Handle("/api/", http.StripPrefix("/api", public))
 }
 

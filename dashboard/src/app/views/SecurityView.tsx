@@ -11,6 +11,7 @@ interface Passkey { id: string; name: string; created_at: string; last_used_at: 
 interface Security { email: string; passkeys: Passkey[]; totp_enabled: boolean; recovery_codes_remaining: number }
 interface Session { id: string; created_at: string; last_seen_at: string; expires_at: string; user_agent: string; current: boolean }
 interface PushState { configured: boolean; subscribed: boolean; public_key: string }
+interface AgentToken { id: string; name: string; created_at: string; last_used_at: string | null }
 
 function vapidBytes(value: string): Uint8Array {
   const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4);
@@ -29,11 +30,13 @@ export function SecurityView() {
   const [confirm, setConfirm] = useState("");
   const [deleting, setDeleting] = useState(false);
   const [push, setPush] = useState<PushState | null>(null);
+  const [agentTokens, setAgentTokens] = useState<AgentToken[]>([]);
+  const [newToken, setNewToken] = useState("");
 
   const load = async () => {
     try {
-      const [next, active, pushState] = await Promise.all([api<Security>("/security"), api<Session[]>("/security/sessions"), api<PushState>("/push")]);
-      setSecurity(next); setSessions(active); setPush(pushState);
+      const [next, active, pushState, tokens] = await Promise.all([api<Security>("/security"), api<Session[]>("/security/sessions"), api<PushState>("/push"), api<AgentToken[]>("/security/agent-tokens")]);
+      setSecurity(next); setSessions(active); setPush(pushState); setAgentTokens(tokens);
     } catch (e) { showError(e instanceof Error ? e.message : "Security settings failed"); }
   };
   useEffect(() => { load(); }, []);
@@ -97,6 +100,23 @@ export function SecurityView() {
     finally { setBusy(""); }
   };
 
+  const createAgentToken = async () => {
+    const name = window.prompt("Name this token (what will use it?)", "Purelymail import")?.trim();
+    if (!name) return;
+    setBusy("agent");
+    try {
+      const out = await api<{ token: string }>("/security/agent-tokens", { body: { name } });
+      setNewToken(out.token); await load();
+    } catch (e) { showError(e instanceof Error ? e.message : "Could not create token"); }
+    finally { setBusy(""); }
+  };
+
+  const copyNewToken = async () => {
+    try { await navigator.clipboard.writeText(newToken); showToast("Token copied"); }
+    catch { /* selection fallback below */ }
+  };
+
+
   const deleteEverything = async () => {
     if (!security || confirm.trim().toLowerCase() !== security.email.toLowerCase()) return;
     setDeleting(true);
@@ -144,6 +164,19 @@ export function SecurityView() {
         <div class="settings-section-head"><div><h2>Active sessions</h2><p>Thirty-day server-side sessions. Revoke anything you do not recognise.</p></div><button class="btn btn-outline btn-sm" type="button" onClick={logout}>Sign out here</button></div>
         {sessions.length === 0 && <Empty title="No active sessions." />}
         {sessions.map((session) => <div class="security-row" key={session.id}><div><strong>{session.current ? "This session" : "Signed-in device"}</strong><span>{session.user_agent || "Unknown browser"} · seen {fmtDate(session.last_seen_at)}</span></div><button class="btn btn-quiet-danger btn-sm" type="button" onClick={async () => { await api("/security/sessions/" + session.id, { method: "DELETE" }); if (session.current) { authed.value = false; await refreshAuth(); } else await load(); }}>Revoke</button></div>)}
+      </section>
+
+      <section class="settings-section">
+        <div class="settings-section-head"><div><h2>Agent tokens</h2><p>Let a script or AI agent connect mailboxes and read or send mail on your behalf. Tokens can never touch sign-in or security settings. Shown once — revoke anytime.</p></div>
+          <button class="btn btn-outline btn-sm" type="button" disabled={!!busy} onClick={createAgentToken}>{busy === "agent" ? "Creating…" : "Create token"}</button></div>
+        {newToken && <div class="recovery-sheet">
+          <p>Copy this now — it will not be shown again. Send it as <code>Authorization: Bearer …</code> against <code>/api/…</code>.</p>
+          <div class="totp-setup"><code>{newToken}</code></div>
+          <div class="inline-form"><button class="btn btn-primary btn-sm" type="button" onClick={copyNewToken}>Copy</button><button class="btn btn-ghost btn-sm" type="button" onClick={() => setNewToken("")}>Done</button></div>
+        </div>}
+        {agentTokens.length === 0 && !newToken && <Empty title="No agent tokens." />}
+        {agentTokens.map((token) => <div class="security-row" key={token.id}><div><strong>{token.name}</strong><span>Created {fmtDate(token.created_at)}{token.last_used_at ? " · used " + fmtDate(token.last_used_at) : " · not used yet"}</span></div>
+          <button class="btn btn-quiet-danger btn-sm" type="button" onClick={async () => { try { await api("/security/agent-tokens/" + encodeURIComponent(token.id), { method: "DELETE" }); await load(); } catch (e) { showError(e instanceof Error ? e.message : "Could not revoke token"); } }}>Revoke</button></div>)}
       </section>
 
       <section class="settings-section danger-zone">

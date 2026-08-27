@@ -177,5 +177,18 @@ CREATE TABLE IF NOT EXISTS app_settings (
   value text NOT NULL
 );
 
+-- Agent tokens: long-lived Bearer credentials for scripting and AI agents.
+-- Only the SHA-256 hash is stored; the raw token is shown once at creation.
+-- Scoped away from auth/security surfaces by the middleware, not by trust.
+CREATE TABLE IF NOT EXISTS agent_tokens (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name text NOT NULL DEFAULT 'Agent',
+  token_hash text NOT NULL UNIQUE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  last_used_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS agent_tokens_user ON agent_tokens (user_id);
+
 -- Phase 2+ tables (aliases, calendar, contacts, campaigns) land in later
 -- migrations, only when their phase ships. See SPEC.md sections 6.2-6.5.
