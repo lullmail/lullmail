@@ -201,7 +201,7 @@ function SetupWizard({ status }: { status: AuthStatus }) {
           {step === 2 && (
             <form onSubmit={setUp}>
               <h1 id="setup-title">Who's this mailbox for?</h1>
-              <p class="gate-sub">It's just you. Enter your email so email-soft knows which mail is yours, then create your passkey.</p>
+              <p class="gate-sub">It's just you. Enter your email so email-soft knows which mail is yours, then create your passkey. You'll connect your actual mailbox (Gmail, Outlook, or IMAP) in the next screen after setup.</p>
               <label class="sr-only" for="setup-email">Your email</label>
               <input id="setup-email" type="email" placeholder="you@example.com" autocomplete="email" value={email}
                 onInput={(e) => setEmail((e.target as HTMLInputElement).value)} />
