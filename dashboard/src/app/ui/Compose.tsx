@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { closeCompose, compose, cycleDraft, draftIndex, draftStack, retireDraft, type ComposeState } from "../lib/store";
+import { closeCompose, compose, cycleDraft, draftIndex, draftStack, openCompose, retireDraft, type ComposeState } from "../lib/store";
 import { sendMail } from "../lib/actions";
 
 /** One draft in the ring. Remounted per draftIndex so each draft owns its
@@ -77,13 +77,18 @@ export function Compose() {
           if (Math.abs(dx) > 60) cycleDraft(dx < 0 ? 1 : -1);
         }}
       >
-        {stack.length > 1 && (
-          <div class="compose-ring">
-            <button class="btn-icon" type="button" aria-label="Previous draft" onClick={() => cycleDraft(-1)}>‹</button>
-            <span class="compose-ring-count">{at + 1} of {stack.length} drafts</span>
-            <button class="btn-icon" type="button" aria-label="Next draft" onClick={() => cycleDraft(1)}>›</button>
-          </div>
-        )}
+        <div class="compose-ring">
+          <button class="btn btn-ghost btn-sm" type="button" onClick={() => openCompose()}>
+            + New draft
+          </button>
+          {stack.length > 1 && (
+            <>
+              <span class="compose-ring-count">{at + 1} of {stack.length}</span>
+              <button class="btn-icon" type="button" aria-label="Previous draft" onClick={() => cycleDraft(-1)}>‹</button>
+              <button class="btn-icon" type="button" aria-label="Next draft" onClick={() => cycleDraft(1)}>›</button>
+            </>
+          )}
+        </div>
         <DraftForm key={seed.id} seed={seed} />
       </div>
     </div>
