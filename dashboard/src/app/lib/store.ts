@@ -519,20 +519,28 @@ function restoreDrafts() {
 export const composeOpen = signal(false);
 
 export function openCompose(seed: Partial<ComposeState> = {}) {
-  const stack = [...draftStack.value];
-  if (!seed.replyToId && !seed.to) {
-    // Opening plain compose is "back to my drafts": reuse a blank if one is
-    // parked, else reopen the ring as it stands — never stack a fresh empty
-    // behind drafts that already have content.
-    const blank = stack.findIndex((d) => !d.to && !d.subject && !d.body);
-    if (blank >= 0) draftIndex.value = blank;
-    else if (stack.length) draftIndex.value = stack.length - 1;
-    else stack.push({ id: newDraftId(), to: "", subject: "", body: "", ...seed });
-    composeOpen.value = true;
-    if (stack !== draftStack.value && stack.length) draftStack.value = stack;
+  if (seed.replyToId || seed.to) {
+    pushDraft(seed);
     return;
   }
-  stack.push({ id: newDraftId(), to: "", subject: "", body: "", ...seed });
+  // Plain compose is "back to my drafts": reuse a blank if one is parked,
+  // else reopen the ring focused on its newest draft — never stack a fresh
+  // empty behind drafts that already have content.
+  const stack = draftStack.value;
+  const blank = stack.findIndex((d) => !d.to && !d.subject && !d.body);
+  if (blank >= 0) draftIndex.value = blank;
+  else if (stack.length) draftIndex.value = stack.length - 1;
+  else pushDraft(seed);
+  composeOpen.value = true;
+}
+
+/** Always stacks — the explicit "+ New draft" control and c-while-composing. */
+export function newDraft() {
+  pushDraft({});
+}
+
+function pushDraft(seed: Partial<ComposeState>) {
+  const stack = [...draftStack.value, { id: newDraftId(), to: "", subject: "", body: "", ...seed }];
   draftStack.value = stack;
   draftIndex.value = stack.length - 1;
   composeOpen.value = true;

@@ -4,7 +4,7 @@
 // bucket pages, so Today, the Screener and the reader were mouse-only. This is
 // one handler for the whole app: it reads the current list out of the store, so
 // every surface that publishes rows gets the same keys for free.
-import { closeCompose, compose, composeOpen, cursor, checked, list, noteKeyUse, openCompose, overlayOpen, palette, reader, resetSelection, shortcuts, toggleChecked, closeReader, targetRows, dismissToast, toast } from "./store";
+import { closeCompose, compose, composeOpen, cursor, checked, list, newDraft, noteKeyUse, openCompose, overlayOpen, palette, reader, resetSelection, shortcuts, toggleChecked, closeReader, targetRows, dismissToast, toast } from "./store";
 import { decide, markDone, moveTo, openThread, pinThreads, snooze } from "./actions";
 import { navigate } from "./router";
 import { splitFrom } from "./fmt";
@@ -97,7 +97,7 @@ export function installKeys(): () => void {
     // being swallowed by the overlay guard.
     if (composeOpen.value && !isTyping(ev.target) && ev.key.toLowerCase() === "c") {
       ev.preventDefault();
-      openCompose();
+      newDraft();
       return;
     }
     if (overlayOpen.value) return;

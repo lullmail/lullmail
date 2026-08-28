@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { closeCompose, compose, cycleDraft, draftIndex, draftStack, openCompose, retireDraft, updateDraft, type ComposeState } from "../lib/store";
+import { closeCompose, compose, cycleDraft, draftIndex, draftStack, newDraft, retireDraft, updateDraft, type ComposeState } from "../lib/store";
 import { sendMail } from "../lib/actions";
 
 /** One draft in the ring. Remounted per draftIndex so each draft owns its
@@ -78,7 +78,7 @@ export function Compose() {
         }}
       >
         <div class="compose-ring">
-          <button class="btn btn-ghost btn-sm" type="button" onClick={() => openCompose()}>
+          <button class="btn btn-ghost btn-sm" type="button" onClick={() => newDraft()}>
             + New draft
           </button>
           {stack.length > 1 && (
