@@ -22,6 +22,7 @@ type accountJSON struct {
 	Label         string  `json:"label"`
 	BackfillDays  int     `json:"backfill_days"`
 	RetentionDays int     `json:"retention_days"`
+	SyncEnabled   bool    `json:"sync_enabled"`
 	LastSyncAt    *string `json:"last_sync_at"`
 	LastError     *string `json:"last_error"`
 	MessageCount  int     `json:"message_count"`
@@ -46,7 +47,7 @@ func (a *App) listAccountsJSON(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT ea.id, ea.provider, ea.address, ea.label, ea.backfill_days, ea.retention_days,
+		SELECT ea.id, ea.provider, ea.address, ea.label, ea.backfill_days, ea.retention_days, ea.sync_enabled,
 		       COALESCE(ea.last_sync_at::text,''), COALESCE(ea.last_error,''),
 		       (SELECT count(*) FROM mail_messages m WHERE m.account_id = ea.mirror_account_id),
 		       (SELECT count(*) FROM hey_messages h
@@ -64,7 +65,7 @@ func (a *App) listAccountsJSON(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var acc accountJSON
 		var lastSync, lastErr string
-		if err := rows.Scan(&acc.ID, &acc.Provider, &acc.Address, &acc.Label, &acc.BackfillDays, &acc.RetentionDays,
+		if err := rows.Scan(&acc.ID, &acc.Provider, &acc.Address, &acc.Label, &acc.BackfillDays, &acc.RetentionDays, &acc.SyncEnabled,
 			&lastSync, &lastErr, &acc.MessageCount, &acc.ScreenerCount); err != nil {
 			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
 			return
@@ -223,10 +224,41 @@ func (a *App) handleAccountItem(w http.ResponseWriter, r *http.Request) {
 			a.updateRetention(w, r, id)
 			return
 		}
-		writeProblem(w, http.StatusBadRequest, "Unknown Op", "use ?op=sync or ?op=retention")
+		if r.URL.Query().Get("op") == "sync_enabled" {
+			a.updateSyncEnabled(w, r, id)
+			return
+		}
+		writeProblem(w, http.StatusBadRequest, "Unknown Op", "use ?op=sync, ?op=retention, or ?op=sync_enabled")
 	default:
 		writeProblem(w, http.StatusMethodNotAllowed, "Method Not Allowed", "use DELETE or POST ?op=sync")
 	}
+}
+
+// updateSyncEnabled flips the background-sync pause. Manual ?op=sync stays
+// available either way — pausing the scheduler is not pausing the owner.
+func (a *App) updateSyncEnabled(w http.ResponseWriter, r *http.Request, id string) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, 500, "Lookup Failed", err.Error())
+		return
+	}
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
+		writeProblem(w, 422, "Invalid Flag", "body must be {\"enabled\": true|false}")
+		return
+	}
+	result, err := a.db.ExecContext(r.Context(), `UPDATE email_accounts SET sync_enabled=$1 WHERE id=$2 AND user_id=$3`, req.Enabled, id, uid)
+	if err != nil {
+		writeProblem(w, 500, "Update Failed", err.Error())
+		return
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		writeProblem(w, 404, "Not Found", "no such account")
+		return
+	}
+	writeJSON(w, map[string]any{"sync_enabled": req.Enabled})
 }
 
 func (a *App) updateRetention(w http.ResponseWriter, r *http.Request, id string) {

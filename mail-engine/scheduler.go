@@ -32,6 +32,12 @@ type Scheduler struct {
 	Tokens  TokenSource
 	Resolve Resolver
 
+	// Include reports whether an account should be background-synced at
+	// all. The engine has no product concept of "paused mailbox"; the app
+	// supplies one backed by its own sync_enabled flag. Manual sync
+	// endpoints are NOT gated by this — an explicit request is explicit.
+	Include func(Account) bool
+
 	// Interval is how often each account is synced. Defaults to 5 minutes.
 	//
 	// Polling rather than IMAP IDLE is deliberate for the general case:
@@ -115,6 +121,9 @@ func (s *Scheduler) RunOnce(ctx context.Context) {
 
 	for _, a := range accounts {
 		acct := a
+		if s.Include != nil && !s.Include(acct) {
+			continue
+		}
 		if !s.eligible(acct) {
 			continue
 		}

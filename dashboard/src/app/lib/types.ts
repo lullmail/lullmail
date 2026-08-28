@@ -113,6 +113,7 @@ export interface Account {
   label: string;
   backfill_days: number;
   retention_days: number;
+  sync_enabled: boolean;
   last_sync_at: string | null;
   last_error: string | null;
   message_count: number;

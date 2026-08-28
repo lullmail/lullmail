@@ -2,7 +2,9 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -62,6 +64,8 @@ func serve() {
 				if name == "service-worker.js" {
 					w.Header().Set("Cache-Control", "no-cache")
 					w.Header().Set("Service-Worker-Allowed", "/")
+					serveServiceWorker(w, r, dist)
+					return
 				}
 				if strings.HasSuffix(name, ".html") {
 					serveHTML(w, r, dist, name)
@@ -102,6 +106,27 @@ func securityHeaders(next http.Handler) http.Handler {
 				"img-src 'self' data: blob: https:; connect-src 'self'; form-action 'self'")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// serveServiceWorker stamps the worker with a fingerprint of the built
+// shell. The browser only reinstalls a service worker when its bytes
+// change; a static file would keep serving the deploy-time shell offline
+// forever. Hashing index.html ties the version to whatever the build
+// actually shipped, so every deploy re-installs and re-caches — no manual
+// VERSION bumps to forget.
+func serveServiceWorker(w http.ResponseWriter, r *http.Request, fsys fs.FS) {
+	data, err := fs.ReadFile(fsys, "service-worker.js")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	shell, _ := fs.ReadFile(fsys, "index.html")
+	sum := sha256.Sum256(shell)
+	body := strings.Replace(string(data),
+		`const VERSION = "email-soft-shell-v4";`,
+		`const VERSION = "email-soft-shell-`+hex.EncodeToString(sum[:6])+`";`, 1)
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	io.WriteString(w, body)
 }
 
 // serveHTML writes an HTML file with the stylesheet injected. The Neutron

@@ -111,11 +111,9 @@ func registerTools(s *mcp.Server, c *client) {
 		if args.ThreadID == "" {
 			return nil, nil, errArgs("thread_id is required")
 		}
-		id, err := safeSegment(args.ThreadID)
-		if err != nil {
-			return nil, nil, errArgs("thread_id must come from list_bucket or search_mail")
-		}
-		return text(c.get(ctx, "/threads/"+id, nil))
+		// Thread ids may contain "/" (GitHub notification pattern); the
+		// server route is a suffix wildcard, so encoding is the only need.
+		return text(c.get(ctx, "/threads/"+url.PathEscape(args.ThreadID), nil))
 	})
 
 	mcp.AddTool(s, &mcp.Tool{

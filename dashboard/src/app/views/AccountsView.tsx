@@ -84,6 +84,16 @@ function AccountCard({ account, onChange }: { account: Account; onChange: () => 
     finally { setBusy(null); }
   };
 
+  const setSyncEnabled = async (enabled: boolean) => {
+    setBusy("sync");
+    try {
+      await api("/accounts/" + encodeURIComponent(account.id) + "?op=sync_enabled", { body: { enabled } });
+      showToast(enabled ? "Background sync on" : "Background sync paused — Sync now still works");
+      onChange();
+    } catch (e) { showError(e instanceof Error ? e.message : "Could not change sync setting"); }
+    finally { setBusy(null); }
+  };
+
   return (
     <div class="account">
       <div class="account-line">
@@ -118,6 +128,12 @@ function AccountCard({ account, onChange }: { account: Account; onChange: () => 
           <span>Local retention</span>
           <select disabled={!!busy} value={account.retention_days} onChange={(e) => setRetention(Number((e.target as HTMLSelectElement).value))}>
             <option value={0}>Forever</option><option value={30}>30 days</option><option value={90}>90 days</option><option value={365}>1 year</option><option value={1095}>3 years</option>
+          </select>
+        </label>
+        <label class="retention-control">
+          <span>Background sync</span>
+          <select disabled={!!busy} value={account.sync_enabled ? "on" : "off"} onChange={(e) => setSyncEnabled((e.target as HTMLSelectElement).value === "on")}>
+            <option value="on">On</option><option value="off">Paused</option>
           </select>
         </label>
         {confirming ? (

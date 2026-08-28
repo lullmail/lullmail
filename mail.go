@@ -110,6 +110,16 @@ func connectApp(cfg *Config) *App {
 	app.sched = mail.NewScheduler(store, app.eng, nil, slog.Default())
 	app.sched.Tokens = app
 	app.sched.Resolve = newResolver()
+	// email_accounts.sync_enabled is the product-level pause switch; the
+	// engine only knows the mirror, so the decision is supplied from here.
+	app.sched.Include = func(acct mail.Account) bool {
+		var enabled bool
+		if err := db.QueryRow(`SELECT sync_enabled FROM email_accounts WHERE mirror_account_id=$1`, string(acct.ID)).Scan(&enabled); err != nil {
+			// Unknown to the product layer: not ours to sync.
+			return false
+		}
+		return enabled
+	}
 
 	if err := app.ensureUser(ctx, ""); err != nil {
 		log.Printf("app: user bootstrap failed (continuing): %v", err)
