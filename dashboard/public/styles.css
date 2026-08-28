@@ -291,6 +291,142 @@
   color-scheme: dark;
 }
 
+/* Y2K: Luna blue and Aqua gloss — the optimistic internet. */
+:root[data-theme="y2k"] {
+  --bg: #eaf3fc;
+  --panel: #ffffff;
+  --raise: #eaf2fb;
+  --ink: #16344f;
+  --ink-2: #47617a;
+  --ink-3: #7e93a8;
+  --line: #c9dcef;
+  --line-strong: #a8c4e0;
+  --hover: #f0f6fd;
+  --sel: #dbe9f8;
+  --accent: #2f7dc9;
+  --accent-ink: #ffffff;
+  --accent-soft: #dcebfa;
+  --danger: #c0392b;
+  --danger-soft: #f9e4e0;
+  --ok: #3f9c58;
+  --scroll: #b7c9dd;
+  --shadow-1: 0 1px 3px rgba(31, 78, 121, 0.14);
+  --shadow-3: 0 1px 3px rgba(31, 78, 121, 0.14), 0 24px 64px rgba(31, 78, 121, 0.22);
+  --veil: rgba(35, 70, 110, 0.28);
+  color-scheme: light;
+}
+
+/* 1999: the beige box — grey chrome, hard bevels, navy title bars,
+   Tahoma doing its best. */
+:root[data-theme="1999"] {
+  --bg: #d4d0c8;
+  --panel: #ffffff;
+  --raise: #d8d4cc;
+  --ink: #101010;
+  --ink-2: #3c3c3c;
+  --ink-3: #707070;
+  --line: #b4b0a8;
+  --line-strong: #8f8b84;
+  --hover: #e6e2da;
+  --sel: #d8e0ec;
+  --accent: #000080;
+  --accent-ink: #ffffff;
+  --accent-soft: #d4d8ec;
+  --danger: #a02818;
+  --danger-soft: #efded8;
+  --ok: #2e7d32;
+  --scroll: #a8a49c;
+  --shadow-1: inset 1px 1px #ffffff, inset -1px -1px #808080;
+  --shadow-3: inset 1px 1px #ffffff, inset -1px -1px #808080;
+  --veil: rgba(60, 60, 60, 0.35);
+  --sans: Tahoma, "MS Sans Serif", Geneva, sans-serif;
+  --serif: "Times New Roman", Times, serif;
+  color-scheme: light;
+}
+
+/* Vapor: pink-and-cyan sunset over a purple grid; titles lean italic. */
+:root[data-theme="vapor"] {
+  --bg: #1b0e33;
+  --panel: #251342;
+  --raise: #2f1a52;
+  --ink: #f4e9ff;
+  --ink-2: #cdaef0;
+  --ink-3: #9372c4;
+  --line: #3a1f63;
+  --line-strong: #55307f;
+  --hover: #351e5c;
+  --sel: #3d2570;
+  --accent: #38f0ff;
+  --accent-ink: #05272b;
+  --accent-soft: rgba(56, 240, 255, 0.1);
+  --danger: #ff6bd6;
+  --danger-soft: rgba(255, 107, 214, 0.1);
+  --ok: #58e6c6;
+  --scroll: #4a2a75;
+  --shadow-1: 0 1px 2px rgba(12, 4, 24, 0.5);
+  --shadow-3: 0 1px 2px rgba(12, 4, 24, 0.5), 0 24px 64px rgba(8, 2, 18, 0.6);
+  --veil: rgba(10, 4, 20, 0.6);
+  color-scheme: dark;
+}
+
+/* ---- era detailing: the layers that make the three novelty themes feel
+       like their decade rather than just colored like it ---- */
+
+[data-theme="y2k"] body {
+  background: linear-gradient(180deg, #9cc3ee 0%, #eaf3fc 420px) fixed;
+}
+[data-theme="y2k"] .btn {
+  border-radius: 8px;
+  background: linear-gradient(180deg, #b3d7f7, #5a9bd8);
+  color: #ffffff;
+  border: 1px solid #2f6cab;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7), 0 1px 2px rgba(31, 78, 121, 0.35);
+}
+[data-theme="y2k"] .btn:hover { filter: brightness(1.05); }
+[data-theme="y2k"] .btn-accent {
+  background: linear-gradient(180deg, #8fe07c, #3d9e3d);
+  border-color: #2e7d2e;
+}
+[data-theme="y2k"] .topline { background: linear-gradient(180deg, #eaf3fc, #d7e8f8); }
+[data-theme="y2k"] .gate, [data-theme="y2k"] .panel { border-radius: 12px; }
+
+[data-theme="1999"] body { background: #d4d0c8; }
+[data-theme="1999"] .btn {
+  border-radius: 0;
+  background: #c0c0c0;
+  color: #101010;
+  border: 1px solid;
+  border-color: #dfdfdf #404040 #404040 #dfdfdf;
+  box-shadow: inset 1px 1px #ffffff, inset -1px -1px #808080;
+}
+[data-theme="1999"] .btn:active {
+  border-color: #404040 #dfdfdf #dfdfdf #404040;
+  box-shadow: inset 1px 1px #808080;
+}
+[data-theme="1999"] .btn-accent { background: #000080; color: #ffffff; }
+[data-theme="1999"] .panel, [data-theme="1999"] .gate {
+  border-radius: 0;
+  background: #c0c0c0;
+  border: 1px solid;
+  border-color: #dfdfdf #404040 #404040 #dfdfdf;
+}
+[data-theme="1999"] .topline { background: #c0c0c0; }
+[data-theme="1999"] .theme-card, [data-theme="1999"] .type-card, [data-theme="1999"] .acct-toggle { border-radius: 0; }
+[data-theme="1999"] .recovery-grid code, [data-theme="1999"] .menu { border-radius: 0; }
+
+[data-theme="vapor"] body {
+  background: linear-gradient(180deg, #140a24 0%, #2d1150 55%, #7c2a86 100%) fixed;
+}
+[data-theme="vapor"] h1, [data-theme="vapor"] h2, [data-theme="vapor"] .thread-title {
+  font-style: italic;
+  text-shadow: 0 0 14px rgba(56, 240, 255, 0.35);
+}
+[data-theme="vapor"] .nav-item.active { text-shadow: 0 0 10px rgba(56, 240, 255, 0.5); }
+[data-theme="vapor"] .side-item.active {
+  box-shadow: inset 2px 0 0 var(--accent), 0 0 12px rgba(56, 240, 255, 0.15);
+}
+[data-theme="vapor"] .btn-accent { text-shadow: none; }
+
 /* ============================================================ base */
 
 * { box-sizing: border-box; }

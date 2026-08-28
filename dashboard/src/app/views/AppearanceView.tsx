@@ -27,6 +27,9 @@ const CHARACTERS: ThemeCard[] = [
   { id: "rose", name: "Rosé", blurb: "Muted rose and gold on plum", bg: "#191724", panel: "#1f1d2e", ink: "#e0def4", line: "#2a2740", accent: "#ebbcba" },
   { id: "solarized", name: "Solarized", blurb: "The classic warm cream", bg: "#fdf6e3", panel: "#fffdf4", ink: "#2c3f45", line: "#e9e0c8", accent: "#b58900" },
   { id: "blueprint", name: "Blueprint", blurb: "Drafting blue with a pencil-yellow accent", bg: "#0d2440", panel: "#112c4d", ink: "#dbe9ff", line: "#1c3a63", accent: "#ffd23f" },
+  { id: "y2k", name: "Y2K", blurb: "Luna blue, Aqua gloss — the optimistic internet", bg: "linear-gradient(180deg,#9cc3ee,#eaf3fc)", panel: "#ffffff", ink: "#16344f", line: "#c9dcef", accent: "#2f7dc9" },
+  { id: "1999", name: "1999", blurb: "The beige box — hard bevels, navy title bars, Tahoma", bg: "#d4d0c8", panel: "#c0c0c0", ink: "#101010", line: "#8f8b84", accent: "#000080" },
+  { id: "vapor", name: "Vapor", blurb: "Pink-and-cyan sunset over a purple grid", bg: "linear-gradient(180deg,#140a24,#7c2a86)", panel: "#251342", ink: "#f4e9ff", line: "#3a1f63", accent: "#38f0ff" },
 ];
 
 function ThemeCards({ cards }: { cards: ThemeCard[] }) {

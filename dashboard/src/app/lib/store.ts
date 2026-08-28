@@ -8,19 +8,20 @@ import type { Bucket, Counts, ListBucket, Message, Row, ScreenerSender } from ".
 
 export type Theme =
   | "light" | "sepia" | "dark"
-  | "terminal" | "amber" | "nord" | "dracula" | "rose" | "solarized" | "blueprint";
+  | "terminal" | "amber" | "nord" | "dracula" | "rose" | "solarized" | "blueprint"
+  | "y2k" | "1999" | "vapor";
 
 export const THEMES: Theme[] = ["light", "sepia", "dark"];
 
 /** Everything with a dark ground: badge/favicon inversions, sticky-note
     washes, and any code that assumes light-on-dark rendering. */
-const DARK_THEMES = new Set<Theme>(["dark", "terminal", "amber", "nord", "dracula", "rose", "blueprint"]);
+const DARK_THEMES = new Set<Theme>(["dark", "terminal", "amber", "nord", "dracula", "rose", "blueprint", "vapor"]);
 
 export function isDarkTheme(t: Theme): boolean {
   return DARK_THEMES.has(t);
 }
 
-const ALL_THEMES = new Set<Theme>([...THEMES, "terminal", "amber", "nord", "dracula", "rose", "solarized", "blueprint"]);
+const ALL_THEMES = new Set<Theme>([...THEMES, "terminal", "amber", "nord", "dracula", "rose", "solarized", "blueprint", "y2k", "1999", "vapor"]);
 
 function initialTheme(): Theme {
   if (typeof document === "undefined") return "light";

@@ -26,7 +26,7 @@ export function head() {
       {
         id: "theme-init",
         content:
-          "(function(){try{var ok=['light','sepia','dark','terminal','amber','nord','dracula','rose','solarized','blueprint'];" +
+          "(function(){try{var ok=['light','sepia','dark','terminal','amber','nord','dracula','rose','solarized','blueprint','y2k','1999','vapor'];" +
           "var t=localStorage.getItem('es-theme');" +
           "if(ok.indexOf(t)<0){t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light';}" +
           "document.documentElement.setAttribute('data-theme',t);" +
