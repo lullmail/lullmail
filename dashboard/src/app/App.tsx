@@ -5,7 +5,7 @@ import { signal } from "@preact/signals";
 import { path, routeFor, startRouter } from "./lib/router";
 import { installKeys } from "./lib/keys";
 import { refreshAccounts, refreshCounts } from "./lib/actions";
-import { accountCount, accountFilter, attentionTotal, compose, isDarkTheme, layout, palette, query, reader, resolveLayout, setSplitWidth, shortcuts, splitWidth, theme } from "./lib/store";
+import { accountCount, accountFilter, attentionTotal, compose, composeOpen, isDarkTheme, layout, palette, query, reader, resolveLayout, setSplitWidth, shortcuts, splitWidth, theme } from "./lib/store";
 import { Topline } from "./Topline";
 import { Sidebar } from "./Sidebar";
 import { Thread } from "./reader/Thread";
@@ -268,7 +268,7 @@ function Overlays() {
     <>
       {palette.value && <Palette />}
       {shortcuts.value && <Shortcuts />}
-      {compose.value && <Compose />}
+      {compose.value && composeOpen.value && <Compose />}
       {/* The thread has its own verb bar with key chips; two stacked bars is noise. */}
       {accountCount.value !== 0 && !reader.value.threadId && <KeyHints />}
       <Toast />

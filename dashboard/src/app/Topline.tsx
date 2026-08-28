@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { accountFilter, accounts, counts, layout, openCompose, palette, setAccountFilter } from "./lib/store";
+import { accountFilter, accounts, counts, draftStack, layout, openCompose, palette, setAccountFilter } from "./lib/store";
 import { path, routeFor } from "./lib/router";
 import { Icon } from "./ui/Icon";
 import { MoreMenu } from "./ui/MoreMenu";
@@ -140,7 +140,7 @@ export function Topline() {
           </button>
           <MoreMenu />
           <button class="btn btn-accent" type="button" onClick={() => openCompose()}>
-            <Icon name="compose" size={14} /><span class="label">Compose</span>
+            <Icon name="compose" size={14} /><span class="label">Compose{draftStack.value.length > 0 ? " · " + draftStack.value.length : ""}</span>
           </button>
         </div>
       </div>

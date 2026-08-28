@@ -478,25 +478,40 @@ export const draftStack = signal<ComposeState[]>([]);
 export const draftIndex = signal(0);
 export const compose = computed<ComposeState | null>(() => draftStack.value[draftIndex.value] ?? null);
 
+/** The window. Closing it parks the drafts — they are only gone when sent
+    or discarded, and the Compose button keeps counting them. */
+export const composeOpen = signal(false);
+
 export function openCompose(seed: Partial<ComposeState> = {}) {
   const stack = [...draftStack.value];
-  // Opening compose when a blank draft is already queued focuses it instead
-  // of stacking empties behind each other.
   if (!seed.replyToId && !seed.to) {
     const blank = stack.findIndex((d) => !d.to && !d.subject && !d.body);
-    if (blank >= 0) { draftIndex.value = blank; return; }
+    if (blank >= 0) {
+      // A blank draft is already parked — focus it rather than stacking
+      // empties behind each other.
+      draftIndex.value = blank;
+      composeOpen.value = true;
+      return;
+    }
   }
   stack.push({ id: newDraftId(), to: "", subject: "", body: "", ...seed });
   draftStack.value = stack;
   draftIndex.value = stack.length - 1;
+  composeOpen.value = true;
 }
 
-/** Closes the active draft; the next one in the ring takes its place. */
+/** Closes the window; drafts stay parked in the carousel. */
 export function closeCompose() {
-  const stack = [...draftStack.value];
-  stack.splice(draftIndex.value, 1);
+  composeOpen.value = false;
+}
+
+/** Removes the active draft from the ring (send or discard). The window
+    follows the last one out. */
+export function retireDraft(id: string) {
+  const stack = draftStack.value.filter((d) => d.id !== id);
   draftStack.value = stack;
   draftIndex.value = Math.min(draftIndex.value, stack.length - 1);
+  if (!stack.length) composeOpen.value = false;
 }
 
 /** The carousel: rotate through open drafts, wrapping around. */
@@ -512,7 +527,7 @@ export const shortcuts = signal<boolean>(false);
 
 /** True when a modal surface owns the keyboard. */
 export const overlayOpen = computed(
-  () => palette.value || shortcuts.value || compose.value !== null
+  () => palette.value || shortcuts.value || composeOpen.value
 );
 
 /* ---- list-column search ---- */

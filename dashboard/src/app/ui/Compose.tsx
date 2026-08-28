@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { closeCompose, compose, cycleDraft, draftIndex, draftStack, type ComposeState } from "../lib/store";
+import { closeCompose, compose, cycleDraft, draftIndex, draftStack, retireDraft, type ComposeState } from "../lib/store";
 import { sendMail } from "../lib/actions";
 
 /** One draft in the ring. Remounted per draftIndex so each draft owns its
@@ -25,7 +25,7 @@ function DraftForm({ seed }: { seed: ComposeState }) {
     setBusy(true);
     const ok = await sendMail({ to: to.trim(), subject, text: body, replyToId: seed.replyToId });
     setBusy(false);
-    if (ok) { localStorage.removeItem(draftKey); closeCompose(); }
+    if (ok) { localStorage.removeItem(draftKey); retireDraft(seed.id); }
   };
 
   return (
@@ -50,8 +50,8 @@ function DraftForm({ seed }: { seed: ComposeState }) {
         />
       </div>
       <div class="compose-btns">
-        <span class="hint"><span class="kbd">⌘↵</span> send · <span class="kbd">Esc</span> close · 5s to undo</span>
-        <button class="btn btn-ghost btn-sm" type="button" onClick={() => { localStorage.removeItem(draftKey); closeCompose(); }}>Discard</button>
+        <span class="hint"><span class="kbd">⌘↵</span> send · <span class="kbd">Esc</span> park · <span class="kbd">c</span> new draft · 5s to undo</span>
+        <button class="btn btn-ghost btn-sm" type="button" onClick={() => { localStorage.removeItem(draftKey); retireDraft(seed.id); }}>Discard</button>
         <button class="btn btn-accent" type="button" disabled={!to.trim() || busy} onClick={send}>
           {busy ? "Sending…" : "Send"}
         </button>
