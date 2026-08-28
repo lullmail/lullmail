@@ -484,12 +484,18 @@ export const compose = computed<ComposeState | null>(() => draftStack.value[draf
     restoring; content is. */
 const DRAFTS_KEY = "es-drafts";
 let draftSaveTimer: ReturnType<typeof setTimeout> | undefined;
-draftStack.subscribe((stack) => {
+function persistDraftsNow() {
   clearTimeout(draftSaveTimer);
-  draftSaveTimer = setTimeout(() => {
-    try { localStorage.setItem(DRAFTS_KEY, JSON.stringify(stack)); } catch { /* private mode */ }
-  }, 200);
+  try { localStorage.setItem(DRAFTS_KEY, JSON.stringify(draftStack.value)); } catch { /* private mode */ }
+}
+draftStack.subscribe(() => {
+  clearTimeout(draftSaveTimer);
+  draftSaveTimer = setTimeout(persistDraftsNow, 120);
 });
+// A reload can land inside the debounce window; the last state must win.
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", persistDraftsNow);
+}
 
 function restoreDrafts() {
   if (typeof localStorage === "undefined") return;
