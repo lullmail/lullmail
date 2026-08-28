@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { closeCompose, compose, cycleDraft, draftIndex, draftStack, openCompose, retireDraft, type ComposeState } from "../lib/store";
+import { closeCompose, compose, cycleDraft, draftIndex, draftStack, openCompose, retireDraft, updateDraft, type ComposeState } from "../lib/store";
 import { sendMail } from "../lib/actions";
 
 /** One draft in the ring. Remounted per draftIndex so each draft owns its
@@ -34,16 +34,16 @@ function DraftForm({ seed }: { seed: ComposeState }) {
         <div class="compose-kicker">{seed.context || "New message"}</div>
         <input
           class="compose-to" type="email" placeholder="To" autocomplete="off" autofocus={!to}
-          value={to} onInput={(e) => setTo((e.target as HTMLInputElement).value)}
+          value={to} onInput={(e) => { const v = (e.target as HTMLInputElement).value; setTo(v); updateDraft({ to: v }); }}
         />
         <input
           class="compose-subject" type="text" placeholder="Subject"
-          value={subject} onInput={(e) => setSubject((e.target as HTMLInputElement).value)}
+          value={subject} onInput={(e) => { const v = (e.target as HTMLInputElement).value; setSubject(v); updateDraft({ subject: v }); }}
         />
         <textarea
           class="compose-body" placeholder="Write something worth reading." autofocus={!!to}
           value={body}
-          onInput={(e) => setBody((e.target as HTMLTextAreaElement).value)}
+          onInput={(e) => { const v = (e.target as HTMLTextAreaElement).value; setBody(v); updateDraft({ body: v }); }}
           onKeyDown={(ev) => {
             if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") { ev.preventDefault(); send(); }
           }}

@@ -514,6 +514,17 @@ export function retireDraft(id: string) {
   if (!stack.length) composeOpen.value = false;
 }
 
+/** Field edits flow back to the stack so the carousel knows what a draft
+    actually contains (blank-draft reuse, park-vs-discard). */
+export function updateDraft(patch: Partial<ComposeState>) {
+  const stack = [...draftStack.value];
+  const at = draftIndex.value;
+  if (stack[at]) {
+    stack[at] = { ...stack[at], ...patch };
+    draftStack.value = stack;
+  }
+}
+
 /** The carousel: rotate through open drafts, wrapping around. */
 export function cycleDraft(dir: 1 | -1) {
   const n = draftStack.value.length;
