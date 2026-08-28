@@ -53,8 +53,8 @@ export function setTheme(next: Theme) {
 
 /* ---- appearance: accent + type flavor ---- */
 
-export type Accent = "ember" | "ocean" | "forest" | "violet" | "rose" | "teal" | "graphite";
-const ACCENTS: Accent[] = ["ember", "ocean", "forest", "violet", "rose", "teal", "graphite"];
+export type Accent = "ember" | "ocean" | "forest" | "violet" | "rose" | "teal" | "graphite" | "custom";
+const ACCENTS: Accent[] = ["ember", "ocean", "forest", "violet", "rose", "teal", "graphite", "custom"];
 
 function initialAccent(): Accent {
   if (typeof document === "undefined") return "ember";
@@ -63,6 +63,31 @@ function initialAccent(): Accent {
 }
 
 export const accent = signal<Accent>("ember");
+
+/** The custom accent's hex, applied as inline root variables — the one
+    appearance choice that cannot be a static CSS block. */
+export const accentCustom = signal<string>("");
+
+function applyCustomAccentVars(hex: string) {
+  const n = parseInt(hex.slice(1), 16);
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  const s = document.documentElement.style;
+  s.setProperty("--accent", hex);
+  s.setProperty("--accent-ink", lum > 150 ? "#111111" : "#ffffff");
+  s.setProperty("--accent-soft", "color-mix(in srgb, " + hex + " 12%, transparent)");
+}
+
+export function setAccentCustom(hex: string) {
+  accentCustom.value = hex;
+  accent.value = "custom";
+  document.documentElement.setAttribute("data-accent", "custom");
+  applyCustomAccentVars(hex);
+  try {
+    localStorage.setItem("es-accent", "custom");
+    localStorage.setItem("es-accent-custom", hex);
+  } catch { /* private mode */ }
+}
 
 export function setAccent(next: Accent) {
   accent.value = next;
@@ -89,6 +114,32 @@ export function setTypeFlavor(next: TypeFlavor) {
   } catch { /* private mode */ }
 }
 
+/* ---- text size, density, reading measure ---- */
+
+export type TextSize = "s" | "m" | "l" | "xl";
+export type Density = "compact" | "comfortable" | "roomy";
+export type Measure = "narrow" | "standard" | "wide";
+
+function attrDefault(name: string, fallback: string): string {
+  if (typeof document === "undefined") return fallback;
+  return document.documentElement.getAttribute(name) || fallback;
+}
+
+export const textSize = signal<TextSize>("m");
+export const density = signal<Density>("comfortable");
+export const measure = signal<Measure>("standard");
+
+function setAttr(key: string, value: string) {
+  document.documentElement.setAttribute(key, value);
+  try {
+    localStorage.setItem("es-" + key.replace("data-", ""), value);
+  } catch { /* private mode */ }
+}
+
+export function setTextSize(next: TextSize) { textSize.value = next; setAttr("data-textsize", next); }
+export function setDensity(next: Density) { density.value = next; setAttr("data-density", next); }
+export function setMeasure(next: Measure) { measure.value = next; setAttr("data-measure", next); }
+
 /* ---- layout ---- */
 
 export type Layout = "document" | "classic";
@@ -112,6 +163,19 @@ export function resolveLayout() {
   accountFilter.value = initialAccountFilter();
   accent.value = initialAccent();
   typeFlavor.value = initialType();
+  textSize.value = attrDefault("data-textsize", "m") as TextSize;
+  density.value = attrDefault("data-density", "comfortable") as Density;
+  measure.value = attrDefault("data-measure", "standard") as Measure;
+  if (accent.value === "custom") {
+    let hex = "";
+    try { hex = localStorage.getItem("es-accent-custom") || ""; } catch { /* private mode */ }
+    if (/^#[0-9a-f]{6}$/i.test(hex)) {
+      accentCustom.value = hex;
+      applyCustomAccentVars(hex);
+    } else {
+      accent.value = "ember";
+    }
+  }
   try {
     const split = parseInt(localStorage.getItem("es-classic-split") || "0", 10);
     if (split >= 320) splitWidth.value = split;

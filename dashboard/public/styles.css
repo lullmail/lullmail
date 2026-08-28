@@ -31,13 +31,14 @@
 
   --serif: ui-serif, "New York", "Iowan Old Style", Georgia, serif;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
-  --t-xs: 11.5px;
-  --t-sm: 12.5px;
-  --t-base: 13.5px;
-  --t-md: 14.5px;
-  --t-lg: 16px;
-  --t-subject: 20px;
-  --t-hero: 34px;
+  /* The type scale rides one factor so Text size can move the whole app. */
+  --t-xs: calc(11.5px * var(--ts, 1));
+  --t-sm: calc(12.5px * var(--ts, 1));
+  --t-base: calc(13.5px * var(--ts, 1));
+  --t-md: calc(14.5px * var(--ts, 1));
+  --t-lg: calc(16px * var(--ts, 1));
+  --t-subject: calc(20px * var(--ts, 1));
+  --t-hero: calc(34px * var(--ts, 1));
 
   --sp-1: 4px;
   --sp-2: 8px;
@@ -1338,6 +1339,36 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 :is([data-theme="dark"], [data-theme="terminal"], [data-theme="amber"], [data-theme="nord"], [data-theme="dracula"], [data-theme="rose"], [data-theme="blueprint"])[data-accent="graphite"] { --accent: #9aa7ba; --accent-ink: #141a24; }
 [data-type="sans"] { --serif: var(--sans); }
 
+/* ---- the four living dimensions: text size, density, measure ---- */
+
+[data-textsize="s"]  { --ts: 0.92; }
+[data-textsize="l"]  { --ts: 1.1; }
+[data-textsize="xl"] { --ts: 1.24; }
+
+/* Compact trades preview lines for rows; roomy breathes between them. */
+[data-density="compact"] .msg-row,
+[data-density="compact"] .digest,
+[data-density="compact"] .screener { padding-top: 7px; padding-bottom: 7px; }
+[data-density="compact"] .row-preview,
+[data-density="compact"] .digest-preview { display: none; }
+[data-density="roomy"] .msg-row,
+[data-density="roomy"] .digest,
+[data-density="roomy"] .screener { padding-top: 17px; padding-bottom: 17px; }
+
+/* The reading column: how wide a document the mail gets to be. */
+[data-measure="narrow"] { --page: 660px; --workspace: 980px; }
+[data-measure="wide"] { --page: 1060px; --workspace: 1420px; }
+
+/* Custom accent: any brand color, set as inline variables on the root by
+   the store — the wheel dot is the invitation. */
+.accent-dot.custom {
+  background: conic-gradient(#e74c3c, #e67e22, #f1c40f, #2ecc71, #1abc9c, #3498db, #9b59b6, #e74c3c);
+  position: relative;
+}
+.accent-dot.custom input[type="color"] {
+  position: absolute; inset: 0; opacity: 0; cursor: pointer; border: none; padding: 0;
+}
+
 .theme-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--sp-3); }
 .theme-card {
   padding: 0; border: 1.5px solid var(--line-strong); border-radius: var(--r-lg);
@@ -1366,6 +1397,7 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 .type-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .type-card-sample { font-size: 22px; line-height: 1.2; }
 .type-card-note { display: block; margin-top: 4px; color: var(--ink-3); font-size: var(--t-xs); }
+.measure-bar { display: block; height: 4px; border-radius: var(--r-pill); background: var(--accent); margin: 6px auto 10px; }
 
 .reader-empty {
   height: 100%; display: flex; flex-direction: column;

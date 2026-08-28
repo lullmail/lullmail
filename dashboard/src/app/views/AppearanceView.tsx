@@ -1,6 +1,9 @@
 import { useEffect } from "preact/hooks";
-import { resetSelection, setList, setTheme, theme, accent, setAccent, typeFlavor, setTypeFlavor, type Accent, type Theme } from "../lib/store";
-import { ListSkeleton, PageHead } from "../ui/bits";
+import {
+  accent, accentCustom, density, measure, resetSelection, setAccent, setAccentCustom, setDensity, setList, setMeasure,
+  setTextSize, setTheme, theme, textSize, typeFlavor, setTypeFlavor, type Accent, type Theme,
+} from "../lib/store";
+import { PageHead } from "../ui/bits";
 import { navigate } from "../lib/router";
 
 // Appearance is applied the moment it is picked — no save button, no "Apply".
@@ -55,7 +58,7 @@ function ThemeCards({ cards }: { cards: ThemeCard[] }) {
   );
 }
 
-const ACCENT_SWATCH: Record<Accent, string> = {
+const ACCENT_SWATCH: Record<Exclude<Accent, "custom">, string> = {
   ember: "#d8402a",
   ocean: "#2f6fed",
   forest: "#2e7d4f",
@@ -64,6 +67,25 @@ const ACCENT_SWATCH: Record<Accent, string> = {
   teal: "#12909a",
   graphite: "#4a5568",
 };
+
+const TEXT_SIZES: { id: import("../lib/store").TextSize; label: string; px: number }[] = [
+  { id: "s", label: "S", px: 12 },
+  { id: "m", label: "M", px: 14 },
+  { id: "l", label: "L", px: 17 },
+  { id: "xl", label: "XL", px: 20 },
+];
+
+const DENSITIES: { id: import("../lib/store").Density; label: string; sub: string }[] = [
+  { id: "compact", label: "Compact", sub: "No previews, tight rows" },
+  { id: "comfortable", label: "Comfortable", sub: "Previews, room to read" },
+  { id: "roomy", label: "Roomy", sub: "Everything gets air" },
+];
+
+const MEASURES: { id: import("../lib/store").Measure; label: string; sub: string; bar: string }[] = [
+  { id: "narrow", label: "Narrow", sub: "A book column", bar: "34%" },
+  { id: "standard", label: "Standard", sub: "The default measure", bar: "56%" },
+  { id: "wide", label: "Wide", sub: "Use the screen", bar: "82%" },
+];
 
 export function AppearanceView() {
   useEffect(() => {
@@ -109,7 +131,7 @@ export function AppearanceView() {
           </div>
         </div>
         <div class="accent-dots">
-          {(Object.keys(ACCENT_SWATCH) as Accent[]).map((id) => (
+          {(Object.keys(ACCENT_SWATCH) as Exclude<Accent, "custom">[]).map((id) => (
             <button
               key={id}
               type="button"
@@ -119,6 +141,85 @@ export function AppearanceView() {
               title={id.charAt(0).toUpperCase() + id.slice(1)}
               onClick={() => setAccent(id)}
             />
+          ))}
+          {/* The wheel: any color at all. Ink contrast is chosen by luminance. */}
+          <label
+            class={"accent-dot custom" + (accent.value === "custom" ? " active" : "")}
+            title="Custom color"
+            aria-label="Custom color"
+          >
+            <input
+              type="color"
+              value={accentCustom.value || "#d8402a"}
+              onInput={(e) => setAccentCustom((e.target as HTMLInputElement).value)}
+            />
+          </label>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <div class="settings-section-head">
+          <div>
+            <h2>Text size</h2>
+            <p>Everything scales — subjects, previews, buttons, this page.</p>
+          </div>
+        </div>
+        <div class="type-row">
+          {TEXT_SIZES.map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              class={"type-card" + (textSize.value === s.id ? " active" : "")}
+              onClick={() => setTextSize(s.id)}
+            >
+              <span class="type-card-sample" style={{ fontSize: s.px + "px", fontWeight: 660 }}>Aa</span>
+              <span class="type-card-note">{s.label}</span>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <div class="settings-section-head">
+          <div>
+            <h2>Density</h2>
+            <p>How much mail fits on a screen.</p>
+          </div>
+        </div>
+        <div class="type-row">
+          {DENSITIES.map((d) => (
+            <button
+              key={d.id}
+              type="button"
+              class={"type-card" + (density.value === d.id ? " active" : "")}
+              onClick={() => setDensity(d.id)}
+            >
+              <span class="type-card-sample">{d.label}</span>
+              <span class="type-card-note">{d.sub}</span>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <div class="settings-section-head">
+          <div>
+            <h2>Reading measure</h2>
+            <p>How wide a document the mail gets to be.</p>
+          </div>
+        </div>
+        <div class="type-row">
+          {MEASURES.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              class={"type-card" + (measure.value === m.id ? " active" : "")}
+              onClick={() => setMeasure(m.id)}
+            >
+              <span class="measure-bar" style={{ width: m.bar }} />
+              <span class="type-card-sample" style={{ fontSize: "16px" }}>{m.label}</span>
+              <span class="type-card-note">{m.sub}</span>
+            </button>
           ))}
         </div>
       </section>
