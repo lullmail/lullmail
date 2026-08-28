@@ -161,6 +161,7 @@ export const layout = signal<Layout>("document");
 export function resolveLayout() {
   layout.value = initialLayout();
   accountFilter.value = initialAccountFilter();
+  restoreDrafts();
   accent.value = initialAccent();
   typeFlavor.value = initialType();
   textSize.value = attrDefault("data-textsize", "m") as TextSize;
@@ -477,6 +478,35 @@ function newDraftId(): string {
 export const draftStack = signal<ComposeState[]>([]);
 export const draftIndex = signal(0);
 export const compose = computed<ComposeState | null>(() => draftStack.value[draftIndex.value] ?? null);
+
+/** The ring itself persists (debounced), so a reload parks the same drafts
+    behind the same Compose-button count. Blank drafts are not worth
+    restoring; content is. */
+const DRAFTS_KEY = "es-drafts";
+let draftSaveTimer: ReturnType<typeof setTimeout> | undefined;
+draftStack.subscribe((stack) => {
+  clearTimeout(draftSaveTimer);
+  draftSaveTimer = setTimeout(() => {
+    try { localStorage.setItem(DRAFTS_KEY, JSON.stringify(stack)); } catch { /* private mode */ }
+  }, 200);
+});
+
+function restoreDrafts() {
+  if (typeof localStorage === "undefined") return;
+  try {
+    const saved = JSON.parse(localStorage.getItem(DRAFTS_KEY) || "[]");
+    if (!Array.isArray(saved)) return;
+    const live = saved.filter((d: ComposeState) =>
+      d && typeof d.id === "string" &&
+      [d.to, d.subject, d.body].some((v) => typeof v === "string" && v.trim()));
+    if (live.length) {
+      draftStack.value = live;
+      draftIndex.value = 0;
+      // Window stays closed: a reload should not slap a modal in your face.
+      // The Compose button's count is the reminder.
+    }
+  } catch { /* corrupt or absent — start clean */ }
+}
 
 /** The window. Closing it parks the drafts — they are only gone when sent
     or discarded, and the Compose button keeps counting them. */
