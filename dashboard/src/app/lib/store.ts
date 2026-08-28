@@ -521,14 +521,16 @@ export const composeOpen = signal(false);
 export function openCompose(seed: Partial<ComposeState> = {}) {
   const stack = [...draftStack.value];
   if (!seed.replyToId && !seed.to) {
+    // Opening plain compose is "back to my drafts": reuse a blank if one is
+    // parked, else reopen the ring as it stands — never stack a fresh empty
+    // behind drafts that already have content.
     const blank = stack.findIndex((d) => !d.to && !d.subject && !d.body);
-    if (blank >= 0) {
-      // A blank draft is already parked — focus it rather than stacking
-      // empties behind each other.
-      draftIndex.value = blank;
-      composeOpen.value = true;
-      return;
-    }
+    if (blank >= 0) draftIndex.value = blank;
+    else if (stack.length) draftIndex.value = stack.length - 1;
+    else stack.push({ id: newDraftId(), to: "", subject: "", body: "", ...seed });
+    composeOpen.value = true;
+    if (stack !== draftStack.value && stack.length) draftStack.value = stack;
+    return;
   }
   stack.push({ id: newDraftId(), to: "", subject: "", body: "", ...seed });
   draftStack.value = stack;
