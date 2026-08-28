@@ -458,6 +458,8 @@ export function allowSenderImages(sender: string) {
 /* ---- compose ---- */
 
 export interface ComposeState {
+  /** Stable identity: one autosave slot per draft, carousel-safe. */
+  id: string;
   to: string;
   subject: string;
   body: string;
@@ -466,10 +468,41 @@ export interface ComposeState {
   context?: string;
 }
 
-export const compose = signal<ComposeState | null>(null);
+let draftSeq = 0;
+function newDraftId(): string {
+  return "d" + Date.now().toString(36) + "-" + (draftSeq++).toString(36);
+}
+
+/** Every open draft. The active one is draftStack[draftIndex]. */
+export const draftStack = signal<ComposeState[]>([]);
+export const draftIndex = signal(0);
+export const compose = computed<ComposeState | null>(() => draftStack.value[draftIndex.value] ?? null);
 
 export function openCompose(seed: Partial<ComposeState> = {}) {
-  compose.value = { to: "", subject: "", body: "", ...seed };
+  const stack = [...draftStack.value];
+  // Opening compose when a blank draft is already queued focuses it instead
+  // of stacking empties behind each other.
+  if (!seed.replyToId && !seed.to) {
+    const blank = stack.findIndex((d) => !d.to && !d.subject && !d.body);
+    if (blank >= 0) { draftIndex.value = blank; return; }
+  }
+  stack.push({ id: newDraftId(), to: "", subject: "", body: "", ...seed });
+  draftStack.value = stack;
+  draftIndex.value = stack.length - 1;
+}
+
+/** Closes the active draft; the next one in the ring takes its place. */
+export function closeCompose() {
+  const stack = [...draftStack.value];
+  stack.splice(draftIndex.value, 1);
+  draftStack.value = stack;
+  draftIndex.value = Math.min(draftIndex.value, stack.length - 1);
+}
+
+/** The carousel: rotate through open drafts, wrapping around. */
+export function cycleDraft(dir: 1 | -1) {
+  const n = draftStack.value.length;
+  if (n > 1) draftIndex.value = (draftIndex.value + dir + n) % n;
 }
 
 /* ---- overlays ---- */

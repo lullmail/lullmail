@@ -1,17 +1,17 @@
-import { useEffect, useState } from "preact/hooks";
-import { compose } from "../lib/store";
+import { useEffect, useRef, useState } from "preact/hooks";
+import { closeCompose, compose, cycleDraft, draftIndex, draftStack, type ComposeState } from "../lib/store";
 import { sendMail } from "../lib/actions";
 
-export function Compose() {
-  const seed = compose.value;
-  const draftKey = "es-draft-" + (seed?.replyToId || "new");
+/** One draft in the ring. Remounted per draftIndex so each draft owns its
+    fields and its autosave slot — switching carousels nothing between them. */
+function DraftForm({ seed }: { seed: ComposeState }) {
+  const draftKey = "es-draft-" + seed.id;
   let saved: { to?: string; subject?: string; body?: string } = {};
   try { saved = JSON.parse(localStorage.getItem(draftKey) || "{}"); } catch { /* private mode */ }
-  const [to, setTo] = useState(saved.to ?? seed?.to ?? "");
-  const [subject, setSubject] = useState(saved.subject ?? seed?.subject ?? "");
-  const [body, setBody] = useState(saved.body ?? seed?.body ?? "");
+  const [to, setTo] = useState(saved.to ?? seed.to ?? "");
+  const [subject, setSubject] = useState(saved.subject ?? seed.subject ?? "");
+  const [body, setBody] = useState(saved.body ?? seed.body ?? "");
   const [busy, setBusy] = useState(false);
-  if (!seed) return null;
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -20,46 +20,71 @@ export function Compose() {
     return () => clearTimeout(timer);
   }, [draftKey, to, subject, body]);
 
-  const close = () => { compose.value = null; };
-  const discard = () => { localStorage.removeItem(draftKey); close(); };
-
   const send = async () => {
     if (!to.trim() || busy) return;
     setBusy(true);
     const ok = await sendMail({ to: to.trim(), subject, text: body, replyToId: seed.replyToId });
     setBusy(false);
-    if (ok) { localStorage.removeItem(draftKey); close(); }
+    if (ok) { localStorage.removeItem(draftKey); closeCompose(); }
   };
 
   return (
-    <div class="veil" onClick={(ev) => { if (ev.target === ev.currentTarget) close(); }}>
-      <div class="panel" role="dialog" aria-modal="true" aria-label="Compose">
-        <div class="compose-form">
-          <div class="compose-kicker">{seed.context || "New message"}</div>
-          <input
-            class="compose-to" type="email" placeholder="To" autocomplete="off" autofocus={!to}
-            value={to} onInput={(e) => setTo((e.target as HTMLInputElement).value)}
-          />
-          <input
-            class="compose-subject" type="text" placeholder="Subject"
-            value={subject} onInput={(e) => setSubject((e.target as HTMLInputElement).value)}
-          />
-          <textarea
-            class="compose-body" placeholder="Write something worth reading." autofocus={!!to}
-            value={body}
-            onInput={(e) => setBody((e.target as HTMLTextAreaElement).value)}
-            onKeyDown={(ev) => {
-              if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") { ev.preventDefault(); send(); }
-            }}
-          />
-        </div>
-        <div class="compose-btns">
-          <span class="hint"><span class="kbd">⌘↵</span> send · <span class="kbd">Esc</span> close · 5s to undo</span>
-          <button class="btn btn-ghost btn-sm" type="button" onClick={discard}>Discard</button>
-          <button class="btn btn-accent" type="button" disabled={!to.trim() || busy} onClick={send}>
-            {busy ? "Sending…" : "Send"}
-          </button>
-        </div>
+    <>
+      <div class="compose-form">
+        <div class="compose-kicker">{seed.context || "New message"}</div>
+        <input
+          class="compose-to" type="email" placeholder="To" autocomplete="off" autofocus={!to}
+          value={to} onInput={(e) => setTo((e.target as HTMLInputElement).value)}
+        />
+        <input
+          class="compose-subject" type="text" placeholder="Subject"
+          value={subject} onInput={(e) => setSubject((e.target as HTMLInputElement).value)}
+        />
+        <textarea
+          class="compose-body" placeholder="Write something worth reading." autofocus={!!to}
+          value={body}
+          onInput={(e) => setBody((e.target as HTMLTextAreaElement).value)}
+          onKeyDown={(ev) => {
+            if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") { ev.preventDefault(); send(); }
+          }}
+        />
+      </div>
+      <div class="compose-btns">
+        <span class="hint"><span class="kbd">⌘↵</span> send · <span class="kbd">Esc</span> close · 5s to undo</span>
+        <button class="btn btn-ghost btn-sm" type="button" onClick={() => { localStorage.removeItem(draftKey); closeCompose(); }}>Discard</button>
+        <button class="btn btn-accent" type="button" disabled={!to.trim() || busy} onClick={send}>
+          {busy ? "Sending…" : "Send"}
+        </button>
+      </div>
+    </>
+  );
+}
+
+export function Compose() {
+  const seed = compose.value;
+  const stack = draftStack.value;
+  const at = draftIndex.value;
+  // Swipe rotates the carousel on touch; the arrows do the same with a mouse.
+  const touchX = useRef(0);
+  if (!seed) return null;
+  return (
+    <div class="veil" onClick={(ev) => { if (ev.target === ev.currentTarget) closeCompose(); }}>
+      <div
+        class="panel panel-narrow" role="dialog" aria-modal="true" aria-label="Compose"
+        onTouchStart={(ev) => { touchX.current = ev.touches[0].clientX; }}
+        onTouchEnd={(ev) => {
+          const dx = ev.changedTouches[0].clientX - touchX.current;
+          if (Math.abs(dx) > 60) cycleDraft(dx < 0 ? 1 : -1);
+        }}
+      >
+        {stack.length > 1 && (
+          <div class="compose-ring">
+            <button class="btn-icon" type="button" aria-label="Previous draft" onClick={() => cycleDraft(-1)}>‹</button>
+            <span class="compose-ring-count">{at + 1} of {stack.length} drafts</span>
+            <button class="btn-icon" type="button" aria-label="Next draft" onClick={() => cycleDraft(1)}>›</button>
+          </div>
+        )}
+        <DraftForm key={seed.id} seed={seed} />
       </div>
     </div>
   );
