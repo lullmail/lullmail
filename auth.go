@@ -214,6 +214,27 @@ func (a *App) authenticateRequest(r *http.Request) (string, string, error) {
 	return "", "", sql.ErrNoRows
 }
 
+// originAllowed compares a request Origin against the pinned PUBLIC_URL.
+// Loopback variants are equivalent in the browser's eyes only as names —
+// http://localhost and http://127.0.0.1 are distinct origins — but a dev
+// install reached at both is the same person both times, so they are
+// accepted interchangeably (same scheme and port required).
+func originAllowed(origin, pinned string) bool {
+	if origin == pinned {
+		return true
+	}
+	o, err1 := url.Parse(origin)
+	p, err2 := url.Parse(pinned)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	if o.Scheme != p.Scheme || o.Port() != p.Port() {
+		return false
+	}
+	lo, lp := isLoopbackHost(o.Hostname()), isLoopbackHost(p.Hostname())
+	return lo && lp
+}
+
 func (a *App) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		uid, session, err := a.authenticateRequest(r)
@@ -228,8 +249,9 @@ func (a *App) requireAuth(next http.Handler) http.Handler {
 			return
 		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
-			if origin := r.Header.Get("Origin"); origin != "" && origin != a.cfg.PublicURL {
-				writeProblem(w, http.StatusForbidden, "Origin Rejected", "request origin does not match PUBLIC_URL")
+			if origin := r.Header.Get("Origin"); origin != "" && !originAllowed(origin, a.cfg.PublicURL) {
+				writeProblem(w, http.StatusForbidden, "Origin Rejected",
+					"this install is pinned to "+a.cfg.PublicURL+" — you are browsing from "+origin)
 				return
 			}
 		}
