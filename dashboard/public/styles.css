@@ -411,9 +411,38 @@
   border: 1px solid;
   border-color: #dfdfdf #404040 #404040 #dfdfdf;
 }
-[data-theme="1999"] .topline { background: #c0c0c0; }
+[data-theme="1999"] .topline { background: #c0c0c0; border-bottom: 1px solid #808080; }
 [data-theme="1999"] .theme-card, [data-theme="1999"] .type-card, [data-theme="1999"] .acct-toggle { border-radius: 0; }
 [data-theme="1999"] .recovery-grid code, [data-theme="1999"] .menu { border-radius: 0; }
+
+/* 1999 classic panes: one Win98 window — silver frame, white wells.
+   The sidebar is chrome (the Outlook Express folder tree), the list and
+   reader are sunken white paper, navy owns the selection. */
+[data-theme="1999"] .sidebar {
+  background: #c0c0c0;
+  border-right: 1px solid #808080;
+}
+[data-theme="1999"] .side-item { border-radius: 0; }
+[data-theme="1999"] .side-item:hover { background: #dfdfdf; }
+[data-theme="1999"] .side-item.active {
+  background: #000080; color: #ffffff; box-shadow: none;
+}
+[data-theme="1999"] .side-item.active .side-count { color: #ffffff; }
+[data-theme="1999"] .side-item.active .side-count.urgent { background: #ffffff; color: #000080; }
+[data-theme="1999"] .page.classic .list-pane {
+  background: #ffffff;
+  border-right: 1px solid #808080;
+}
+[data-theme="1999"] .pane-split::after { background: #808080; }
+[data-theme="1999"] .page.classic .thread-bar {
+  background: #c0c0c0;
+  border-bottom: 1px solid #808080;
+}
+[data-theme="1999"] .hints-in {
+  border-radius: 0;
+  background: #c0c0c0;
+  border-color: #dfdfdf #404040 #404040 #dfdfdf;
+}
 
 [data-theme="vapor"] body {
   background: linear-gradient(180deg, #140a24 0%, #2d1150 55%, #7c2a86 100%) fixed;
