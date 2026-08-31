@@ -31,19 +31,27 @@ never its internals, and the main build never compiles it.
 
 ## Tools
 
-| Tool | What it does |
-|---|---|
-| `list_accounts` | Connected mailboxes, sync status, counts |
-| `add_account` | Connect an IMAP/JMAP mailbox (encrypted at rest by the server) |
-| `delete_account` | Disconnect a mailbox; provider mail is never touched |
-| `sync_account` | On-demand sync |
-| `today_briefing` | What needs a reply, who owes you, what arrived quietly |
-| `list_bucket` | Threads in screener / imbox / paper_trail / feed / snoozed / set_aside / later |
-| `search_mail` | Search subjects, participants, previews across all mailboxes |
-| `read_thread` | Full messages of one thread, oldest first |
-| `send_mail` | Send plain text; server-side reply threading |
-| `screener_list` | Senders awaiting a one-time decision |
-| `screener_decide` | Allow (inbox/reading/feed) or block a sender forever |
+**Accounts:** `list_accounts` · `add_account` (IMAP/JMAP; backfill 0 = all
+history) · `update_account` (pause sync / retention / history window) ·
+`delete_account` · `sync_account`
+
+**Read:** `list_bucket` (screener / imbox / paper_trail / feed / snoozed /
+set_aside / later) · `search_mail` · `read_thread` · `recent_mail` ·
+`list_mailboxes` + `list_folder` (raw provider folders) · `get_attachment` /
+`get_eml` (base64) · `get_counts` · `people_list` · `today_briefing`
+
+**Act:** `message_action` (read/unread/move/snooze — operates on the whole
+thread) · `send_mail` (plain or HTML; HTML sends multipart/alternative with
+an automatic plain fallback) · `undo_send` · `screener_list` ·
+`screener_decide` · `screener_undecide`
+
+**Work surfaces:** `board_list` / `board_pin` / `board_unpin` /
+`board_add_card` / `board_card_done` · `notes_list` / `note_create` /
+`note_update` / `note_delete` · `classify_now`
+
+Not exposed, on purpose: sign-in, passkeys, sessions, TOTP, agent-token
+management, full-account deletion, OAuth browser flows. Agent tokens are
+fenced to mail + work surfaces at the router (`agent.go` in the server).
 
 ## The bulk-import pattern
 

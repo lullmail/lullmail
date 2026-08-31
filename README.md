@@ -106,6 +106,10 @@ cd dashboard && npm ci && npm test && npm run typecheck && npm run build
 go run . serve
 ```
 
+`dist/` is embedded into the binary at Go build time — after changing
+dashboard code, rebuild the dashboard, then rebuild/restart the binary; a
+running process keeps serving the copy it embedded.
+
 The private marketing-site prototype is a separate Astro build:
 
 ```
