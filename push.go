@@ -103,12 +103,12 @@ func (a *App) sendPushForUser(ctx context.Context, uid string) {
 	if len(subs) == 0 {
 		return
 	}
-	var messageID, threadID string
-	err = a.db.QueryRowContext(ctx, `SELECT m.id,m.thread_id FROM hey_messages h JOIN mail_messages m ON m.id=h.message_id JOIN email_accounts ea ON ea.mirror_account_id=m.account_id AND ea.user_id=h.user_id LEFT JOIN push_deliveries p ON p.user_id=h.user_id AND p.message_id=h.message_id WHERE h.user_id=$1 AND h.bucket='imbox' AND h.read_at IS NULL AND p.message_id IS NULL ORDER BY m.received_at DESC NULLS LAST LIMIT 1`, uid).Scan(&messageID, &threadID)
+	var accountID, messageID, threadID string
+	err = a.db.QueryRowContext(ctx, `SELECT m.account_id,m.id,m.thread_id FROM hey_messages h JOIN mail_messages m ON m.account_id=h.account_id AND m.id=h.message_id JOIN email_accounts ea ON ea.mirror_account_id=m.account_id AND ea.user_id=h.user_id LEFT JOIN push_deliveries p ON p.user_id=h.user_id AND p.account_id=h.account_id AND p.message_id=h.message_id WHERE h.user_id=$1 AND h.bucket='imbox' AND h.read_at IS NULL AND p.message_id IS NULL ORDER BY m.received_at DESC NULLS LAST LIMIT 1`, uid).Scan(&accountID, &messageID, &threadID)
 	if err != nil {
 		return
 	}
-	payload, _ := json.Marshal(map[string]string{"title": "New mail needs you", "body": "Open email-soft to read it.", "path": "/today", "thread": threadID})
+	payload, _ := json.Marshal(map[string]string{"title": "New mail needs you", "body": "Open email-soft to read it.", "path": "/today", "thread": threadID, "account": accountID})
 	sent := false
 	for _, item := range subs {
 		response, err := webpush.SendNotificationWithContext(ctx, payload, &item.sub, &webpush.Options{HTTPClient: &http.Client{Timeout: 15 * time.Second}, Subscriber: a.cfg.VAPIDSubject, VAPIDPublicKey: a.cfg.VAPIDPublic, VAPIDPrivateKey: a.cfg.VAPIDPrivate, TTL: 3600, Topic: "new-mail", Urgency: webpush.UrgencyNormal})
@@ -127,8 +127,8 @@ func (a *App) sendPushForUser(ctx context.Context, uid string) {
 	if sent {
 		// One collapsed notification represents everything currently waiting;
 		// otherwise a first sync would emit one old-message alert every tick.
-		_, _ = a.db.ExecContext(ctx, `INSERT INTO push_deliveries(user_id,message_id,delivered_at)
-			SELECT h.user_id,h.message_id,$2 FROM hey_messages h
+		_, _ = a.db.ExecContext(ctx, `INSERT INTO push_deliveries(user_id,account_id,message_id,delivered_at)
+			SELECT h.user_id,h.account_id,h.message_id,$2 FROM hey_messages h
 			WHERE h.user_id=$1 AND h.bucket='imbox' AND h.read_at IS NULL
 			ON CONFLICT DO NOTHING`, uid, time.Now())
 	}

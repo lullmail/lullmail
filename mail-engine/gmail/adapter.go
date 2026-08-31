@@ -13,6 +13,7 @@ package gmail
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -125,7 +126,18 @@ func roleFrom(labelID string) mail.Role {
 // reset, which is the same recovery path an IMAP UIDVALIDITY change takes.
 func (a *Adapter) Sync(ctx context.Context, box mail.MailboxID, cur mail.Cursor) (*mail.Changes, error) {
 	if cur == "" {
-		return a.initialSync(ctx, box)
+		profile, err := a.svc.Users.GetProfile(a.user).Context(ctx).Do()
+		if err != nil {
+			return nil, classify(err)
+		}
+		return a.initialSync(ctx, box, "", profile.HistoryId)
+	}
+	if strings.HasPrefix(string(cur), "gmail-initial:") {
+		pageToken, historyID, err := decodeInitialCursor(cur)
+		if err != nil {
+			return &mail.Changes{Reset: true}, nil
+		}
+		return a.initialSync(ctx, box, pageToken, historyID)
 	}
 
 	start, err := strconv.ParseUint(string(cur), 10, 64)
@@ -195,12 +207,17 @@ func (a *Adapter) Sync(ctx context.Context, box mail.MailboxID, cur mail.Cursor)
 	return changes, nil
 }
 
-// initialSync enumerates a label from empty.
-func (a *Adapter) initialSync(ctx context.Context, box mail.MailboxID) (*mail.Changes, error) {
-	res, err := a.svc.Users.Messages.List(a.user).
+// initialSync enumerates one label page. historyID is captured before the
+// first list request, so changes arriving while a large import paginates are
+// replayed rather than skipped when the final page becomes incremental.
+func (a *Adapter) initialSync(ctx context.Context, box mail.MailboxID, pageToken string, historyID uint64) (*mail.Changes, error) {
+	call := a.svc.Users.Messages.List(a.user).
 		LabelIds(string(box)).
-		MaxResults(500).
-		Context(ctx).Do()
+		MaxResults(500)
+	if pageToken != "" {
+		call = call.PageToken(pageToken)
+	}
+	res, err := call.Context(ctx).Do()
 	if err != nil {
 		return nil, classify(err)
 	}
@@ -215,18 +232,15 @@ func (a *Adapter) initialSync(ctx context.Context, box mail.MailboxID) (*mail.Ch
 		return nil, err
 	}
 
-	// The profile's historyId is the resume point: it is current as of now,
-	// whereas the newest message's historyId would skip anything that
-	// changed between listing and fetching.
-	profile, err := a.svc.Users.GetProfile(a.user).Context(ctx).Do()
-	if err != nil {
-		return nil, classify(err)
-	}
-
 	changes := &mail.Changes{
-		Next:     mail.Cursor(strconv.FormatUint(profile.HistoryId, 10)),
-		More:     res.NextPageToken != "",
-		Complete: res.NextPageToken == "",
+		More:             res.NextPageToken != "",
+		EnumerationStart: pageToken == "",
+		Complete:         res.NextPageToken == "",
+	}
+	if changes.More {
+		changes.Next = encodeInitialCursor(res.NextPageToken, historyID)
+	} else {
+		changes.Next = mail.Cursor(strconv.FormatUint(historyID, 10))
 	}
 	for i := range envs {
 		e := envs[i]
@@ -235,6 +249,32 @@ func (a *Adapter) initialSync(ctx context.Context, box mail.MailboxID) (*mail.Ch
 		})
 	}
 	return changes, nil
+}
+
+func encodeInitialCursor(pageToken string, historyID uint64) mail.Cursor {
+	raw, _ := json.Marshal(struct {
+		Page    string `json:"page"`
+		History uint64 `json:"history"`
+	}{pageToken, historyID})
+	return mail.Cursor("gmail-initial:" + base64.RawURLEncoding.EncodeToString(raw))
+}
+
+func decodeInitialCursor(cur mail.Cursor) (string, uint64, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(string(cur), "gmail-initial:"))
+	if err != nil {
+		return "", 0, err
+	}
+	var state struct {
+		Page    string `json:"page"`
+		History uint64 `json:"history"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil || state.Page == "" || state.History == 0 {
+		if err == nil {
+			err = fmt.Errorf("missing initial cursor fields")
+		}
+		return "", 0, err
+	}
+	return state.Page, state.History, nil
 }
 
 // Envelopes fetches message metadata.

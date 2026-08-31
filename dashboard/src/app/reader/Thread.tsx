@@ -16,6 +16,7 @@ function rowFor(messages: Message[], threadId: string, bucket: ListBucket | null
   const last = messages[messages.length - 1];
   if (!last) return null;
   return {
+    account: last.account,
     thread_id: threadId,
     message_id: last.id,
     subject: last.subject,
@@ -63,7 +64,7 @@ function ThreadMessage({ message }: { message: Message }) {
       </div>
       <div class="thread-msg-body">
         <MessageBody html={message.html} text={message.body} messageId={message.id} sender={who.email} />
-        <Attachments messageId={message.id} items={message.attachments || []} />
+        <Attachments account={message.account} messageId={message.id} items={message.attachments || []} />
       </div>
     </article>
   );

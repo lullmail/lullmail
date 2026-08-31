@@ -43,7 +43,7 @@ function openAtCursor() {
   const l = list.value;
   if (l.kind !== "rows") return;
   const row = l.rows[cursor.value];
-  if (row) openThread(row.thread_id, l.origin);
+  if (row) openThread(row.thread_id, row.account, l.origin);
 }
 
 function replyToCursor() {

@@ -204,3 +204,17 @@ func TestNativeIDStripsThePrefix(t *testing.T) {
 		t.Errorf("nativeID = %q, want 18c9f0a", got)
 	}
 }
+
+func TestInitialCursorPreservesPageAndHistory(t *testing.T) {
+	cur := encodeInitialCursor("page/token+with=chars", 987654321)
+	page, history, err := decodeInitialCursor(cur)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page != "page/token+with=chars" || history != 987654321 {
+		t.Fatalf("decoded cursor = %q/%d", page, history)
+	}
+	if _, _, err := decodeInitialCursor("gmail-initial:not-base64"); err == nil {
+		t.Fatal("malformed initial cursor was accepted")
+	}
+}

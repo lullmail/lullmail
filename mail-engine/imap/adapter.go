@@ -156,7 +156,7 @@ func (a *Adapter) fullScan(ctx context.Context, box mail.MailboxID) (*mail.Chang
 		return nil, err
 	}
 
-	changes := &mail.Changes{Complete: true}
+	changes := &mail.Changes{EnumerationStart: true, Complete: true}
 	for i := range envs {
 		e := envs[i]
 		changes.Changes = append(changes.Changes, mail.Change{

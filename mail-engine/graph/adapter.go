@@ -165,7 +165,7 @@ func (a *Adapter) Sync(ctx context.Context, box mail.MailboxID, cur mail.Cursor)
 		return nil, err
 	}
 
-	changes := &mail.Changes{More: out.NextLink != ""}
+	changes := &mail.Changes{More: out.NextLink != "", EnumerationStart: initial}
 	if out.NextLink != "" {
 		changes.Next = mail.Cursor(out.NextLink)
 	} else {

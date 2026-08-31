@@ -6,24 +6,31 @@ import { sendMail } from "../lib/actions";
     fields and its autosave slot — switching carousels nothing between them. */
 function DraftForm({ seed }: { seed: ComposeState }) {
   const draftKey = "es-draft-" + seed.id;
-  let saved: { to?: string; subject?: string; body?: string } = {};
+  let saved: { to?: string; subject?: string; body?: string; htmlMode?: boolean } = {};
   try { saved = JSON.parse(localStorage.getItem(draftKey) || "{}"); } catch { /* private mode */ }
   const [to, setTo] = useState(saved.to ?? seed.to ?? "");
   const [subject, setSubject] = useState(saved.subject ?? seed.subject ?? "");
   const [body, setBody] = useState(saved.body ?? seed.body ?? "");
+  const [htmlMode, setHtmlMode] = useState(saved.htmlMode ?? seed.htmlMode ?? false);
+  const [preview, setPreview] = useState(false);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      try { localStorage.setItem(draftKey, JSON.stringify({ to, subject, body })); } catch { /* private mode */ }
+      try { localStorage.setItem(draftKey, JSON.stringify({ to, subject, body, htmlMode })); } catch { /* private mode */ }
     }, 250);
     return () => clearTimeout(timer);
-  }, [draftKey, to, subject, body]);
+  }, [draftKey, to, subject, body, htmlMode]);
 
   const send = async () => {
     if (!to.trim() || busy) return;
     setBusy(true);
-    const ok = await sendMail({ to: to.trim(), subject, text: body, replyToId: seed.replyToId });
+    const ok = await sendMail({
+      to: to.trim(), subject,
+      text: htmlMode ? "" : body,
+      html: htmlMode ? body : undefined,
+      replyToId: seed.replyToId,
+    });
     setBusy(false);
     if (ok) { localStorage.removeItem(draftKey); retireDraft(seed.id); }
   };
@@ -40,14 +47,40 @@ function DraftForm({ seed }: { seed: ComposeState }) {
           class="compose-subject" type="text" placeholder="Subject"
           value={subject} onInput={(e) => { const v = (e.target as HTMLInputElement).value; setSubject(v); updateDraft({ subject: v }); }}
         />
-        <textarea
-          class="compose-body" placeholder="Write something worth reading." autofocus={!!to}
-          value={body}
-          onInput={(e) => { const v = (e.target as HTMLTextAreaElement).value; setBody(v); updateDraft({ body: v }); }}
-          onKeyDown={(ev) => {
-            if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") { ev.preventDefault(); send(); }
-          }}
-        />
+        <div class="compose-modes">
+          <button
+            class={"btn btn-ghost btn-sm" + (htmlMode ? " lens-on" : "")} type="button"
+            aria-pressed={htmlMode}
+            title="Toggle HTML source composing: paste or write styled HTML, send it as a rich message"
+            onClick={() => { setHtmlMode((v) => !v); setPreview(false); updateDraft({ htmlMode: !htmlMode }); }}
+          >HTML</button>
+          {htmlMode && (
+            <button
+              class={"btn btn-ghost btn-sm" + (preview ? " lens-on" : "")} type="button"
+              aria-pressed={preview}
+              onClick={() => setPreview((v) => !v)}
+            >{preview ? "Edit source" : "Preview"}</button>
+          )}
+          {htmlMode && <span class="compose-modes-note">plain-text readers get an automatic fallback</span>}
+        </div>
+        {htmlMode && preview ? (
+          /* sandbox with no allow-* tokens: styles render, scripts never run. */
+          <iframe
+            class="compose-preview" title="HTML preview" sandbox="" srcDoc={body || "<p>(nothing written yet)</p>"}
+          />
+        ) : (
+          <textarea
+            class={"compose-body" + (htmlMode ? " html-source" : "")}
+            placeholder={htmlMode ? "Write or paste HTML — inline styles travel best in email." : "Write something worth reading."}
+            autofocus={!!to && !htmlMode}
+            spellcheck={!htmlMode}
+            value={body}
+            onInput={(e) => { const v = (e.target as HTMLTextAreaElement).value; setBody(v); updateDraft({ body: v }); }}
+            onKeyDown={(ev) => {
+              if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") { ev.preventDefault(); send(); }
+            }}
+          />
+        )}
       </div>
       <div class="compose-btns">
         <span class="hint"><span class="kbd">⌘↵</span> send · <span class="kbd">Esc</span> park · <span class="kbd">c</span> new draft · 5s to undo</span>

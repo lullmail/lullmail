@@ -132,6 +132,14 @@ func (s *Sender) Send(ctx context.Context, msg *Outgoing) (messageID string, err
 	return messageID, nil
 }
 
+// Render builds the complete RFC 5322 bytes for this message with a freshly
+// minted Message-ID. Callers that submit raw MIME to a provider API (Gmail's
+// raw upload, JMAP) get the same multipart/alternative handling as SMTP,
+// including an HTML part when set.
+func (msg *Outgoing) Render() ([]byte, error) {
+	return msg.render(newMessageID(msg.From.Email))
+}
+
 // render builds the RFC 5322 message.
 func (msg *Outgoing) render(messageID string) ([]byte, error) {
 	var b strings.Builder

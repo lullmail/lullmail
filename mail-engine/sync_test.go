@@ -635,9 +635,10 @@ func TestCompleteListingSweepsMessagesThatVanished(t *testing.T) {
 	eng, store, acct := setup(t)
 	ad := &scriptedAdapter{
 		pages: []*Changes{{
-			Changes:  []Change{created(envelope("1", "INBOX")), created(envelope("2", "INBOX"))},
-			Next:     "c1",
-			Complete: true,
+			Changes:          []Change{created(envelope("1", "INBOX")), created(envelope("2", "INBOX"))},
+			Next:             "c1",
+			EnumerationStart: true,
+			Complete:         true,
 		}},
 	}
 	if _, err := eng.SyncMailbox(context.Background(), acct, "INBOX", ad); err != nil {
@@ -650,9 +651,10 @@ func TestCompleteListingSweepsMessagesThatVanished(t *testing.T) {
 	// Message 2 is gone at the provider; the next enumeration omits it.
 	ad.call = 0
 	ad.pages = []*Changes{{
-		Changes:  []Change{created(envelope("1", "INBOX"))},
-		Next:     "c2",
-		Complete: true,
+		Changes:          []Change{created(envelope("1", "INBOX"))},
+		Next:             "c2",
+		EnumerationStart: true,
+		Complete:         true,
 	}}
 
 	rep, err := eng.SyncMailbox(context.Background(), acct, "INBOX", ad)
@@ -676,9 +678,10 @@ func TestIncompleteListingNeverSweeps(t *testing.T) {
 	eng, store, acct := setup(t)
 	ad := &scriptedAdapter{
 		pages: []*Changes{{
-			Changes:  []Change{created(envelope("1", "INBOX")), created(envelope("2", "INBOX"))},
-			Next:     "c1",
-			Complete: true,
+			Changes:          []Change{created(envelope("1", "INBOX")), created(envelope("2", "INBOX"))},
+			Next:             "c1",
+			EnumerationStart: true,
+			Complete:         true,
 		}},
 	}
 	if _, err := eng.SyncMailbox(context.Background(), acct, "INBOX", ad); err != nil {
@@ -710,9 +713,10 @@ func TestTruncatedEnumerationDoesNotSweep(t *testing.T) {
 	eng, store, acct := setup(t)
 	ad := &scriptedAdapter{
 		pages: []*Changes{{
-			Changes:  []Change{created(envelope("1", "INBOX")), created(envelope("2", "INBOX"))},
-			Next:     "c1",
-			Complete: true,
+			Changes:          []Change{created(envelope("1", "INBOX")), created(envelope("2", "INBOX"))},
+			Next:             "c1",
+			EnumerationStart: true,
+			Complete:         true,
 		}},
 	}
 	if _, err := eng.SyncMailbox(context.Background(), acct, "INBOX", ad); err != nil {
@@ -722,7 +726,7 @@ func TestTruncatedEnumerationDoesNotSweep(t *testing.T) {
 	eng.MaxPages = 1
 	ad.call = 0
 	ad.pages = []*Changes{
-		{Changes: []Change{created(envelope("1", "INBOX"))}, Next: "p1", More: true, Complete: true},
+		{Changes: []Change{created(envelope("1", "INBOX"))}, Next: "p1", More: true, EnumerationStart: true},
 		{Changes: []Change{created(envelope("2", "INBOX"))}, Next: "p2", Complete: true},
 	}
 
@@ -735,6 +739,30 @@ func TestTruncatedEnumerationDoesNotSweep(t *testing.T) {
 	}
 	if store.count(acct) != 2 {
 		t.Errorf("stored %d messages, want 2; a truncated run swept live mail", store.count(acct))
+	}
+}
+
+func TestResumedFinalEnumerationPageDoesNotSweepEarlierPages(t *testing.T) {
+	eng, store, acct := setup(t)
+	ad := &scriptedAdapter{pages: []*Changes{{
+		Changes: []Change{created(envelope("1", "INBOX")), created(envelope("2", "INBOX"))},
+		Next:    "initial-next", More: true, EnumerationStart: true,
+	}}}
+	eng.MaxPages = 1
+	if _, err := eng.SyncMailbox(context.Background(), acct, "INBOX", ad); err != nil {
+		t.Fatal(err)
+	}
+
+	ad.call = 0
+	ad.pages = []*Changes{{
+		Changes: []Change{created(envelope("3", "INBOX"))},
+		Next:    "live-state", Complete: true,
+	}}
+	if _, err := eng.SyncMailbox(context.Background(), acct, "INBOX", ad); err != nil {
+		t.Fatal(err)
+	}
+	if store.count(acct) != 3 {
+		t.Fatalf("resumed final page swept earlier pages; count = %d", store.count(acct))
 	}
 }
 

@@ -32,6 +32,7 @@ func (a *App) sweepSnoozed(ctx context.Context, uid string) error {
 
 type boardCard struct {
 	CardID     string `json:"card_id,omitempty"`
+	Account    string `json:"account,omitempty"`
 	ThreadID   string `json:"thread_id,omitempty"`
 	MessageID  string `json:"message_id,omitempty"`
 	Subject    string `json:"subject"`
@@ -44,6 +45,7 @@ type boardCard struct {
 
 func cardFromThread(t briefThread) boardCard {
 	return boardCard{
+		Account:    t.Account,
 		ThreadID:   t.ThreadID,
 		MessageID:  t.MessageID,
 		Subject:    t.Subject,
@@ -73,65 +75,62 @@ func (a *App) handleBoard(w http.ResponseWriter, r *http.Request) {
 	cards := make([]boardCard, 0, len(needsYou))
 	derived := map[string]bool{}
 	for _, t := range needsYou {
-		derived[t.ThreadID] = true
+		derived[t.Account+"\x00"+t.ThreadID] = true
 		cards = append(cards, cardFromThread(t))
 	}
 
 	// Live data for pinned threads: subject and date follow the thread's
 	// newest message; the stored title only outlives a disconnected account.
-	type cardRow struct{ id, thread, title, note string }
+	type cardRow struct{ id, account, thread, title, note string }
 	var open []cardRow
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT id::text, COALESCE(thread_key,''), title, note FROM board_cards
+		SELECT id::text, COALESCE(account_id,''), COALESCE(thread_key,''), title, note FROM board_cards
 		WHERE user_id = $1 AND done_at IS NULL AND thread_key IS NOT NULL
 		ORDER BY created_at`, uid)
 	if err == nil {
 		for rows.Next() {
 			var c cardRow
-			if rows.Scan(&c.id, &c.thread, &c.title, &c.note) == nil {
+			if rows.Scan(&c.id, &c.account, &c.thread, &c.title, &c.note) == nil {
 				open = append(open, c)
 			}
 		}
 		rows.Close()
 	}
 	if len(open) > 0 {
-		threads := make([]string, len(open))
-		for i, c := range open {
-			threads[i] = c.thread
-		}
 		live := map[string]briefThread{}
 		r2, err := a.db.QueryContext(r.Context(), `
-			SELECT DISTINCT ON (m.thread_id)
-			       m.thread_id, m.id, m.subject, m.from_addrs, m.received_at, m.preview
-			FROM mail_messages m
+			SELECT DISTINCT ON (b.id)
+			       m.account_id, m.thread_id, m.id, m.subject, m.from_addrs, m.received_at, m.preview
+			FROM board_cards b
+			JOIN mail_messages m ON m.account_id = b.account_id AND m.thread_id = b.thread_key
 			JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-			WHERE m.thread_id = ANY($2)
-			ORDER BY m.thread_id, m.received_at DESC NULLS LAST`, uid, threads)
+			WHERE b.user_id = $1 AND b.done_at IS NULL AND b.thread_key IS NOT NULL
+			ORDER BY b.id, m.received_at DESC NULLS LAST`, uid)
 		if err == nil {
 			for r2.Next() {
 				var t briefThread
 				var fromJSON string
 				var received *time.Time
-				if r2.Scan(&t.ThreadID, &t.MessageID, &t.Subject, &fromJSON, &received, &t.Preview) == nil {
+				if r2.Scan(&t.Account, &t.ThreadID, &t.MessageID, &t.Subject, &fromJSON, &received, &t.Preview) == nil {
 					if received != nil {
 						t.ReceivedAt = received.Format(time.RFC3339)
 					}
 					t.From = firstSenderName(fromJSON)
-					live[t.ThreadID] = t
+					live[t.Account+"\x00"+t.ThreadID] = t
 				}
 			}
 			r2.Close()
 		}
 		for _, c := range open {
-			if derived[c.thread] {
+			if derived[c.account+"\x00"+c.thread] {
 				continue // already on the board on its own
 			}
-			if t, ok := live[c.thread]; ok {
+			if t, ok := live[c.account+"\x00"+c.thread]; ok {
 				card := cardFromThread(t)
 				card.CardID, card.Note = c.id, c.note
 				cards = append(cards, card)
 			} else {
-				cards = append(cards, boardCard{CardID: c.id, ThreadID: c.thread, Subject: c.title, Note: c.note})
+				cards = append(cards, boardCard{CardID: c.id, Account: c.account, ThreadID: c.thread, Subject: c.title, Note: c.note})
 			}
 		}
 	}
@@ -160,14 +159,14 @@ func (a *App) handleBoard(w http.ResponseWriter, r *http.Request) {
 
 	done := []boardCard{}
 	r4, err := a.db.QueryContext(r.Context(), `
-		SELECT id::text, COALESCE(thread_key,''), title, note FROM board_cards
+		SELECT id::text, COALESCE(account_id,''), COALESCE(thread_key,''), title, note FROM board_cards
 		WHERE user_id = $1 AND done_at IS NOT NULL
 		ORDER BY done_at DESC LIMIT 20`, uid)
 	if err == nil {
 		for r4.Next() {
-			var id, thread, title, note string
-			if r4.Scan(&id, &thread, &title, &note) == nil {
-				done = append(done, boardCard{CardID: id, ThreadID: thread, Subject: title, Note: note})
+			var id, account, thread, title, note string
+			if r4.Scan(&id, &account, &thread, &title, &note) == nil {
+				done = append(done, boardCard{CardID: id, Account: account, ThreadID: thread, Subject: title, Note: note})
 			}
 		}
 		r4.Close()
@@ -184,14 +183,15 @@ func (a *App) handleBoard(w http.ResponseWriter, r *http.Request) {
 // card title so the card survives its account being disconnected.
 func (a *App) handleBoardPin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		Account  string `json:"account"`
 		ThreadID string `json:"thread_id"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
-	if req.ThreadID == "" {
-		writeProblem(w, http.StatusUnprocessableEntity, "Missing Thread", "thread_id is required")
+	if req.Account == "" || req.ThreadID == "" {
+		writeProblem(w, http.StatusUnprocessableEntity, "Missing Thread", "account and thread_id are required")
 		return
 	}
 	uid, err := a.userID(r.Context())
@@ -201,23 +201,26 @@ func (a *App) handleBoardPin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var subject string
-	a.db.QueryRowContext(r.Context(), `
+	if err := a.db.QueryRowContext(r.Context(), `
 		SELECT m.subject FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-		WHERE m.thread_id = $2
-		ORDER BY m.received_at DESC NULLS LAST LIMIT 1`, uid, req.ThreadID).Scan(&subject)
+		WHERE m.account_id = $2 AND m.thread_id = $3
+		ORDER BY m.received_at DESC NULLS LAST LIMIT 1`, uid, req.Account, req.ThreadID).Scan(&subject); err != nil {
+		writeProblem(w, http.StatusNotFound, "Not Found", "no such thread")
+		return
+	}
 
 	var id string
 	err = a.db.QueryRowContext(r.Context(), `
-		INSERT INTO board_cards (user_id, thread_key, title) VALUES ($1, $2, $3)
-		ON CONFLICT (user_id, thread_key) WHERE thread_key IS NOT NULL
+		INSERT INTO board_cards (user_id, account_id, thread_key, title) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (user_id, account_id, thread_key) WHERE thread_key IS NOT NULL
 		DO UPDATE SET done_at = NULL, title = EXCLUDED.title
-		RETURNING id::text`, uid, req.ThreadID, subject).Scan(&id)
+		RETURNING id::text`, uid, req.Account, req.ThreadID, subject).Scan(&id)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Pin Failed", err.Error())
 		return
 	}
-	writeJSON(w, boardCard{CardID: id, ThreadID: req.ThreadID, Subject: subject})
+	writeJSON(w, boardCard{CardID: id, Account: req.Account, ThreadID: req.ThreadID, Subject: subject})
 }
 
 // handleBoardCard creates a manual note card — the only card with no mail

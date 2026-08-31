@@ -69,10 +69,12 @@ CREATE INDEX IF NOT EXISTS push_subscriptions_user ON push_subscriptions (user_i
 
 CREATE TABLE IF NOT EXISTS push_deliveries (
   user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  account_id text NOT NULL,
   message_id text NOT NULL,
   delivered_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (user_id, message_id)
+  PRIMARY KEY (user_id, account_id, message_id)
 );
+ALTER TABLE push_deliveries ADD COLUMN IF NOT EXISTS account_id text;
 
 CREATE TABLE IF NOT EXISTS oauth_states (
   state_hash text PRIMARY KEY,
@@ -100,14 +102,21 @@ CREATE TABLE IF NOT EXISTS hey_senders (
 -- references neutron-mail's stable message ids/fingerprints.
 CREATE TABLE IF NOT EXISTS hey_messages (
   user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  account_id text NOT NULL,
   message_id text NOT NULL,
   bucket text NOT NULL DEFAULT 'screener'
     CHECK (bucket IN ('screener','imbox','paper_trail','feed','set_aside','later','dropped')),
   read_at timestamptz,
   set_aside_until timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (user_id, message_id)
+  PRIMARY KEY (user_id, account_id, message_id)
 );
+
+-- Older installations keyed filing state by message id alone. Provider ids
+-- are only account-scoped (and RFC Message-IDs are deliberately shared by
+-- copies delivered to two accounts), so that key collapsed multi-account
+-- mail. Backfill the owning mirror account before replacing the old key.
+ALTER TABLE hey_messages ADD COLUMN IF NOT EXISTS account_id text;
 
 -- Connected mailboxes. Credentials (app passwords until OAuth in Phase 1b)
 -- are AES-256-GCM sealed with SECRET_KEY. mirror_account_id is the row this
@@ -144,15 +153,15 @@ CREATE INDEX IF NOT EXISTS email_accounts_user ON email_accounts (user_id);
 CREATE TABLE IF NOT EXISTS board_cards (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  account_id text,
   thread_key text,
   title text NOT NULL DEFAULT '',
   note text NOT NULL DEFAULT '',
   done_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE board_cards ADD COLUMN IF NOT EXISTS account_id text;
 CREATE INDEX IF NOT EXISTS board_cards_user ON board_cards (user_id);
-CREATE UNIQUE INDEX IF NOT EXISTS board_cards_one_pin
-  ON board_cards (user_id, thread_key) WHERE thread_key IS NOT NULL;
 
 -- Sticky notes: the spatial canvas. x/y are positions on the wall (px);
 -- color is an index into the client's curated palette. Notes are thoughts,

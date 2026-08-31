@@ -55,7 +55,7 @@ export function MsgRow({ row, index, q }: { row: Row; index: number; q?: string 
       data-cursor-index={index}
       onClick={() => {
         cursor.value = index;
-        openThread(row.thread_id, list.value.origin);
+        openThread(row.thread_id, row.account, list.value.origin);
       }}
     >
       <button

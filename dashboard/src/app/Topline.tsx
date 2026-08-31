@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { accountFilter, accounts, counts, draftStack, layout, openCompose, palette, setAccountFilter } from "./lib/store";
+import { api } from "./lib/api";
+import { refreshAccounts, refreshCounts, reload } from "./lib/actions";
+import { accountFilter, accounts, counts, draftStack, layout, openCompose, palette, setAccountFilter, showError, showToast } from "./lib/store";
 import { path, routeFor } from "./lib/router";
 import { Icon } from "./ui/Icon";
 import { MoreMenu } from "./ui/MoreMenu";
@@ -97,6 +99,7 @@ function AccountPicker() {
 export function Topline() {
   const here = path.value ? routeFor(path.value).nav : "";
   const [stuck, setStuck] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const classic = layout.value === "classic";
   const screenerWaiting = counts.value.screener || 0;
 
@@ -107,6 +110,27 @@ export function Topline() {
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, [classic]);
+
+  const syncNow = async () => {
+    if (syncing) return;
+    const targets = accountFilter.value
+      ? accounts.value.filter((account) => account.id === accountFilter.value)
+      : accounts.value;
+    if (!targets.length) return;
+    setSyncing(true);
+    try {
+      await Promise.all(targets.map((account) =>
+        api("/accounts/" + encodeURIComponent(account.id) + "?op=sync&wait=1", { method: "POST" })
+      ));
+      await Promise.all([refreshAccounts(), refreshCounts()]);
+      reload();
+      showToast(targets.length === 1 ? "Mailbox is up to date" : "Mailboxes are up to date");
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Could not sync mail");
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   return (
     <header class={"topline" + (stuck || classic ? " stuck" : "")}>
@@ -133,6 +157,12 @@ export function Topline() {
         </nav>
 
         <div class="topline-side right topline-acts">
+          <button class={"btn-icon sync-button" + (syncing ? " syncing" : "")} type="button"
+            disabled={!accounts.value.length || syncing} aria-busy={syncing}
+            title={syncing ? "Syncing mail…" : "Sync mail now"}
+            aria-label={syncing ? "Syncing mail" : "Sync mail now"} onClick={syncNow}>
+            <Icon name="refresh" size={16} />
+          </button>
           {/* Replaces the permanent search field: one glyph, same palette. */}
           <button class="btn-icon" type="button" title="Search and jump (⌘K)" aria-label="Search and jump"
             onClick={() => { palette.value = true; }}>

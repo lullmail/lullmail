@@ -4,7 +4,7 @@ import { api, authed, authReady, authStatus, refreshAuth } from "./lib/api";
 import { signal } from "@preact/signals";
 import { path, routeFor, startRouter } from "./lib/router";
 import { installKeys } from "./lib/keys";
-import { refreshAccounts, refreshCounts } from "./lib/actions";
+import { refreshAccounts, refreshCounts, reload } from "./lib/actions";
 import { accountCount, accountFilter, attentionTotal, compose, composeOpen, isDarkTheme, layout, palette, query, reader, resolveLayout, setSplitWidth, shortcuts, splitWidth, theme } from "./lib/store";
 import { Topline } from "./Topline";
 import { Sidebar } from "./Sidebar";
@@ -23,6 +23,7 @@ import { Welcome } from "./views/Welcome";
 import { KeyHints } from "./ui/KeyHints";
 import { offline, startPWA } from "./lib/pwa";
 import { startOfflineData } from "./lib/offline";
+import { startLive, stopLive } from "./lib/live";
 
 // The mailbox loop stays in the first bundle. Larger secondary workspaces and
 // settings load only when opened, keeping the gate and Inbox quick on modest
@@ -179,14 +180,33 @@ export default function App() {
     const offPWA = startPWA();
     const offData = startOfflineData();
     refreshAuth().catch(() => {});
-    const tick = setInterval(() => { if (authed.value) refreshCounts(); }, 45000);
-    return () => { offKeys(); offPWA(); offData(); clearInterval(tick); };
+    const refreshVisible = () => {
+      if (!authed.value || document.visibilityState === "hidden") return;
+      refreshCounts();
+      reload();
+    };
+    const tick = setInterval(refreshVisible, 30000);
+    window.addEventListener("focus", refreshVisible);
+    document.addEventListener("visibilitychange", refreshVisible);
+    return () => {
+      offKeys(); offPWA(); offData(); clearInterval(tick);
+      window.removeEventListener("focus", refreshVisible);
+      document.removeEventListener("visibilitychange", refreshVisible);
+    };
   }, []);
 
   useEffect(() => {
     if (!mounted || !authed.value) return;
     refreshCounts();
     refreshAccounts();
+  }, [mounted, authed.value]);
+
+  // Server-pushed sync hints ride alongside the poll: immediate re-reads
+  // while connected, nothing to clean up beyond closing the stream.
+  useEffect(() => {
+    if (!mounted || !authed.value) return;
+    startLive();
+    return stopLive;
   }, [mounted, authed.value]);
 
   // The lens is global: every badge follows it, not just the visible list.

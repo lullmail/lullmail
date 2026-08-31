@@ -2,8 +2,10 @@ package jmap
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/neutron-build/neutron/mail"
@@ -13,7 +15,72 @@ func adapterFor(t *testing.T, handler http.HandlerFunc) *Adapter {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return &Adapter{http: srv.Client(), apiURL: srv.URL, accountID: "acct", token: "tok"}
+	return &Adapter{http: srv.Client(), apiURL: srv.URL, downloadURL: srv.URL + "/download/{accountId}/{blobId}/{name}?type={type}", accountID: "acct", token: "tok"}
+}
+
+func TestInitialSyncPaginatesPastServerLimit(t *testing.T) {
+	page := 0
+	a := adapterFor(t, func(w http.ResponseWriter, r *http.Request) {
+		page++
+		if page == 1 {
+			_, _ = w.Write([]byte(`{"methodResponses":[["Email/query",{"ids":["m1"],"position":0,"total":2},"0"],["Email/get",{"state":"s1","list":[{"id":"m1","threadId":"t","mailboxIds":{"box":true},"keywords":{}}]},"1"]]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"methodResponses":[["Email/query",{"ids":["m2"],"position":1,"total":2},"0"],["Email/get",{"state":"s2","list":[{"id":"m2","threadId":"t","mailboxIds":{"box":true},"keywords":{}}]},"1"]]}`))
+	})
+
+	first, err := a.Sync(context.Background(), "box", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.More || first.Next != "jmap-initial:1" || len(first.Changes) != 1 {
+		t.Fatalf("first page = %+v", first)
+	}
+	second, err := a.Sync(context.Background(), "box", first.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.More || second.Next != "s2" || len(second.Changes) != 1 {
+		t.Fatalf("second page = %+v", second)
+	}
+}
+
+func TestRawAndAttachmentDownloadAdvertisedBlobs(t *testing.T) {
+	a := adapterFor(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			if r.Header.Get("Authorization") != "Bearer tok" {
+				t.Error("download omitted bearer token")
+			}
+			_, _ = w.Write([]byte("blob:" + r.URL.EscapedPath()))
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), `"properties":["blobId"]`) {
+			_, _ = w.Write([]byte(`{"methodResponses":[["Email/get",{"list":[{"blobId":"raw/id"}]},"0"]]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"methodResponses":[["Email/get",{"list":[{"attachments":[{"partId":"2","blobId":"part/id","type":"application/pdf","name":"a file.pdf"}]}]},"0"]]}`))
+	})
+
+	raw, err := a.Raw(context.Background(), mail.NativeMessageID(mail.ProviderJMAP, "m1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawBytes, _ := io.ReadAll(raw)
+	raw.Close()
+	if !strings.Contains(string(rawBytes), "/raw%2Fid/message.eml") {
+		t.Errorf("raw URL was not template-expanded safely: %s", rawBytes)
+	}
+
+	part, err := a.Attachment(context.Background(), mail.NativeMessageID(mail.ProviderJMAP, "m1"), "2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	partBytes, _ := io.ReadAll(part)
+	part.Close()
+	if !strings.Contains(string(partBytes), "/part%2Fid/a%20file.pdf") {
+		t.Errorf("attachment URL was not template-expanded safely: %s", partBytes)
+	}
 }
 
 func TestCannotCalculateChangesBecomesAReset(t *testing.T) {

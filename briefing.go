@@ -15,6 +15,7 @@ import (
 )
 
 type briefThread struct {
+	Account    string `json:"account"`
 	ThreadID   string `json:"thread_id"`
 	MessageID  string `json:"message_id"`
 	Subject    string `json:"subject"`
@@ -52,18 +53,18 @@ func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, 
 
 	// Latest message of every Imbox thread the user owns.
 	listQuery := `
-		SELECT DISTINCT ON (m.thread_id)
-		       m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at, COALESCE(m.preview,'')
+		SELECT DISTINCT ON (m.account_id, m.thread_id)
+		       m.account_id, m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at, COALESCE(m.preview,'')
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-		JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
+		JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
 		WHERE h.bucket = 'imbox'`
 	listArgs := []any{uid}
 	if account != "" {
 		listQuery += ` AND ea.id = $2`
 		listArgs = append(listArgs, account)
 	}
-	listQuery += ` ORDER BY m.thread_id, m.received_at DESC NULLS LAST`
+	listQuery += ` ORDER BY m.account_id, m.thread_id, m.received_at DESC NULLS LAST`
 	rows, err := a.db.QueryContext(ctx, listQuery, listArgs...)
 	if err != nil {
 		return nil, nil
@@ -73,35 +74,35 @@ func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, 
 	// Unread state per latest message + whether each thread has messages from
 	// both sides — "you're waiting" requires someone else in the thread;
 	// a note-to-self is not a conversation.
-	readState := map[string]bool{} // message id -> read
-	spoke := map[string][2]bool{}  // thread -> {i_spoke, other_spoke}
+	readState := map[string]bool{} // account + message id -> read
+	spoke := map[string][2]bool{}  // account + thread -> {i_spoke, other_spoke}
 	{
 		r2, err := a.db.QueryContext(ctx, `
-			SELECT m.thread_id,
+			SELECT m.account_id, m.thread_id,
 			       bool_or(lower(m.from_addrs::json->0->>'email') = ANY ($2)),
 			       bool_or(lower(m.from_addrs::json->0->>'email') <> ALL ($2))
 			FROM mail_messages m
 			JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-			GROUP BY m.thread_id`, uid, addrList(myAddr))
+			GROUP BY m.account_id, m.thread_id`, uid, addrList(myAddr))
 		if err == nil {
 			for r2.Next() {
-				var th string
+				var acct, th string
 				var mine, theirs bool
-				if r2.Scan(&th, &mine, &theirs) == nil {
-					spoke[th] = [2]bool{mine, theirs}
+				if r2.Scan(&acct, &th, &mine, &theirs) == nil {
+					spoke[acct+"\x00"+th] = [2]bool{mine, theirs}
 				}
 			}
 			r2.Close()
 		}
 		r3, err := a.db.QueryContext(ctx, `
-			SELECT h.message_id, h.read_at IS NOT NULL
+			SELECT h.account_id, h.message_id, h.read_at IS NOT NULL
 			FROM hey_messages h WHERE h.user_id = $1 AND h.bucket = 'imbox'`, uid)
 		if err == nil {
 			for r3.Next() {
-				var id string
+				var acct, id string
 				var read bool
-				if r3.Scan(&id, &read) == nil {
-					readState[id] = read
+				if r3.Scan(&acct, &id, &read) == nil {
+					readState[acct+"\x00"+id] = read
 				}
 			}
 			r3.Close()
@@ -112,7 +113,7 @@ func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, 
 		var bt briefThread
 		var fromJSON string
 		var received *time.Time
-		if err := rows.Scan(&bt.ThreadID, &bt.MessageID, &bt.Subject, &fromJSON, &received, &bt.Preview); err != nil {
+		if err := rows.Scan(&bt.Account, &bt.ThreadID, &bt.MessageID, &bt.Subject, &fromJSON, &received, &bt.Preview); err != nil {
 			continue
 		}
 		if received != nil {
@@ -123,9 +124,9 @@ func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, 
 		bt.From = firstSenderName(fromJSON)
 
 		switch {
-		case !fromMe && !readState[bt.MessageID]:
+		case !fromMe && !readState[bt.Account+"\x00"+bt.MessageID]:
 			needsYou = append(needsYou, bt)
-		case fromMe && spoke[bt.ThreadID][0] && spoke[bt.ThreadID][1]:
+		case fromMe && spoke[bt.Account+"\x00"+bt.ThreadID][0] && spoke[bt.Account+"\x00"+bt.ThreadID][1]:
 			// My move was the last one and someone else is in the thread.
 			// Their turn — and if it stays theirs for long, this is the nudge.
 			waiting = append(waiting, bt)
@@ -155,7 +156,7 @@ func (a *App) handleBriefing(w http.ResponseWriter, r *http.Request) {
 		  count(*) FILTER (WHERE h.bucket='paper_trail' AND h.read_at IS NULL),
 		  count(*) FILTER (WHERE h.bucket='screener')
 		FROM hey_messages h
-		JOIN mail_messages m ON m.id = h.message_id
+		JOIN mail_messages m ON m.account_id = h.account_id AND m.id = h.message_id
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		WHERE h.user_id = $1`
 	briefArgs := []any{uid}
@@ -183,15 +184,15 @@ func (a *App) handleRecent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.threadList(w, r, uid, `
-		SELECT DISTINCT ON (m.thread_id)
-		       m.thread_id, m.id, m.subject, m.from_addrs, m.received_at,
+		SELECT DISTINCT ON (m.account_id, m.thread_id)
+		       m.account_id, m.thread_id, m.id, m.subject, m.from_addrs, m.received_at,
 		       COALESCE(h.read_at IS NOT NULL, false), m.preview, COALESCE(h.bucket,'')
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-		LEFT JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
+		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
 		WHERE true`+
 		accountClause(r)+`
-		ORDER BY m.thread_id, m.received_at DESC NULLS LAST
+		ORDER BY m.account_id, m.thread_id, m.received_at DESC NULLS LAST
 		LIMIT 40`, uid)
 }
 
@@ -209,17 +210,17 @@ func (a *App) handleFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.threadList(w, r, uid, `
-		SELECT DISTINCT ON (m.thread_id)
-		       m.thread_id, m.id, m.subject, m.from_addrs, m.received_at,
+		SELECT DISTINCT ON (m.account_id, m.thread_id)
+		       m.account_id, m.thread_id, m.id, m.subject, m.from_addrs, m.received_at,
 		       COALESCE(h.read_at IS NOT NULL, false), m.preview, COALESCE(h.bucket,'')
 		FROM mail_message_mailboxes mm
 		JOIN mail_mailboxes mb ON mb.account_id = mm.account_id AND mb.id = mm.mailbox_id
 		JOIN mail_messages m ON m.account_id = mm.account_id AND m.id = mm.message_id
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-		LEFT JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
+		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
 		WHERE lower(mb.name) = lower($2)`+
 		accountClause(r)+`
-		ORDER BY m.thread_id, m.received_at DESC NULLS LAST
+		ORDER BY m.account_id, m.thread_id, m.received_at DESC NULLS LAST
 		LIMIT 100`, uid, name)
 }
 
@@ -269,6 +270,7 @@ func (a *App) threadList(w http.ResponseWriter, r *http.Request, uid, query stri
 	defer rows.Close()
 
 	type rowOut struct {
+		Account    string `json:"account"`
 		ThreadID   string `json:"thread_id"`
 		MessageID  string `json:"message_id"`
 		Subject    string `json:"subject"`
@@ -283,7 +285,7 @@ func (a *App) threadList(w http.ResponseWriter, r *http.Request, uid, query stri
 		var row rowOut
 		var fromJSON string
 		var received *time.Time
-		if err := rows.Scan(&row.ThreadID, &row.MessageID, &row.Subject, &fromJSON,
+		if err := rows.Scan(&row.Account, &row.ThreadID, &row.MessageID, &row.Subject, &fromJSON,
 			&received, &row.Read, &row.Preview, &row.Bucket); err != nil {
 			continue
 		}
@@ -311,7 +313,7 @@ func (a *App) handlePeople(w http.ResponseWriter, r *http.Request) {
 		FROM hey_senders s
 		LEFT JOIN mail_messages m ON lower(m.from_addrs::json->0->>'email') = s.sender_key
 		LEFT JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = s.user_id
-		LEFT JOIN hey_messages h ON h.message_id = m.id AND h.user_id = s.user_id
+		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = s.user_id
 		WHERE s.user_id = $1`+
 		accountClause(r)+`
 		GROUP BY s.sender_key, s.route, s.allowed

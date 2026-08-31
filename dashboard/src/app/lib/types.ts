@@ -9,6 +9,7 @@ export type ListBucket = Bucket | "snoozed";
 
 /** Shared row shape: /buckets/{b}, /search, /recent, /folder. */
 export interface Row {
+  account: string;
   thread_id: string;
   message_id: string;
   subject: string;
@@ -26,6 +27,7 @@ export interface Row {
 /** A board card. Derived cards carry thread data only; pinned cards add
     card_id; manual notes have card_id + manual and nothing else. */
 export interface BoardCard {
+  account?: string;
   card_id?: string;
   thread_id?: string;
   message_id?: string;
@@ -81,6 +83,7 @@ export interface ScreenerSender {
 }
 
 export interface BriefThread {
+  account: string;
   thread_id: string;
   message_id: string;
   subject: string;

@@ -13,6 +13,7 @@ import { Icon } from "../ui/Icon";
     column's render order and the keyboard list's indices agree. */
 function asRow(c: BoardCard): Row {
   return {
+    account: c.account || "",
     thread_id: c.thread_id || "",
     message_id: c.message_id || "",
     subject: c.subject,
@@ -45,7 +46,7 @@ function NeedsCard({ card, index }: { card: BoardCard; index: number }) {
       )}
       <div class="board-card-acts">
         {openable && (
-          <button class="btn btn-outline btn-sm" type="button" onClick={() => openThread(card.thread_id!, null)}>
+          <button class="btn btn-outline btn-sm" type="button" onClick={() => openThread(card.thread_id!, card.account!, null)}>
             Open
           </button>
         )}
@@ -72,7 +73,7 @@ function WaitCard({ card }: { card: BoardCard }) {
   const who = splitFrom(card.from || "");
   const age = daysSince(card.received_at);
   return (
-    <div class="board-card wait" onClick={() => card.thread_id && openThread(card.thread_id, null)}>
+    <div class="board-card wait" onClick={() => card.thread_id && card.account && openThread(card.thread_id, card.account, null)}>
       <div class="board-card-top">
         <span class="board-card-who">{who.name || who.email}</span>
         <span class={"wait-age" + (age >= 3 ? " stale" : "")}>{relativeAge(card.received_at)}</span>
@@ -85,7 +86,7 @@ function WaitCard({ card }: { card: BoardCard }) {
 function SnoozeCard({ row }: { row: Row }) {
   const who = splitFrom(row.from);
   return (
-    <div class="board-card snoozed" onClick={() => openThread(row.thread_id, "snoozed")}>
+    <div class="board-card snoozed" onClick={() => openThread(row.thread_id, row.account, "snoozed")}>
       <div class="board-card-subject">{row.subject || "(no subject)"}</div>
       <div class="board-card-top">
         <span class="board-card-who">{who.name || who.email}</span>
@@ -151,7 +152,7 @@ function DonePile({ done }: { done: BoardCard[] }) {
           <span class="done-what">{c.subject || "(no subject)"}</span>
           <span class="done-acts">
             {!c.manual && c.thread_id ? (
-              <button class="btn btn-ghost btn-sm" type="button" onClick={() => c.thread_id && openThread(c.thread_id, null)}>Open</button>
+              <button class="btn btn-ghost btn-sm" type="button" onClick={() => c.thread_id && c.account && openThread(c.thread_id, c.account, null)}>Open</button>
             ) : null}
             <button class="btn btn-ghost btn-sm" type="button" onClick={() => setCardDone(c, false)}>Restore</button>
             <button class="btn btn-quiet-danger btn-sm" type="button" onClick={() => removeCard(c)}>Delete</button>

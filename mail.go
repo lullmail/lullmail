@@ -75,6 +75,12 @@ func connectApp(cfg *Config) *App {
 		log.Printf("app: mail migration failed — API disabled: %v", err)
 		return nil
 	}
+	if err := migrateAccountScopedState(ctx, db); err != nil {
+		store.Close()
+		db.Close()
+		log.Printf("app: account-scope migration failed — API disabled: %v", err)
+		return nil
+	}
 
 	app := &App{
 		cfg:          cfg,
@@ -82,6 +88,7 @@ func connectApp(cfg *Config) *App {
 		log:          slog.Default(),
 		store:        store,
 		eng:          mail.NewEngine(store, slog.Default()),
+		events:       newSyncEvents(),
 		sendq:        newSendQueue(),
 		authAttempts: map[string]authAttempt{},
 		tokenFromEnv: cfg.APIToken != "",
@@ -110,6 +117,10 @@ func connectApp(cfg *Config) *App {
 	app.sched = mail.NewScheduler(store, app.eng, nil, slog.Default())
 	app.sched.Tokens = app
 	app.sched.Resolve = newResolver()
+	app.sched.Interval = time.Minute
+	app.sched.AfterSync = func(ctx context.Context, account mail.Account, reports []mail.SyncReport, err error) {
+		app.finishSync(ctx, account.ID, reports, err)
+	}
 	// email_accounts.sync_enabled is the product-level pause switch; the
 	// engine only knows the mirror, so the decision is supplied from here.
 	app.sched.Include = func(acct mail.Account) bool {
@@ -125,6 +136,46 @@ func connectApp(cfg *Config) *App {
 		log.Printf("app: user bootstrap failed (continuing): %v", err)
 	}
 	return app
+}
+
+// migrateAccountScopedState runs after the mail mirror exists. Early builds
+// keyed product state by message id alone, but every provider only guarantees
+// ids within an account. Preserve the old row on one matching account and let
+// the next classifier pass create state for any additional copy.
+func migrateAccountScopedState(ctx context.Context, db *sql.DB) error {
+	statements := []string{
+		`UPDATE hey_messages h SET account_id = (
+			SELECT min(m.account_id) FROM mail_messages m
+			JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = h.user_id
+			WHERE m.id = h.message_id
+		) WHERE h.account_id IS NULL`,
+		`DELETE FROM hey_messages WHERE account_id IS NULL`,
+		`ALTER TABLE hey_messages ALTER COLUMN account_id SET NOT NULL`,
+		`ALTER TABLE hey_messages DROP CONSTRAINT IF EXISTS hey_messages_pkey`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS hey_messages_identity ON hey_messages (user_id, account_id, message_id)`,
+		`UPDATE push_deliveries p SET account_id = (
+			SELECT min(m.account_id) FROM mail_messages m
+			JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = p.user_id
+			WHERE m.id = p.message_id
+		) WHERE p.account_id IS NULL`,
+		`DELETE FROM push_deliveries WHERE account_id IS NULL`,
+		`ALTER TABLE push_deliveries ALTER COLUMN account_id SET NOT NULL`,
+		`ALTER TABLE push_deliveries DROP CONSTRAINT IF EXISTS push_deliveries_pkey`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS push_deliveries_identity ON push_deliveries (user_id, account_id, message_id)`,
+		`UPDATE board_cards b SET account_id = (
+			SELECT min(m.account_id) FROM mail_messages m
+			JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = b.user_id
+			WHERE m.thread_id = b.thread_key
+		) WHERE b.thread_key IS NOT NULL AND b.account_id IS NULL`,
+		`DROP INDEX IF EXISTS board_cards_one_pin`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS board_cards_one_account_pin ON board_cards (user_id, account_id, thread_key) WHERE thread_key IS NOT NULL`,
+	}
+	for _, stmt := range statements {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // startBackground runs the sync scheduler and a classification pass on the
@@ -245,6 +296,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	api.HandleFunc("DELETE /accounts/{id}", a.handleAccountItem)
 	api.HandleFunc("POST /accounts/{id}", a.handleAccountItem)
 	api.HandleFunc("GET /accounts/{id}/export", a.handleAccountExport)
+	api.HandleFunc("GET /events", a.handleEvents)
 	api.HandleFunc("GET /security", a.handleSecurity)
 	api.HandleFunc("POST /security/passkeys/begin", a.handlePasskeyRegisterBegin)
 	api.HandleFunc("POST /security/passkeys/finish", a.handlePasskeyRegisterFinish)

@@ -5,7 +5,7 @@ import { fmtBytes } from "../lib/fmt";
 import type { Attachment } from "../lib/types";
 import { Icon } from "../ui/Icon";
 
-export function Attachments({ messageId, items }: { messageId: string; items: Attachment[] }) {
+export function Attachments({ account, messageId, items }: { account: string; messageId: string; items: Attachment[] }) {
   const [busy, setBusy] = useState<string | null>(null);
   if (!items.length) return null;
 
@@ -20,7 +20,8 @@ export function Attachments({ messageId, items }: { messageId: string; items: At
             try {
               await download(
                 "/messages/" + encodeURIComponent(messageId) +
-                  "/attachment/" + encodeURIComponent(att.part_id),
+                  "/attachment/" + encodeURIComponent(att.part_id) +
+                  "?account=" + encodeURIComponent(account),
                 att.filename || "attachment"
               );
             } catch (e) {

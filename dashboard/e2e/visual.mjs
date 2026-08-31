@@ -1,5 +1,7 @@
 import { chromium } from "playwright";
+import { execFileSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
 const baseURL = process.env.E2E_BASE_URL;
 const setupToken = process.env.E2E_SETUP_TOKEN;
@@ -22,12 +24,20 @@ await cdp.send("WebAuthn.addVirtualAuthenticator", { options: {
 } });
 
 await page.goto(baseURL, { waitUntil: "networkidle" });
-await page.getByPlaceholder("Owner email").fill("owner@example.test");
-await page.getByPlaceholder("One-time setup token").fill(setupToken);
-await page.getByRole("button", { name: "Create passkey" }).click();
+await page.getByRole("button", { name: "Get started" }).click();
+await page.getByPlaceholder("Setup code").fill(setupToken);
+await page.getByRole("button", { name: "Continue" }).click();
+await page.getByPlaceholder("Your name").fill("Owner");
+await page.getByRole("button", { name: "Create my passkey" }).click();
 await page.getByRole("heading", { name: "Save your recovery codes" }).waitFor();
-await page.getByRole("button", { name: /I saved them/ }).click();
+await page.getByRole("button", { name: /saved them/ }).click();
 await page.getByRole("link", { name: "Today", exact: true }).waitFor();
+
+// The visual world is deliberately deterministic. When a scratch database
+// is supplied, seed it only after setup has created the owner row.
+if (process.env.E2E_DATABASE_URL) {
+  execFileSync("psql", [process.env.E2E_DATABASE_URL, "-v", "ON_ERROR_STOP=1", "-f", fileURLToPath(new URL("./seed.sql", import.meta.url))], { stdio: "inherit" });
+}
 
 const routes = [
   ["today", "/today"], ["imbox", "/"], ["board", "/board"],

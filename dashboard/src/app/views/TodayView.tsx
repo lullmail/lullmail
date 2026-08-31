@@ -76,7 +76,7 @@ function NeedsRow({ thread, index }: { thread: BriefThread; index: number }) {
           <button class="btn btn-outline btn-sm" type="button" onClick={() => setReplying(true)}>
             <Icon name="reply" size={13} /> Reply
           </button>
-          <button class="btn btn-ghost btn-sm" type="button" onClick={() => openThread(thread.thread_id, "imbox")}>
+          <button class="btn btn-ghost btn-sm" type="button" onClick={() => openThread(thread.thread_id, thread.account, "imbox")}>
             Read it
           </button>
           <button class="btn btn-ghost btn-sm" type="button" onClick={() => markDone([asRow(thread)])}>
@@ -92,7 +92,7 @@ function WaitingRow({ thread }: { thread: BriefThread }) {
   const who = splitFrom(thread.from);
   const age = daysSince(thread.received_at);
   return (
-    <div class="wait-row" onClick={() => openThread(thread.thread_id, "imbox")}>
+    <div class="wait-row" onClick={() => openThread(thread.thread_id, thread.account, "imbox")}>
       <span class="wait-who">{who.name || who.email}</span>
       <span class="wait-what">{thread.subject || "(no subject)"}</span>
       {/* Ageing is the point of this section: a three-day silence is the nudge. */}

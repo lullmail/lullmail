@@ -17,11 +17,13 @@ await cdp.send("WebAuthn.addVirtualAuthenticator", { options: {
 } });
 
 await page.goto(baseURL, { waitUntil: "networkidle" });
-await page.getByPlaceholder("Owner email").fill("owner@example.test");
-await page.getByPlaceholder("One-time setup token").fill(setupToken);
-await page.getByRole("button", { name: "Create passkey" }).click();
+await page.getByRole("button", { name: "Get started" }).click();
+await page.getByPlaceholder("Setup code").fill(setupToken);
+await page.getByRole("button", { name: "Continue" }).click();
+await page.getByPlaceholder("Your name").fill("Owner");
+await page.getByRole("button", { name: "Create my passkey" }).click();
 await page.getByRole("heading", { name: "Save your recovery codes" }).waitFor();
-await page.getByRole("button", { name: /I saved them/ }).click();
+await page.getByRole("button", { name: /saved them/ }).click();
 await page.goto(baseURL + "/today", { waitUntil: "networkidle" });
 console.log(JSON.stringify({ ready: true, url: page.url() }));
 

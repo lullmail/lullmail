@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -27,6 +28,15 @@ type Engine struct {
 	// stored cursor on the next call, so progress is never lost — the bound
 	// exists so one enormous mailbox cannot starve every other account.
 	MaxPages int
+
+	accountLocks sync.Map // AccountID -> *sync.Mutex
+}
+
+func (e *Engine) lockAccount(acct AccountID) func() {
+	value, _ := e.accountLocks.LoadOrStore(acct, &sync.Mutex{})
+	mu := value.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // NewEngine builds an engine over a store.
@@ -61,6 +71,8 @@ type SyncReport struct {
 // Mailbox discovery runs first, so a folder created since the last sync is
 // picked up in the same pass rather than on the one after.
 func (e *Engine) SyncAccount(ctx context.Context, acct AccountID, ad Adapter) ([]SyncReport, error) {
+	unlock := e.lockAccount(acct)
+	defer unlock()
 	a, err := e.store.Account(ctx, acct)
 	if err != nil {
 		return nil, err
@@ -125,6 +137,7 @@ func (e *Engine) SyncMailbox(ctx context.Context, acct AccountID, box MailboxID,
 		seen            = map[MessageID]bool{}
 		enumerating     bool
 		ranToCompletion bool
+		finalComplete   bool
 	)
 
 	for page := 0; page < e.MaxPages; page++ {
@@ -158,9 +171,10 @@ func (e *Engine) SyncMailbox(ctx context.Context, acct AccountID, box MailboxID,
 		}
 
 		rep.Pages++
-		if changes.Complete {
+		if changes.EnumerationStart {
 			enumerating = true
 		}
+		finalComplete = changes.Complete
 		if err := e.apply(ctx, acct, box, ad, changes, rep, seen); err != nil {
 			return nil, err
 		}
@@ -179,7 +193,7 @@ func (e *Engine) SyncMailbox(ctx context.Context, acct AccountID, box MailboxID,
 		}
 	}
 
-	if enumerating && ranToCompletion {
+	if enumerating && ranToCompletion && finalComplete {
 		swept, err := e.sweepAbsent(ctx, acct, box, seen)
 		if err != nil {
 			return nil, err
@@ -350,6 +364,8 @@ func (e *Engine) Body(ctx context.Context, acct AccountID, id MessageID, ad Adap
 // make the mirror briefly the source of truth. If the provider rejects the
 // operation, nothing local changed.
 func (e *Engine) Apply(ctx context.Context, acct AccountID, op Operation, ad Adapter) error {
+	unlock := e.lockAccount(acct)
+	defer unlock()
 	if err := ad.Apply(ctx, op); err != nil {
 		return e.classify(ctx, acct, err)
 	}

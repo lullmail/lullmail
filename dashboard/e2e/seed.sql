@@ -11,7 +11,7 @@ SELECT id, 'audit-primary', 'imap', 'owner@example.test', 'Personal',
        'owner@example.test', 'mail.example.test', 993,
        'smtp.example.test', 587, 'visual-audit-only', 90, 0, false,
        now() - interval '4 minutes'
-FROM users WHERE email = 'owner@example.test'
+FROM users WHERE email = 'owner@owner.local'
 ON CONFLICT (mirror_account_id) DO NOTHING;
 
 INSERT INTO mail_mailboxes (account_id, id, name, role, native) VALUES
@@ -65,8 +65,8 @@ INSERT INTO mail_bodies (account_id, message_id, text_body, html_body, parts, fe
   ('audit-primary','m-014','The rain stopped right before the ferry. These are the good ones.','', '[]',now())
 ON CONFLICT DO NOTHING;
 
-INSERT INTO hey_messages (user_id, message_id, bucket, read_at, set_aside_until)
-SELECT u.id, v.message_id, v.bucket, v.read_at, v.set_aside_until
+INSERT INTO hey_messages (user_id, account_id, message_id, bucket, read_at, set_aside_until)
+SELECT u.id, 'audit-primary', v.message_id, v.bucket, v.read_at, v.set_aside_until
 FROM users u CROSS JOIN (VALUES
   ('m-001','imbox',NULL::timestamptz,NULL::timestamptz),
   ('m-002','imbox',NULL,NULL),
@@ -83,8 +83,8 @@ FROM users u CROSS JOIN (VALUES
   ('m-013','later',now()-interval '5 days',NULL),
   ('m-014','imbox',now()-interval '8 days',NULL)
 ) AS v(message_id,bucket,read_at,set_aside_until)
-WHERE u.email='owner@example.test'
-ON CONFLICT (user_id,message_id) DO NOTHING;
+WHERE u.email='owner@owner.local'
+ON CONFLICT (user_id,account_id,message_id) DO NOTHING;
 
 INSERT INTO hey_senders (user_id, sender_key, allowed, route, decided_at)
 SELECT u.id, v.sender_key, true, v.route, now()-interval '14 days'
@@ -96,7 +96,7 @@ FROM users u CROSS JOIN (VALUES
   ('lena@weekend.test','imbox'), ('research@ink.test','feed'),
   ('mom@example.test','imbox')
 ) AS v(sender_key,route)
-WHERE u.email='owner@example.test'
+WHERE u.email='owner@owner.local'
 ON CONFLICT DO NOTHING;
 
 INSERT INTO board_cards (user_id, thread_key, title, note, done_at, created_at)

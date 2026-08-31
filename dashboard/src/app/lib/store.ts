@@ -390,6 +390,7 @@ export function targetRows(): Row[] {
     const last = messages[messages.length - 1];
     if (!last) return [];
     return [{
+      account: last.account,
       thread_id: reader.value.threadId,
       message_id: last.id,
       subject: last.subject,
@@ -464,6 +465,8 @@ export interface ComposeState {
   to: string;
   subject: string;
   body: string;
+  /** When true the body holds HTML source, sent as a rich message. */
+  htmlMode?: boolean;
   replyToId?: string;
   /** Shown above the fields so a reply never looks like a fresh message. */
   context?: string;

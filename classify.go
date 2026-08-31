@@ -27,9 +27,10 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		SELECT m.account_id, m.id, COALESCE(m.from_addrs, ''), m.received_at, ea.created_at
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-		LEFT JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
+		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
 		WHERE h.message_id IS NULL
-		  AND (m.received_at AT TIME ZONE 'UTC') > now() - make_interval(days => ea.backfill_days)`, uid)
+		  AND (ea.backfill_days = 0
+		       OR (m.received_at AT TIME ZONE 'UTC') > now() - make_interval(days => ea.backfill_days))`, uid)
 	if err != nil {
 		return err
 	}
@@ -129,9 +130,9 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 			bucket = "paper_trail"
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO hey_messages (user_id, message_id, bucket)
-			VALUES ($1, $2, $3) ON CONFLICT (user_id, message_id) DO NOTHING`,
-			uid, p.id, bucket); err != nil {
+			INSERT INTO hey_messages (user_id, account_id, message_id, bucket)
+			VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, account_id, message_id) DO NOTHING`,
+			uid, p.acct, p.id, bucket); err != nil {
 			return err
 		}
 	}
@@ -142,7 +143,7 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		UPDATE hey_messages h SET bucket = CASE WHEN s.allowed THEN s.route ELSE 'dropped' END
 		FROM hey_senders s, mail_messages m
 		WHERE h.user_id = $1 AND h.bucket = 'screener'
-		  AND h.message_id = m.id AND s.user_id = $1 AND s.sender_key <> ''
+		  AND h.account_id = m.account_id AND h.message_id = m.id AND s.user_id = $1 AND s.sender_key <> ''
 		  AND s.sender_key = lower(COALESCE(m.from_addrs, '[]')::json->0->>'email')`, uid); err != nil {
 		return err
 	}
@@ -151,7 +152,8 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE hey_messages h SET bucket = 'paper_trail'
 		FROM mail_messages m
-		WHERE h.user_id = $1 AND h.bucket = 'screener' AND h.message_id = m.id
+		WHERE h.user_id = $1 AND h.bucket = 'screener'
+		  AND h.account_id = m.account_id AND h.message_id = m.id
 		  AND (m.from_addrs IS NULL
 		       OR json_typeof(COALESCE(m.from_addrs, '[]')::json) <> 'array'
 		       OR COALESCE(m.from_addrs, '[]')::json->0->>'email' IS NULL
@@ -220,7 +222,7 @@ func (a *App) handleCounts(w http.ResponseWriter, r *http.Request) {
 		  count(*) FILTER (WHERE h.bucket='set_aside'),
 		  count(*) FILTER (WHERE h.bucket='later')
 		FROM hey_messages h
-		JOIN mail_messages m ON m.id = h.message_id
+		JOIN mail_messages m ON m.account_id = h.account_id AND m.id = h.message_id
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		WHERE h.user_id = $1`
 	countsArgs := []any{uid}
@@ -287,14 +289,14 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	like := "%" + q + "%"
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at,
+		SELECT m.account_id, m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at,
 		       h.read_at IS NOT NULL AS is_read, m.has_attachment, COALESCE(m.preview,''),
 		       COALESCE(h.bucket,''),
 		       (SELECT count(*) FROM mail_messages t
 		          WHERE t.account_id = m.account_id AND t.thread_id = m.thread_id) AS thread_len
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-		LEFT JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
+		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
 		WHERE (m.subject ILIKE $2 OR m.from_addrs ILIKE $2 OR m.to_addrs ILIKE $2 OR m.preview ILIKE $2)`+
 		accountClause(r)+
 		` ORDER BY m.received_at DESC NULLS LAST
@@ -306,6 +308,7 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type rowOut struct {
+		Account    string `json:"account"`
 		ThreadID   string `json:"thread_id"`
 		MessageID  string `json:"message_id"`
 		Subject    string `json:"subject"`
@@ -322,7 +325,7 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 		var row rowOut
 		var fromJSON string
 		var received sql.NullTime
-		if err := rows.Scan(&row.ThreadID, &row.MessageID, &row.Subject, &fromJSON,
+		if err := rows.Scan(&row.Account, &row.ThreadID, &row.MessageID, &row.Subject, &fromJSON,
 			&received, &row.Read, &row.Attachment, &row.Preview, &row.Bucket, &row.ThreadLen); err != nil {
 			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
 			return
@@ -349,7 +352,7 @@ func (a *App) handleScreener(w http.ResponseWriter, r *http.Request) {
 		       COALESCE(max(m.received_at)::text, '') AS newest,
 		       COALESCE(max(m.subject), '') AS sample_subject
 		FROM hey_messages h
-		JOIN mail_messages m ON m.id = h.message_id
+		JOIN mail_messages m ON m.account_id = h.account_id AND m.id = h.message_id
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = h.user_id
 		WHERE h.user_id = $1 AND h.bucket = 'screener'
 		  AND json_typeof(m.from_addrs::json) = 'array'
@@ -440,10 +443,11 @@ func (a *App) handleDecide(w http.ResponseWriter, r *http.Request) {
 		parked = "dropped"
 	}
 	if _, err := tx.ExecContext(r.Context(), `
-		UPDATE hey_messages SET bucket = $3
-		WHERE user_id = $1 AND bucket = 'screener' AND message_id IN (
-		  SELECT m.id FROM mail_messages m
-		  WHERE lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = $2)`,
+		UPDATE hey_messages h SET bucket = $3
+		FROM mail_messages m
+		WHERE h.user_id = $1 AND h.bucket = 'screener'
+		  AND h.account_id = m.account_id AND h.message_id = m.id
+		  AND lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = $2`,
 		uid, req.Sender, parked); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Reroute Failed", err.Error())
 		return
@@ -510,10 +514,11 @@ func (a *App) handleUndecide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := tx.ExecContext(r.Context(), `
-		UPDATE hey_messages SET bucket = 'screener'
-		WHERE user_id = $1 AND bucket = ANY($3) AND message_id IN (
-		  SELECT m.id FROM mail_messages m
-		  WHERE lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = $2)`,
+		UPDATE hey_messages h SET bucket = 'screener'
+		FROM mail_messages m
+		WHERE h.user_id = $1 AND h.bucket = ANY($3)
+		  AND h.account_id = m.account_id AND h.message_id = m.id
+		  AND lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = $2`,
 		uid, req.Sender, []string{"screener", wasParked}); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Reroute Failed", err.Error())
 		return
@@ -564,13 +569,13 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	query := `
-		SELECT m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at,
+		SELECT m.account_id, m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at,
 		       h.read_at IS NOT NULL AS is_read, m.has_attachment, COALESCE(m.preview,''), h.bucket,
 		       h.set_aside_until,
 		       (SELECT count(*) FROM mail_messages t
 	          WHERE t.account_id = m.account_id AND t.thread_id = m.thread_id) AS thread_len
 		FROM hey_messages h
-		JOIN mail_messages m ON m.id = h.message_id
+		JOIN mail_messages m ON m.account_id = h.account_id AND m.id = h.message_id
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		WHERE h.user_id = $1 AND h.bucket = ANY($2)`
 	args := []any{uid, buckets}
@@ -581,7 +586,7 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 	query += `
 		  AND m.id = (
 		    SELECT m2.id FROM hey_messages h2
-		    JOIN mail_messages m2 ON m2.id = h2.message_id
+		    JOIN mail_messages m2 ON m2.account_id = h2.account_id AND m2.id = h2.message_id
 		    WHERE h2.user_id = $1 AND h2.bucket = ANY($2)
 		      AND m2.account_id = m.account_id AND m2.thread_id = m.thread_id
 		    ORDER BY m2.received_at DESC NULLS LAST LIMIT 1)
@@ -595,6 +600,7 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type threadRow struct {
+		Account     string `json:"account"`
 		ThreadID    string `json:"thread_id"`
 		MessageID   string `json:"message_id"`
 		Subject     string `json:"subject"`
@@ -613,7 +619,7 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 		var fromJSON string
 		var received sql.NullTime
 		var snoozeUntil sql.NullTime
-		if err := rows.Scan(&row.ThreadID, &row.MessageID, &row.Subject, &fromJSON,
+		if err := rows.Scan(&row.Account, &row.ThreadID, &row.MessageID, &row.Subject, &fromJSON,
 			&received, &row.Read, &row.Attachment, &row.Preview, &row.Bucket,
 			&snoozeUntil, &row.ThreadLen); err != nil {
 			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
@@ -653,15 +659,22 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	thread := r.PathValue("thread")
-	rows, err := a.db.QueryContext(r.Context(), `
+	account := r.URL.Query().Get("account")
+	threadQuery := `
 		SELECT m.id, m.account_id, m.subject, m.from_addrs, m.to_addrs, m.received_at,
 		       COALESCE(h.bucket,''), b.text_body, b.html_body, b.parts, b.fetched_at
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-		LEFT JOIN hey_messages h ON h.message_id = m.id AND h.user_id = $1
+		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
 		LEFT JOIN mail_bodies b ON b.account_id = m.account_id AND b.message_id = m.id
-		WHERE m.thread_id = $2
-		ORDER BY m.received_at ASC NULLS LAST`, uid, thread)
+		WHERE m.thread_id = $2`
+	threadArgs := []any{uid, thread}
+	if account != "" {
+		threadQuery += ` AND m.account_id = $3`
+		threadArgs = append(threadArgs, account)
+	}
+	threadQuery += ` ORDER BY m.received_at ASC NULLS LAST`
+	rows, err := a.db.QueryContext(r.Context(), threadQuery, threadArgs...)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return
@@ -734,11 +747,7 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 				rel()
 			}
 		}()
-		limit := 6
-		for i, rf := range refs {
-			if i >= limit {
-				break
-			}
+		for _, rf := range refs {
 			var boxID string
 			a.db.QueryRowContext(r.Context(),
 				`SELECT mailbox_id FROM mail_message_mailboxes WHERE account_id = $1 AND message_id = $2 LIMIT 1`,
@@ -808,11 +817,19 @@ func (a *App) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	}
 	msgID := r.PathValue("message")
 	partID := r.PathValue("part")
+	requestedAccount := r.URL.Query().Get("account")
 	var acct string
-	err = a.db.QueryRowContext(r.Context(), `
+	attachmentQuery := `
 		SELECT m.account_id FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-		WHERE m.id = $2`, uid, msgID).Scan(&acct)
+		WHERE m.id = $2`
+	attachmentArgs := []any{uid, msgID}
+	if requestedAccount != "" {
+		attachmentQuery += ` AND m.account_id = $3`
+		attachmentArgs = append(attachmentArgs, requestedAccount)
+	}
+	attachmentQuery += ` LIMIT 1`
+	err = a.db.QueryRowContext(r.Context(), attachmentQuery, attachmentArgs...).Scan(&acct)
 	if err != nil {
 		writeProblem(w, http.StatusNotFound, "Not Found", "no such message")
 		return
@@ -908,21 +925,43 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	msg := r.PathValue("message")
+	account := r.URL.Query().Get("account")
+	var acct, thread string
+	lookup := `SELECT m.account_id, m.thread_id
+		FROM mail_messages m
+		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+		WHERE m.id = $2`
+	lookupArgs := []any{uid, msg}
+	if account != "" {
+		lookup += ` AND m.account_id = $3`
+		lookupArgs = append(lookupArgs, account)
+	}
+	lookup += ` ORDER BY m.received_at DESC NULLS LAST LIMIT 1`
+	if err := a.db.QueryRowContext(r.Context(), lookup, lookupArgs...).Scan(&acct, &thread); err != nil {
+		writeProblem(w, http.StatusNotFound, "Not Found", "no such message")
+		return
+	}
 
 	var q string
 	var args []any
 	switch req.Action {
 	case "read":
-		q = `UPDATE hey_messages SET read_at = now() WHERE user_id=$1 AND message_id=$2`
-		args = []any{uid, msg}
+		q = `UPDATE hey_messages h SET read_at = now() FROM mail_messages m
+		     WHERE h.user_id=$1 AND h.account_id=$2 AND h.account_id=m.account_id
+		       AND h.message_id=m.id AND m.thread_id=$3`
+		args = []any{uid, acct, thread}
 	case "unread":
-		q = `UPDATE hey_messages SET read_at = NULL WHERE user_id=$1 AND message_id=$2`
-		args = []any{uid, msg}
+		q = `UPDATE hey_messages h SET read_at = NULL FROM mail_messages m
+		     WHERE h.user_id=$1 AND h.account_id=$2 AND h.account_id=m.account_id
+		       AND h.message_id=m.id AND m.thread_id=$3`
+		args = []any{uid, acct, thread}
 	case "imbox", "paper_trail", "feed", "later", "screener":
 		// Leaving set_aside must drop the return date too, or the Snoozed
 		// list shows a stale (possibly past) promise the message no longer keeps.
-		q = `UPDATE hey_messages SET bucket=$3, set_aside_until=NULL WHERE user_id=$1 AND message_id=$2`
-		args = []any{uid, msg, req.Action}
+		q = `UPDATE hey_messages h SET bucket=$4, set_aside_until=NULL FROM mail_messages m
+		     WHERE h.user_id=$1 AND h.account_id=$2 AND h.account_id=m.account_id
+		       AND h.message_id=m.id AND m.thread_id=$3`
+		args = []any{uid, acct, thread, req.Action}
 	case "set_aside":
 		days := req.UntilDays
 		if days == 0 {
@@ -932,9 +971,11 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, http.StatusUnprocessableEntity, "Invalid Snooze", "until_days must be 1 through 3650")
 			return
 		}
-		q = `UPDATE hey_messages SET bucket='set_aside', set_aside_until = now() + make_interval(days => $3)
-		     WHERE user_id=$1 AND message_id=$2`
-		args = []any{uid, msg, days}
+		q = `UPDATE hey_messages h SET bucket='set_aside', set_aside_until = now() + make_interval(days => $4)
+		     FROM mail_messages m
+		     WHERE h.user_id=$1 AND h.account_id=$2 AND h.account_id=m.account_id
+		       AND h.message_id=m.id AND m.thread_id=$3`
+		args = []any{uid, acct, thread, days}
 	default:
 		writeProblem(w, http.StatusUnprocessableEntity, "Unknown Action", req.Action)
 		return

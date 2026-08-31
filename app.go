@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ type App struct {
 	eng               *mail.Engine
 	svc               *mail.Service
 	sched             *mail.Scheduler
+	events            *syncEvents
 	sendq             *sendQueue
 	wa                *webauthn.WebAuthn
 	waMu              sync.Mutex
@@ -46,7 +48,7 @@ func (a *App) Token(ctx context.Context, acct mail.AccountID) (mail.Credential, 
 	}
 	password, err := openSecret(a.cfg, ciphertext)
 	if err != nil {
-		return mail.Credential{}, err
+		return mail.Credential{}, fmt.Errorf("stored credential could not be unsealed (was SECRET_KEY changed? reconnect the account): %w", err)
 	}
 	return mail.Credential{
 		Provider: mail.Provider(provider),

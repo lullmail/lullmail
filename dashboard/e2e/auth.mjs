@@ -22,13 +22,15 @@ const { authenticatorId: primaryAuthenticator } = await cdp.send("WebAuthn.addVi
 } });
 
 await page.goto(baseURL, { waitUntil: "networkidle" });
-await page.getByPlaceholder("Owner email").fill("owner@example.test");
-await page.getByPlaceholder("One-time setup token").fill(setupToken);
-await page.getByRole("button", { name: "Create passkey" }).click();
+await page.getByRole("button", { name: "Get started" }).click();
+await page.getByPlaceholder("Setup code").fill(setupToken);
+await page.getByRole("button", { name: "Continue" }).click();
+await page.getByPlaceholder("Your name").fill("Owner");
+await page.getByRole("button", { name: "Create my passkey" }).click();
 await page.getByRole("heading", { name: "Save your recovery codes" }).waitFor();
 const recoveryCode = await page.locator(".recovery-grid code").first().innerText();
 await page.screenshot({ path: output + "/recovery.png", fullPage: true });
-await page.getByRole("button", { name: /I saved them/ }).click();
+await page.getByRole("button", { name: /saved them/ }).click();
 await page.getByRole("button", { name: "Connect a mailbox" }).waitFor();
 
 await page.goto(baseURL + "/settings/security", { waitUntil: "networkidle" });
@@ -45,24 +47,25 @@ await page.getByRole("button", { name: "Add passkey" }).click();
 await page.getByText("Backup passkey").waitFor();
 
 await page.getByRole("button", { name: "Sign out here" }).click();
-await page.getByRole("button", { name: "Sign in with a passkey" }).waitFor();
-await page.getByRole("button", { name: "Sign in with a passkey" }).click();
+await page.getByRole("button", { name: "Continue with a passkey" }).waitFor();
+await page.getByRole("button", { name: "Continue with a passkey" }).click();
 await page.getByRole("button", { name: "Connect a mailbox" }).waitFor();
 
 await page.goto(baseURL + "/settings/security", { waitUntil: "networkidle" });
 await page.getByRole("button", { name: "Sign out here" }).click();
-await page.getByRole("button", { name: "Use a recovery method" }).click();
+await page.getByRole("button", { name: "Can't use your passkey?" }).click();
 await page.getByPlaceholder("Recovery code").fill(recoveryCode);
-await page.getByRole("button", { name: "Continue" }).click();
+await page.getByRole("button", { name: "Sign in", exact: true }).click();
 await page.getByRole("button", { name: "Connect a mailbox" }).waitFor();
 
 await page.setViewportSize({ width: 390, height: 844 });
 await page.goto(baseURL + "/settings/security", { waitUntil: "networkidle" });
 await page.screenshot({ path: output + "/security-mobile.png", fullPage: true });
 
-await page.getByLabel("Type your email to confirm deletion").fill("owner@example.test");
+const deleteField = page.getByLabel("Type your email to confirm deletion");
+await deleteField.fill((await deleteField.getAttribute("placeholder")) || "");
 await page.getByRole("button", { name: "Delete my account" }).click();
-await page.getByRole("heading", { name: "Make this mailbox yours" }).waitFor();
+await page.getByRole("heading", { name: "Set up your mailbox" }).waitFor();
 
 if (errors.length) throw new Error("Browser errors:\n" + errors.join("\n"));
 await browser.close();

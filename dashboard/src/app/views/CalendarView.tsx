@@ -243,7 +243,7 @@ export function CalendarView() {
               const who = splitFrom(r.from);
               return (
                 <button class="cal-return" type="button" key={r.thread_id}
-                  onClick={() => openThread(r.thread_id, "snoozed")}>
+                  onClick={() => openThread(r.thread_id, r.account, "snoozed")}>
                   <span class="cal-return-when">
                     {new Date(r.snooze_until!).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
                   </span>
@@ -273,7 +273,7 @@ export function CalendarView() {
                   const who = splitFrom(r.from);
                   return (
                     <button class="cal-witem" type="button" key={r.thread_id}
-                      onClick={() => openThread(r.thread_id, "snoozed")}>
+                      onClick={() => openThread(r.thread_id, r.account, "snoozed")}>
                       <span class="cal-witem-when">
                         {new Date(r.snooze_until!).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
                       </span>

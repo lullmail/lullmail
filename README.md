@@ -25,9 +25,19 @@ RFC 4155) is a table-stakes feature, not a cancellation flow.
 - **Notes** — a spatial canvas of stickies. Thoughts, not tasks.
 - Keyboard-first (j/k, verbs, `g` jumps, one command palette), undo on every
   action, light/sepia/dark, no telemetry.
+- **Rich sending** — compose plain text or paste HTML: HTML goes out as
+  multipart/alternative with an automatic plain-text fallback, a sandboxed
+  preview shows the rendering, and IMAP/Gmail/Graph providers all carry the
+  rich part.
 - **Leave cleanly** — download one original message as EML or a whole account
   as mailbox-by-mailbox mboxrd, with a manifest that discloses any local-mirror
   fallback instead of silently dropping data.
+- **Explicit history** — every account states how much history email-soft
+  organizes: 30 days, 90 days (default), 1 year, 3 years, or "All history."
+  Changing the window grows or shrinks the organized views only; the local
+  mirror obeys the separate retention setting, and provider mail is never
+  touched. Message bodies and attachments stay lazy — history organizes
+  metadata and fetches content when a thread is opened.
 - Installable PWA with an explicit iOS path, account-bound offline reading,
   resilient local drafts, a conservative replay queue for reversible filing
   actions, and optional private web-push alerts.

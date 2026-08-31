@@ -89,7 +89,10 @@ function cssVar(name: string): string {
 export function emailHasOwnColors(html: string): boolean {
   if (typeof DOMParser === "undefined") return false;
   const doc = new DOMParser().parseFromString(html, "text/html");
-  return !!doc.body.querySelector("[bgcolor], [style*='background']");
+  // The body element itself is the classic canvas: <body bgcolor> merges its
+  // attributes onto the frame body at srcdoc parse time, so it paints too.
+  const paint = "[bgcolor], [background], [style*='background']";
+  return doc.body.matches(paint) || !!doc.body.querySelector(paint);
 }
 
 function frameDoc(html: string, themed: boolean): string {

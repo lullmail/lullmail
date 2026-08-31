@@ -141,6 +141,28 @@ func TestMultipartPutsPlainTextFirst(t *testing.T) {
 	}
 }
 
+func TestRenderExternalBuildsCompleteMIME(t *testing.T) {
+	// The exported one-shot renderer backs OAuth raw-MIME submission; it
+	// must mint its own Message-ID and carry HTML as multipart.
+	msg := &Outgoing{
+		From: Address{Email: "a@x.com"},
+		To:   []Address{{Email: "b@x.com"}},
+		Text: "PLAIN",
+		HTML: "<p>RICH</p>",
+	}
+	raw, err := msg.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(raw)
+	if !strings.Contains(s, "Message-ID: <") {
+		t.Fatal("Render did not mint a Message-ID; provider APIs need one")
+	}
+	if !strings.Contains(s, "multipart/alternative") || !strings.Contains(s, "<p>RICH</p>") {
+		t.Fatalf("Render dropped the HTML part:\n%s", s)
+	}
+}
+
 func TestNonASCIIHeadersAreEncoded(t *testing.T) {
 	msg := &Outgoing{
 		From:    Address{Name: "Ünicode Sender", Email: "u@x.com"},

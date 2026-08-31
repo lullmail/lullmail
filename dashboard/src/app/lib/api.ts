@@ -41,6 +41,10 @@ interface Opts {
 const MEMORY_TTL = 15_000;
 const memoryResponses = new Map<string, { savedAt: number; value: unknown }>();
 
+export function clearMemoryCache() {
+  memoryResponses.clear();
+}
+
 function copyValue<T>(value: T): T {
   return typeof structuredClone === "function" ? structuredClone(value) : value;
 }

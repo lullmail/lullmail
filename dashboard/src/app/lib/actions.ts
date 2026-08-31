@@ -4,7 +4,7 @@
 // final. Previously only "send" had an undo, so a mis-click in a bucket row
 // silently relocated a thread with no way back. Each verb here captures the
 // state it replaced and hands it to the toast.
-import { api, ApiError } from "./api";
+import { api, ApiError, clearMemoryCache } from "./api";
 import type { BoardCard, Bucket, Counts, ListBucket, Message, Row, StickyNote } from "./types";
 import {
   accountCount, accountFilter, accountQS, accounts, closeReader, counts, list, openCompose, reader, rememberListScroll, resetSelection, setAccountFilter, showError, showToast,
@@ -30,6 +30,7 @@ export function setReloader(fn: () => void) {
 }
 
 export function reload() {
+  clearMemoryCache();
   reloader();
 }
 
@@ -63,14 +64,14 @@ export async function refreshAccounts() {
 
 type ActionName = Bucket | "read" | "unread";
 
-async function actOn(messageId: string, action: ActionName, untilDays?: number) {
-  await api("/messages/" + encodeURIComponent(messageId) + "/action", {
+async function actOn(account: string, messageId: string, action: ActionName, untilDays?: number) {
+  await api("/messages/" + encodeURIComponent(messageId) + "/action?account=" + encodeURIComponent(account), {
     body: untilDays ? { action, until_days: untilDays } : { action },
   });
 }
 
 async function actMany(rows: Row[], action: ActionName, untilDays?: number) {
-  await Promise.all(rows.map((r) => actOn(r.message_id, action, untilDays)));
+  await Promise.all(rows.map((r) => actOn(r.account, r.message_id, action, untilDays)));
 }
 
 /** Where a row should go back to if the user undoes.
@@ -183,7 +184,7 @@ export async function snooze(rows: Row[], days: number) {
 async function restore(before: Before[]) {
   try {
     await Promise.all(before.map(({ row, from, days }) =>
-      actOn(row.message_id, from, from === "set_aside" ? days : undefined)));
+      actOn(row.account, row.message_id, from, from === "set_aside" ? days : undefined)));
     afterMutation();
   } catch (e) {
     fail(e, "Could not undo");
@@ -194,12 +195,12 @@ async function restore(before: Before[]) {
 
 /** Pin = a marker, not a move: the mail stays in whatever bucket it is in. */
 export async function pinThreads(rows: Row[]) {
-  const threads = [...new Set(rows.map((r) => r.thread_id))];
+  const threads = [...new Map(rows.map((r) => [r.account + "\u0000" + r.thread_id, r])).values()];
   if (!threads.length) return;
   try {
     const pinned: string[] = [];
-    for (const t of threads) {
-      const res = await api<BoardCard>("/board/pin", { body: { thread_id: t } });
+    for (const row of threads) {
+      const res = await api<BoardCard>("/board/pin", { body: { account: row.account, thread_id: row.thread_id } });
       if (res.card_id) pinned.push(res.card_id);
     }
     afterMutation();
@@ -232,8 +233,8 @@ async function removeCards(ids: string[], quiet = false) {
 
 async function restoreCard(card: BoardCard) {
   try {
-    if (card.thread_id && !card.manual) {
-      await api("/board/pin", { body: { thread_id: card.thread_id } });
+    if (card.account && card.thread_id && !card.manual) {
+      await api("/board/pin", { body: { account: card.account, thread_id: card.thread_id } });
     } else {
       await api("/board/cards", { body: { title: card.subject, note: card.note || "" } });
     }
@@ -329,19 +330,19 @@ export async function undecide(sender: string, quiet = false) {
 
 /* ---- reader ---- */
 
-export async function openThread(threadId: string, bucket: ListBucket | null) {
+export async function openThread(threadId: string, account: string, bucket: ListBucket | null) {
   rememberListScroll();
   window.scrollTo({ top: 0 });
   reader.value = {
     threadId, bucket, loading: true, error: null, messages: [], imagesOk: new Set(),
   };
   try {
-    const messages = await api<Message[]>("/threads/" + encodeURIComponent(threadId));
+    const messages = await api<Message[]>("/threads/" + encodeURIComponent(threadId) + "?account=" + encodeURIComponent(account));
     if (reader.value.threadId !== threadId) return; // superseded by a faster click
     reader.value = { ...reader.value, loading: false, messages };
     const last = messages[messages.length - 1];
     if (last) {
-      await actOn(last.id, "read");
+      await actOn(last.account, last.id, "read");
       refreshCounts();
       markRowRead(threadId);
     }
@@ -375,6 +376,8 @@ export interface SendInput {
   to: string;
   subject: string;
   text: string;
+  /** Optional rich body; the server derives the plain-text alternative when absent. */
+  html?: string;
   replyToId?: string;
 }
 
@@ -385,6 +388,7 @@ export async function sendMail(input: SendInput): Promise<boolean> {
         to: input.to,
         subject: input.subject,
         text: input.text,
+        html: input.html || "",
         reply_to_message_id: input.replyToId || "",
       },
     });
@@ -396,7 +400,9 @@ export async function sendMail(input: SendInput): Promise<boolean> {
           // The toast promised the draft comes back — so it has to actually
           // come back, seeded exactly as it was sent.
           openCompose({
-            to: input.to, subject: input.subject, body: input.text,
+            to: input.to, subject: input.subject,
+            body: input.html || input.text,
+            htmlMode: !!input.html,
             replyToId: input.replyToId,
           });
           showToast("Send cancelled — your draft is back");

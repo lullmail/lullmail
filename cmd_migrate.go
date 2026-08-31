@@ -1,16 +1,20 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/neutron-build/neutron/mail"
 )
 
-// migrate applies schema.sql (the product layer). The mail_* mirror tables are
-// owned by neutron-mail's own schema migration — TASKS 1.1 wires that in; this
-// file must never create or alter them.
+// migrate converges both the product schema and the mail mirror schema. The
+// product DDL still never owns mail_* tables; it runs first because its tables
+// are independent, then the engine migration and cross-layer compatibility
+// migrations run in the same order as a normal server boot.
 func migrate() error {
 	url := osGetenv("DATABASE_URL")
 	if url == "" {
@@ -21,15 +25,25 @@ func migrate() error {
 		return err
 	}
 	defer db.Close()
-	if err := db.Ping(); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
 		return err
 	}
 	for _, stmt := range splitStatements(schemaSQL) {
-		if _, err := db.Exec(stmt); err != nil {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("%w\nstatement: %.80s", err, stmt)
 		}
 	}
-	return nil
+	store, err := mail.Open(ctx, url)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		return err
+	}
+	return migrateAccountScopedState(ctx, db)
 }
 
 func splitStatements(s string) []string {

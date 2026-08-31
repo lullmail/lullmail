@@ -443,6 +443,42 @@
   background: #c0c0c0;
   border-color: #dfdfdf #404040 #404040 #dfdfdf;
 }
+/* Inputs are sunken white wells; focus keeps the navy border. */
+[data-theme="1999"] .field input, [data-theme="1999"] .field select,
+[data-theme="1999"] .gate input, [data-theme="1999"] .inline-form input,
+[data-theme="1999"] .compose-form input, [data-theme="1999"] .compose-form textarea {
+  border-radius: 0;
+  border: 1px solid;
+  border-color: #808080 #dfdfdf #dfdfdf #808080;
+  background: #ffffff;
+}
+[data-theme="1999"] .compose-form input, [data-theme="1999"] .compose-form textarea {
+  padding: 6px 8px;
+}
+[data-theme="1999"] .compose-to { border-bottom: none !important; }
+[data-theme="1999"] .compose-btns { background: #c0c0c0; border-top-color: #808080; }
+[data-theme="1999"] .nudge {
+  background: #c0c0c0;
+  border-bottom: 1px solid #808080;
+}
+[data-theme="1999"] .toast {
+  border-radius: 0;
+  background: #000080;
+  color: #ffffff;
+}
+[data-theme="1999"] .toast .btn { background: #c0c0c0; color: #101010; }
+[data-theme="1999"] .kbd {
+  border-radius: 0;
+  background: #c0c0c0;
+  border-color: #dfdfdf #404040 #404040 #dfdfdf;
+}
+[data-theme="1999"] .chip, [data-theme="1999"] .attach-chip,
+[data-theme="1999"] .img-notice { border-radius: 0; }
+[data-theme="1999"] .img-notice {
+  background: #c0c0c0;
+  border: 1px solid;
+  border-color: #dfdfdf #404040 #404040 #dfdfdf;
+}
 
 [data-theme="vapor"] body {
   background: linear-gradient(180deg, #140a24 0%, #2d1150 55%, #7c2a86 100%) fixed;
@@ -492,6 +528,7 @@ button { font: inherit; cursor: pointer; border: none; background: none; color: 
 @keyframes rise { from { opacity: 0; transform: translateY(6px); } }
 @keyframes fadein { from { opacity: 0; } }
 @keyframes shimmer { to { background-position: 200% 0; } }
+@keyframes sync-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
@@ -525,6 +562,7 @@ button { font: inherit; cursor: pointer; border: none; background: none; color: 
   color: var(--ink-3); display: inline-flex; align-items: center; justify-content: center;
 }
 .btn-icon:hover { background: var(--hover); color: var(--ink); }
+.sync-button.syncing svg { animation: sync-spin 0.8s linear infinite; }
 
 .kbd {
   font-family: var(--sans); font-size: var(--t-xs); font-weight: 700; line-height: 1.5;
@@ -1042,6 +1080,13 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 .compose-to { font-size: var(--t-md); border-bottom: 1px solid var(--line) !important; padding-bottom: var(--sp-2) !important; }
 .compose-subject { font-family: var(--serif); font-size: 22px; font-weight: 680; letter-spacing: -0.018em; }
 .compose-body { flex: 1; min-height: 220px; resize: none; line-height: 1.62; font-size: var(--t-lg); }
+.compose-body.html-source { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: var(--t-sm); line-height: 1.5; }
+.compose-modes { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-1) 0 0; }
+.compose-modes-note { font-size: var(--t-xs); color: var(--ink-3); }
+.compose-preview {
+  flex: 1; min-height: 220px; width: 100%; border: 1px solid var(--line);
+  border-radius: var(--r-md, 8px); background: #ffffff; color: #101010;
+}
 .compose-btns {
   display: flex; align-items: center; gap: var(--sp-3); justify-content: flex-end;
   padding: var(--sp-3) var(--sp-6); border-top: 1px solid var(--line); background: var(--bg);

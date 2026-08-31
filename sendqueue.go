@@ -7,7 +7,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"html"
 	"net/http"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,15 +41,22 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		To        string `json:"to"`
 		Subject   string `json:"subject"`
 		Text      string `json:"text"`
+		HTML      string `json:"html"` // optional rich body; sent as multipart/alternative with Text
 		ReplyToID string `json:"reply_to_message_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
-	if req.To == "" || req.Subject == "" || req.Text == "" {
-		writeProblem(w, http.StatusUnprocessableEntity, "Missing Fields", "to, subject and text are required")
+	if req.To == "" || req.Subject == "" || (req.Text == "" && strings.TrimSpace(req.HTML) == "") {
+		writeProblem(w, http.StatusUnprocessableEntity, "Missing Fields", "to, subject and a body (text or html) are required")
 		return
+	}
+	if strings.ContainsAny(strings.TrimSpace(req.HTML), "\r") {
+		req.HTML = strings.ReplaceAll(strings.ReplaceAll(req.HTML, "\r\n", "\n"), "\r", "\n")
+	}
+	if req.Text == "" {
+		req.Text = htmlFallbackText(req.HTML)
 	}
 	uid, err := a.userID(r.Context())
 	if err != nil {
@@ -93,6 +103,7 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		outgoing = mail.ReplyTo(parent, from, req.Text)
+		outgoing.HTML = req.HTML
 		a.enqueue(w, deliver, outgoing)
 		return
 	}
@@ -107,8 +118,53 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		To:      []mail.Address{{Email: req.To}},
 		Subject: req.Subject,
 		Text:    req.Text,
+		HTML:    req.HTML,
 	}
 	a.enqueue(w, deliver, outgoing)
+}
+
+// htmlFallbackText derives the plain-text alternative for an HTML-only
+// composition. It is a readability fallback, not a faithful conversion:
+// block-level tags become line breaks, list items keep a bullet, entities
+// decode, and the rest of the markup drops away so plain-text clients never
+// see tags.
+var htmlBreakRe = regexp.MustCompile(`(?i)<br\s*/?>|</?p[^>]*>|</div>|</tr>|</li>|<li>`)
+var htmlCollapseRe = regexp.MustCompile(`\n{3,}`)
+
+func htmlFallbackText(htmlBody string) string {
+	text := htmlBreakRe.ReplaceAllStringFunc(htmlBody, func(tag string) string {
+		if strings.EqualFold(tag, "<li>") {
+			return "- "
+		}
+		return "\n"
+	})
+	text = stripTags(text)
+	text = html.UnescapeString(text)
+	text = htmlCollapseRe.ReplaceAllString(text, "\n\n")
+	lines := strings.Split(text, "\n")
+	var out []string
+	for _, line := range lines {
+		out = append(out, strings.TrimRight(line, " \t"))
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+func stripTags(s string) string {
+	var b strings.Builder
+	depth := 0
+	for _, r := range s {
+		switch {
+		case r == '<':
+			depth++
+		case r == '>':
+			if depth > 0 {
+				depth--
+			}
+		case depth == 0:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func (a *App) deliveryFor(ctx context.Context, account mail.AccountID) (deliverFunc, mail.Address, bool) {

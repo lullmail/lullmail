@@ -51,7 +51,8 @@ func (a *App) listAccountsJSON(w http.ResponseWriter, r *http.Request) {
 		       COALESCE(ea.last_sync_at::text,''), COALESCE(ea.last_error,''),
 		       (SELECT count(*) FROM mail_messages m WHERE m.account_id = ea.mirror_account_id),
 		       (SELECT count(*) FROM hey_messages h
-		         JOIN mail_messages m ON m.id = h.message_id AND m.account_id = ea.mirror_account_id
+		         JOIN mail_messages m ON m.account_id = h.account_id AND m.id = h.message_id
+		          AND m.account_id = ea.mirror_account_id
 		         WHERE h.user_id = ea.user_id AND h.bucket = 'screener')
 		FROM email_accounts ea
 		WHERE ea.user_id = $1 ORDER BY ea.created_at`, uid)
@@ -92,7 +93,7 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 		SMTPHost     string `json:"smtp_host"`
 		SMTPPort     int    `json:"smtp_port"`
 		Label        string `json:"label"`
-		BackfillDays int    `json:"backfill_days"`
+		BackfillDays *int   `json:"backfill_days"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
@@ -119,8 +120,15 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 			req.Port = 993
 		}
 	}
-	if req.BackfillDays == 0 {
-		req.BackfillDays = 90
+	// Pointer field: omitted means the 90-day default, an explicit 0 means
+	// "All history" — the two must not collapse into one value.
+	backfill := 90
+	if req.BackfillDays != nil {
+		if *req.BackfillDays < 0 || *req.BackfillDays > 3650 {
+			writeProblem(w, http.StatusUnprocessableEntity, "Invalid Backfill", "days must be 0 (all history) through 3650")
+			return
+		}
+		backfill = *req.BackfillDays
 	}
 
 	cred := mail.Credential{
@@ -186,7 +194,7 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 		   smtp_host, smtp_port, cred_ciphertext, backfill_days)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
 		uid, string(mirrorID), req.Provider, req.Address, req.Label, req.Username,
-		req.Host, req.Port, req.SMTPHost, req.SMTPPort, ciphertext, req.BackfillDays)
+		req.Host, req.Port, req.SMTPHost, req.SMTPPort, ciphertext, backfill)
 	if err != nil {
 		// Do not orphan the mirror row: nothing would own or clean it.
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM mail_accounts WHERE id=$1`, mirrorID)
@@ -202,9 +210,7 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 	// polls account status while envelopes land.
 	go func() {
 		ctx := context.Background()
-		a.syncAccount(ctx, mail.AccountID(mirrorID))
-		a.classifyUser(ctx, uid)
-		a.sendPushForUser(ctx, uid)
+		_ = a.syncAccount(ctx, mail.AccountID(mirrorID))
 	}()
 
 	writeJSON(w, map[string]any{"id": mirrorID, "mailboxes": len(boxes), "with_roles": roleCount})
@@ -224,11 +230,15 @@ func (a *App) handleAccountItem(w http.ResponseWriter, r *http.Request) {
 			a.updateRetention(w, r, id)
 			return
 		}
+		if r.URL.Query().Get("op") == "backfill" {
+			a.updateBackfill(w, r, id)
+			return
+		}
 		if r.URL.Query().Get("op") == "sync_enabled" {
 			a.updateSyncEnabled(w, r, id)
 			return
 		}
-		writeProblem(w, http.StatusBadRequest, "Unknown Op", "use ?op=sync, ?op=retention, or ?op=sync_enabled")
+		writeProblem(w, http.StatusBadRequest, "Unknown Op", "use ?op=sync, ?op=retention, ?op=backfill, or ?op=sync_enabled")
 	default:
 		writeProblem(w, http.StatusMethodNotAllowed, "Method Not Allowed", "use DELETE or POST ?op=sync")
 	}
@@ -259,6 +269,52 @@ func (a *App) updateSyncEnabled(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 	writeJSON(w, map[string]any{"sync_enabled": req.Enabled})
+}
+
+// updateBackfill sets how much history the product organizes. Zero means
+// "All history": every mirrored message is eligible for the filing views.
+// Increasing the window classifies newly included historical mail; shrinking
+// it removes only product filing rows outside the window — the local mirror
+// is retention's business and provider mail is never touched.
+func (a *App) updateBackfill(w http.ResponseWriter, r *http.Request, id string) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, 500, "Lookup Failed", err.Error())
+		return
+	}
+	var req struct {
+		Days int `json:"days"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil || req.Days < 0 || req.Days > 3650 {
+		writeProblem(w, 422, "Invalid Backfill", "days must be 0 (all history) through 3650")
+		return
+	}
+	var mirror string
+	err = a.db.QueryRowContext(r.Context(),
+		`UPDATE email_accounts SET backfill_days=$1 WHERE id=$2 AND user_id=$3 RETURNING mirror_account_id`,
+		req.Days, id, uid).Scan(&mirror)
+	if err != nil {
+		writeProblem(w, 404, "Not Found", "no such account")
+		return
+	}
+	// Shrink: drop filing rows that left the window (mirror data stays).
+	if _, err := a.db.ExecContext(r.Context(), `
+		DELETE FROM hey_messages WHERE user_id=$1 AND account_id=$2 AND message_id IN (
+		  SELECT m.id FROM mail_messages m
+		  WHERE m.account_id=$2
+		    AND $3 > 0
+		    AND (m.received_at AT TIME ZONE 'UTC') <= now() - make_interval(days => $3))`,
+		uid, mirror, req.Days); err != nil {
+		writeProblem(w, 500, "Backfill Failed", err.Error())
+		return
+	}
+	// Grow (or no-op): classify whatever the window now includes.
+	if err := a.classifyUser(r.Context(), uid); err != nil {
+		writeProblem(w, 500, "Backfill Failed", err.Error())
+		return
+	}
+	a.events.publish(uid, syncEvent{Type: "sync-finished", AccountID: id, Changed: true})
+	writeJSON(w, map[string]any{"backfill_days": req.Days})
 }
 
 func (a *App) updateRetention(w http.ResponseWriter, r *http.Request, id string) {
@@ -320,7 +376,7 @@ func (a *App) applyRetention(ctx context.Context, uid string) error {
 			query string
 			args  []any
 		}{
-			{`DELETE FROM hey_messages WHERE user_id=$1 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$2 AND (received_at AT TIME ZONE 'UTC') < now()-($3 * interval '1 day'))`, []any{uid, p.mirror, p.days}},
+			{`DELETE FROM hey_messages WHERE user_id=$1 AND account_id=$2 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$2 AND (received_at AT TIME ZONE 'UTC') < now()-($3 * interval '1 day'))`, []any{uid, p.mirror, p.days}},
 			{`DELETE FROM mail_message_mailboxes WHERE account_id=$1 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$1 AND (received_at AT TIME ZONE 'UTC') < now()-($2 * interval '1 day'))`, []any{p.mirror, p.days}},
 			{`DELETE FROM mail_bodies WHERE account_id=$1 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$1 AND (received_at AT TIME ZONE 'UTC') < now()-($2 * interval '1 day'))`, []any{p.mirror, p.days}},
 			{`DELETE FROM mail_messages WHERE account_id=$1 AND (received_at AT TIME ZONE 'UTC') < now()-($2 * interval '1 day')`, []any{p.mirror, p.days}},
@@ -367,7 +423,7 @@ func (a *App) deleteAccount(w http.ResponseWriter, r *http.Request, id string) {
 		query string
 		args  []any
 	}{
-		{`DELETE FROM hey_messages WHERE user_id = $1 AND message_id IN
+		{`DELETE FROM hey_messages WHERE user_id = $1 AND account_id = $2 AND message_id IN
 		   (SELECT id FROM mail_messages WHERE account_id = $2)`, []any{uid, mirror}},
 		{`DELETE FROM mail_message_mailboxes WHERE account_id = $1`, []any{mirror}},
 		{`DELETE FROM mail_bodies WHERE account_id = $1`, []any{mirror}},
@@ -403,38 +459,82 @@ func (a *App) triggerSync(w http.ResponseWriter, r *http.Request, id string) {
 		writeProblem(w, http.StatusNotFound, "Not Found", "no such account")
 		return
 	}
+	if r.URL.Query().Get("wait") == "1" {
+		if err := a.syncAccount(r.Context(), mail.AccountID(mirror)); err != nil {
+			writeProblem(w, http.StatusBadGateway, "Sync Failed", err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"synced": id})
+		return
+	}
 	go func() {
-		ctx := context.Background()
-		a.syncAccount(ctx, mail.AccountID(mirror))
-		a.classifyUser(ctx, uid)
-		a.sendPushForUser(ctx, uid)
+		_ = a.syncAccount(context.Background(), mail.AccountID(mirror))
 	}()
 	writeJSON(w, map[string]any{"syncing": id})
 }
 
 // syncAccount dials with the stored credential and runs one full sync,
 // recording outcome on the account row.
-func (a *App) syncAccount(ctx context.Context, acct mail.AccountID) {
+func (a *App) syncAccount(ctx context.Context, acct mail.AccountID) error {
 	cred, err := a.Token(ctx, acct)
 	if err != nil {
-		a.log.Error("sync: credential lookup failed", "account", acct, "err", err)
-		return
+		a.finishSync(ctx, acct, nil, err)
+		return err
 	}
 	resolve := newResolver()
 	adapter, release, err := resolve(ctx, acct, cred)
 	if err != nil {
-		a.db.ExecContext(ctx, `UPDATE email_accounts SET last_error = $1 WHERE mirror_account_id = $2`, err.Error(), string(acct))
-		return
+		a.finishSync(ctx, acct, nil, err)
+		return err
 	}
 	defer release()
-	_, err = a.eng.SyncAccount(ctx, acct, adapter)
-	errMsg := ""
-	if err != nil {
-		errMsg = err.Error()
+	reports, err := a.eng.SyncAccount(ctx, acct, adapter)
+	a.finishSync(ctx, acct, reports, err)
+	return err
+}
+
+func (a *App) finishSync(ctx context.Context, acct mail.AccountID, reports []mail.SyncReport, syncErr error) {
+	// A wait=1 browser request may vanish mid-sync; the outcome still has to
+	// land durably, so finish on a detached context rather than not at all.
+	if ctx.Err() != nil {
+		ctx = context.Background()
 	}
-	a.db.ExecContext(ctx,
-		`UPDATE email_accounts SET last_sync_at = now(), last_error = $1 WHERE mirror_account_id = $2`,
-		errMsg, string(acct))
+	changed := false
+	for _, report := range reports {
+		changed = changed || report.Created+report.Updated+report.Deleted > 0
+	}
+	ev := syncEvent{Type: "sync-finished", Changed: changed}
+	if syncErr != nil {
+		var accountID, uid string
+		if err := a.db.QueryRowContext(ctx,
+			`UPDATE email_accounts SET last_error=$1 WHERE mirror_account_id=$2 RETURNING id,user_id`,
+			syncErr.Error(), string(acct)).Scan(&accountID, &uid); err != nil {
+			a.log.Error("record sync error failed", "account", acct, "err", err)
+			return
+		}
+		// Durable first, hint second: a browser reloading on this event must
+		// see last_error already set.
+		ev.AccountID = accountID
+		ev.Error = syncErr.Error()
+		a.events.publish(uid, ev)
+		return
+	}
+	var accountID, uid string
+	if err := a.db.QueryRowContext(ctx,
+		`UPDATE email_accounts SET last_sync_at=now(), last_error=NULL WHERE mirror_account_id=$1 RETURNING id,user_id`,
+		string(acct)).Scan(&accountID, &uid); err != nil {
+		a.log.Error("record sync success failed", "account", acct, "err", err)
+		return
+	}
+	if err := a.classifyUser(ctx, uid); err != nil {
+		a.log.Error("post-sync classify failed", "account", acct, "err", err)
+	}
+	// Publish only after classification completes, so a reloading browser
+	// never lands between envelope insertion and bucket insertion.
+	if changed {
+		a.sendPushForUser(ctx, uid)
+		a.events.publish(uid, syncEvent{Type: "sync-finished", AccountID: accountID, Changed: true})
+	}
 }
 
 func newID() string {

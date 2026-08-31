@@ -7,9 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
-	stdmail "net/mail"
 	"net/url"
 	"strings"
 	"time"
@@ -138,9 +136,7 @@ func (a *App) handleOAuthCallback(w http.ResponseWriter, r *http.Request, provid
 	}
 	go func() {
 		ctx := context.Background()
-		a.syncAccount(ctx, mail.AccountID(mirror))
-		a.classifyUser(ctx, uid)
-		a.sendPushForUser(ctx, uid)
+		_ = a.syncAccount(ctx, mail.AccountID(mirror))
 	}()
 	http.Redirect(w, r, "/settings/accounts?connected="+url.QueryEscape(provider)+"&mailboxes="+fmt.Sprint(len(boxes)), http.StatusSeeOther)
 }
@@ -215,45 +211,19 @@ func (a *App) oauthToken(ctx context.Context, provider, account, address, sealed
 }
 
 func safeHeader(value string) string { return strings.NewReplacer("\r", " ", "\n", " ").Replace(value) }
-func addressHeader(items []mail.Address) string {
-	out := make([]string, 0, len(items))
-	for _, item := range items {
-		out = append(out, (&stdmail.Address{Name: safeHeader(item.Name), Address: item.Email}).String())
-	}
-	return strings.Join(out, ", ")
-}
-
-func renderOAuthMessage(out *mail.Outgoing) []byte {
-	var b strings.Builder
-	fmt.Fprintf(&b, "From: %s\r\n", addressHeader([]mail.Address{out.From}))
-	fmt.Fprintf(&b, "To: %s\r\n", addressHeader(out.To))
-	if len(out.Cc) > 0 {
-		fmt.Fprintf(&b, "Cc: %s\r\n", addressHeader(out.Cc))
-	}
-	fmt.Fprintf(&b, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", safeHeader(out.Subject)))
-	fmt.Fprintf(&b, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
-	b.WriteString("MIME-Version: 1.0\r\n")
-	if out.InReplyTo != "" {
-		fmt.Fprintf(&b, "In-Reply-To: %s\r\n", safeHeader(out.InReplyTo))
-	}
-	if len(out.References) > 0 {
-		fmt.Fprintf(&b, "References: %s\r\n", safeHeader(strings.Join(out.References, " ")))
-	}
-	b.WriteString("Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n")
-	b.WriteString(strings.ReplaceAll(out.Text, "\n", "\r\n"))
-	if !strings.HasSuffix(b.String(), "\r\n") {
-		b.WriteString("\r\n")
-	}
-	return []byte(b.String())
-}
 
 func (a *App) sendOAuth(ctx context.Context, provider, account string, out *mail.Outgoing) error {
 	cred, err := a.Token(ctx, mail.AccountID(account))
 	if err != nil {
 		return err
 	}
-	raw := renderOAuthMessage(out)
 	if provider == "gmail" {
+		// Raw MIME via the engine renderer: identical multipart handling
+		// to SMTP, including the HTML part when one is set.
+		raw, err := out.Render()
+		if err != nil {
+			return err
+		}
 		body, _ := json.Marshal(map[string]string{"raw": base64.RawURLEncoding.EncodeToString(raw)})
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://gmail.googleapis.com/gmail/v1/users/me/messages/send", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -283,7 +253,14 @@ func (a *App) sendOAuth(ctx context.Context, provider, account string, out *mail
 	if len(out.References) > 0 {
 		headers = append(headers, map[string]string{"name": "References", "value": strings.Join(out.References, " ")})
 	}
-	payload := map[string]any{"message": map[string]any{"subject": out.Subject, "body": map[string]string{"contentType": "Text", "content": out.Text}, "toRecipients": recipients(out.To), "ccRecipients": recipients(out.Cc), "bccRecipients": recipients(out.Bcc), "internetMessageHeaders": headers}, "saveToSentItems": true}
+	// Graph has no multipart submission: HTML messages send as HTML and
+	// plain messages as plain, with the alternative part already carried
+	// inside the SMTP-rendered copy for IMAP providers.
+	contentType, content := "Text", out.Text
+	if out.HTML != "" {
+		contentType, content = "HTML", out.HTML
+	}
+	payload := map[string]any{"message": map[string]any{"subject": out.Subject, "body": map[string]string{"contentType": contentType, "content": content}, "toRecipients": recipients(out.To), "ccRecipients": recipients(out.Cc), "bccRecipients": recipients(out.Bcc), "internetMessageHeaders": headers}, "saveToSentItems": true}
 	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://graph.microsoft.com/v1.0/me/sendMail", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

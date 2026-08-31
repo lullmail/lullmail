@@ -61,7 +61,7 @@ export function Palette() {
       .catch(() => setFolderRows([]));
   }, [folder]);
 
-  const openRow = (row: Row) => { close(); openThread(row.thread_id, null); };
+  const openRow = (row: Row) => { close(); openThread(row.thread_id, row.account, null); };
 
   const sections = useMemo(() => {
     const needle = q.trim().toLowerCase();

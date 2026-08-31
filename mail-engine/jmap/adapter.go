@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,10 +27,11 @@ const (
 
 // Adapter is a JMAP client bound to one account.
 type Adapter struct {
-	http      *http.Client
-	apiURL    string
-	accountID string
-	token     string
+	http        *http.Client
+	apiURL      string
+	downloadURL string
+	accountID   string
+	token       string
 }
 
 // Config describes how to reach a JMAP server.
@@ -46,6 +49,7 @@ type Config struct {
 
 type session struct {
 	APIURL          string            `json:"apiUrl"`
+	DownloadURL     string            `json:"downloadUrl"`
 	PrimaryAccounts map[string]string `json:"primaryAccounts"`
 }
 
@@ -84,7 +88,10 @@ func Dial(ctx context.Context, cfg Config) (*Adapter, error) {
 		return nil, fmt.Errorf("jmap: session lists no primary mail account")
 	}
 
-	return &Adapter{http: hc, apiURL: s.APIURL, accountID: acct, token: cfg.Token}, nil
+	if s.APIURL == "" || s.DownloadURL == "" {
+		return nil, fmt.Errorf("jmap: session is missing apiUrl or downloadUrl")
+	}
+	return &Adapter{http: hc, apiURL: s.APIURL, downloadURL: s.DownloadURL, accountID: acct, token: cfg.Token}, nil
 }
 
 func (a *Adapter) Provider() mail.Provider { return mail.ProviderJMAP }
@@ -223,7 +230,14 @@ func roleFrom(role string) mail.Role {
 // Sync returns changes since cur using Email/changes.
 func (a *Adapter) Sync(ctx context.Context, box mail.MailboxID, cur mail.Cursor) (*mail.Changes, error) {
 	if cur == "" {
-		return a.initialSync(ctx, box)
+		return a.initialSync(ctx, box, 0)
+	}
+	if strings.HasPrefix(string(cur), "jmap-initial:") {
+		position, err := strconv.Atoi(strings.TrimPrefix(string(cur), "jmap-initial:"))
+		if err != nil || position < 0 {
+			return &mail.Changes{Reset: true}, nil
+		}
+		return a.initialSync(ctx, box, position)
 	}
 
 	res, err := a.call(ctx, [3]any{"Email/changes", map[string]any{
@@ -293,12 +307,14 @@ func (a *Adapter) Sync(ctx context.Context, box mail.MailboxID, cur mail.Cursor)
 }
 
 // initialSync enumerates a mailbox from empty via Email/query.
-func (a *Adapter) initialSync(ctx context.Context, box mail.MailboxID) (*mail.Changes, error) {
+func (a *Adapter) initialSync(ctx context.Context, box mail.MailboxID, position int) (*mail.Changes, error) {
 	res, err := a.call(ctx,
 		[3]any{"Email/query", map[string]any{
-			"accountId": a.accountID,
-			"filter":    map[string]any{"inMailbox": string(box)},
-			"limit":     500,
+			"accountId":      a.accountID,
+			"filter":         map[string]any{"inMailbox": string(box)},
+			"position":       position,
+			"limit":          500,
+			"calculateTotal": true,
 		}, "0"},
 		[3]any{"Email/get", map[string]any{
 			"accountId": a.accountID,
@@ -324,7 +340,21 @@ func (a *Adapter) initialSync(ctx context.Context, box mail.MailboxID) (*mail.Ch
 	}
 	_ = json.Unmarshal(res[1], &state)
 
-	changes := &mail.Changes{Next: mail.Cursor(state.State), Complete: true}
+	var query struct {
+		IDs      []string `json:"ids"`
+		Position int      `json:"position"`
+		Total    int      `json:"total"`
+	}
+	if err := json.Unmarshal(res[0], &query); err != nil {
+		return nil, fmt.Errorf("jmap: decode query page: %w", err)
+	}
+
+	more := len(query.IDs) > 0 && query.Position+len(query.IDs) < query.Total
+	next := mail.Cursor(state.State)
+	if more {
+		next = mail.Cursor("jmap-initial:" + strconv.Itoa(query.Position+len(query.IDs)))
+	}
+	changes := &mail.Changes{Next: next, More: more, EnumerationStart: position == 0, Complete: !more}
 	for i := range envs {
 		e := envs[i]
 		changes.Changes = append(changes.Changes, mail.Change{
@@ -540,17 +570,98 @@ func (a *Adapter) Body(ctx context.Context, id mail.MessageID) (*mail.Body, erro
 	return body, nil
 }
 
-// Raw downloads the original message via the blob download endpoint.
-//
-// Not implemented: the download URL is a per-session template from the
-// session resource, and nothing in the mirror needs the raw bytes when
-// Body already returns parsed content.
 func (a *Adapter) Raw(ctx context.Context, id mail.MessageID) (io.ReadCloser, error) {
-	return nil, fmt.Errorf("jmap: raw message download not implemented")
+	var out struct {
+		List []struct {
+			BlobID string `json:"blobId"`
+		} `json:"list"`
+	}
+	res, err := a.call(ctx, [3]any{"Email/get", map[string]any{
+		"accountId": a.accountID, "ids": []string{nativeID(id)}, "properties": []string{"blobId"},
+	}, "0"})
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(res[0], &out); err != nil {
+		return nil, fmt.Errorf("jmap: decode raw blob: %w", err)
+	}
+	if len(out.List) == 0 || out.List[0].BlobID == "" {
+		return nil, fmt.Errorf("jmap: %w: message %s", mail.ErrNotFound, id)
+	}
+	return a.download(ctx, out.List[0].BlobID, "message.eml", "message/rfc822")
 }
 
 func (a *Adapter) Attachment(ctx context.Context, id mail.MessageID, partID string) (io.ReadCloser, error) {
-	return nil, fmt.Errorf("jmap: attachment download not implemented")
+	var out struct {
+		List []struct {
+			Attachments []struct {
+				PartID string `json:"partId"`
+				BlobID string `json:"blobId"`
+				Type   string `json:"type"`
+				Name   string `json:"name"`
+			} `json:"attachments"`
+		} `json:"list"`
+	}
+	res, err := a.call(ctx, [3]any{"Email/get", map[string]any{
+		"accountId": a.accountID, "ids": []string{nativeID(id)}, "properties": []string{"attachments"},
+	}, "0"})
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(res[0], &out); err != nil {
+		return nil, fmt.Errorf("jmap: decode attachment blobs: %w", err)
+	}
+	if len(out.List) > 0 {
+		for _, part := range out.List[0].Attachments {
+			if part.PartID == partID && part.BlobID != "" {
+				return a.download(ctx, part.BlobID, part.Name, part.Type)
+			}
+		}
+	}
+	return nil, fmt.Errorf("jmap: %w: attachment %s", mail.ErrNotFound, partID)
+}
+
+// download expands the level-1 URI template advertised by the JMAP session
+// and returns the authenticated immutable blob stream.
+func (a *Adapter) download(ctx context.Context, blobID, name, mediaType string) (io.ReadCloser, error) {
+	if name == "" {
+		name = "download"
+	}
+	if mediaType == "" {
+		mediaType = "application/octet-stream"
+	}
+	values := map[string]string{
+		"accountId": a.accountID, "blobId": blobID, "name": name, "type": mediaType,
+	}
+	endpoint := a.downloadURL
+	for key, value := range values {
+		endpoint = strings.ReplaceAll(endpoint, "{"+key+"}", url.PathEscape(value))
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("jmap: download request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+a.token)
+	resp, err := a.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("jmap: download: %w", err)
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return resp.Body, nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		resp.Body.Close()
+		return nil, fmt.Errorf("jmap: download token rejected: %w", mail.ErrReauthRequired)
+	case http.StatusTooManyRequests:
+		resp.Body.Close()
+		return nil, fmt.Errorf("jmap: download throttled: %w", mail.ErrRateLimited)
+	case http.StatusNotFound:
+		resp.Body.Close()
+		return nil, fmt.Errorf("jmap: download: %w", mail.ErrNotFound)
+	default:
+		resp.Body.Close()
+		return nil, fmt.Errorf("jmap: download: unexpected status %d", resp.StatusCode)
+	}
 }
 
 // Apply pushes a mutation via Email/set.
