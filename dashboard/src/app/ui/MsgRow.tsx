@@ -1,6 +1,6 @@
 import { useState } from "preact/hooks";
 import type { Row } from "../lib/types";
-import { checked, cursor, list, toggleChecked } from "../lib/store";
+import { checked, cursor, list, rowIdentity, toggleChecked } from "../lib/store";
 import { markDone, moveTo, openThread, snooze } from "../lib/actions";
 import { dayLabel, fmtDate, splitFrom } from "../lib/fmt";
 import { Highlight } from "./bits";
@@ -41,7 +41,7 @@ function QuickActs({ row }: { row: Row }) {
     and a 40px colour disc on every line is what made this read like Gmail. */
 export function MsgRow({ row, index, q }: { row: Row; index: number; q?: string }) {
   const who = splitFrom(row.from);
-  const isChecked = checked.value.has(row.message_id);
+  const isChecked = checked.value.has(rowIdentity(row));
   const cls = [
     "msg-row",
     row.read ? "read" : "unread",
@@ -61,7 +61,7 @@ export function MsgRow({ row, index, q }: { row: Row; index: number; q?: string 
       <button
         class="row-check" type="button"
         aria-label={isChecked ? "Deselect" : "Select"} aria-pressed={isChecked}
-        onClick={(ev) => { ev.stopPropagation(); toggleChecked(row.message_id); }}
+        onClick={(ev) => { ev.stopPropagation(); toggleChecked(row); }}
       >
         <Icon name="check" size={11} />
       </button>
@@ -94,7 +94,7 @@ export function MsgList({ rows, q }: { rows: Row[]; q?: string }) {
       last = label;
       out.push(<div class="date-rule" key={"rule-" + label}><span>{label}</span></div>);
     }
-    out.push(<MsgRow row={row} index={i} q={q} key={row.message_id} />);
+    out.push(<MsgRow row={row} index={i} q={q} key={rowIdentity(row)} />);
   });
   return <div class={"msg-list" + (checked.value.size ? " has-selection" : "")}>{out}</div>;
 }

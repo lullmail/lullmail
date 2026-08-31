@@ -80,6 +80,7 @@ function Bar({ row }: { row: Row }) {
     openCompose({
       to: who.email,
       subject: /^re:/i.test(last.subject) ? last.subject : "Re: " + (last.subject || ""),
+      accountId: last.account,
       replyToId: last.id,
       context: "Replying to " + (who.name || who.email),
     });

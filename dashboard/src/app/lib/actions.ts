@@ -105,7 +105,7 @@ export async function markDone(rows: Row[]) {
   const previouslyUnread = rows.filter((r) => !r.read);
   try {
     await actMany(rows, "read");
-    if (rows.some((r) => r.thread_id === reader.value.threadId)) closeReader();
+    if (rows.some((r) => r.thread_id === reader.value.threadId && r.account === reader.value.account)) closeReader();
     afterMutation();
     showToast(describe(rows, "Done"), () => undoRead(previouslyUnread));
   } catch (e) {
@@ -158,7 +158,7 @@ export async function moveTo(rows: Row[], to: Bucket) {
   const before: Before[] = rows.map((r) => ({ row: r, ...snoozeUndoState(r) }));
   try {
     await actMany(rows, to);
-    if (rows.some((r) => r.thread_id === reader.value.threadId)) closeReader();
+    if (rows.some((r) => r.thread_id === reader.value.threadId && r.account === reader.value.account)) closeReader();
     afterMutation();
     showToast(describe(rows, "Moved to " + BUCKET_LABEL[to]), () => restore(before));
   } catch (e) {
@@ -172,7 +172,7 @@ export async function snooze(rows: Row[], days: number) {
   const before: Before[] = rows.map((r) => ({ row: r, ...snoozeUndoState(r) }));
   try {
     await actMany(rows, days > 0 ? "set_aside" : "later", days > 0 ? days : undefined);
-    if (rows.some((r) => r.thread_id === reader.value.threadId)) closeReader();
+    if (rows.some((r) => r.thread_id === reader.value.threadId && r.account === reader.value.account)) closeReader();
     afterMutation();
     const when = days === 0 ? "for someday" : days === 1 ? "until tomorrow" : "for " + days + " days";
     showToast(describe(rows, "Snoozed " + when), () => restore(before));
@@ -334,20 +334,20 @@ export async function openThread(threadId: string, account: string, bucket: List
   rememberListScroll();
   window.scrollTo({ top: 0 });
   reader.value = {
-    threadId, bucket, loading: true, error: null, messages: [], imagesOk: new Set(),
+    threadId, account, bucket, loading: true, error: null, messages: [], imagesOk: new Set(),
   };
   try {
     const messages = await api<Message[]>("/threads/" + encodeURIComponent(threadId) + "?account=" + encodeURIComponent(account));
-    if (reader.value.threadId !== threadId) return; // superseded by a faster click
+    if (reader.value.threadId !== threadId || reader.value.account !== account) return;
     reader.value = { ...reader.value, loading: false, messages };
     const last = messages[messages.length - 1];
     if (last) {
       await actOn(last.account, last.id, "read");
       refreshCounts();
-      markRowRead(threadId);
+      markRowRead(threadId, account);
     }
   } catch (e) {
-    if (reader.value.threadId !== threadId) return;
+    if (reader.value.threadId !== threadId || reader.value.account !== account) return;
     reader.value = {
       ...reader.value, loading: false,
       error: e instanceof Error ? e.message : "Could not open that thread",
@@ -356,12 +356,12 @@ export async function openThread(threadId: string, account: string, bucket: List
 }
 
 /** Greys the row immediately instead of waiting for a whole-list refetch. */
-function markRowRead(threadId: string) {
+function markRowRead(threadId: string, account: string) {
   const l = list.value;
   if (l.kind !== "rows") return;
   let touched = false;
   const rows = l.rows.map((r) => {
-    if (r.thread_id === threadId && !r.read) {
+    if (r.thread_id === threadId && r.account === account && !r.read) {
       touched = true;
       return { ...r, read: true };
     }
@@ -378,6 +378,7 @@ export interface SendInput {
   text: string;
   /** Optional rich body; the server derives the plain-text alternative when absent. */
   html?: string;
+  accountId?: string;
   replyToId?: string;
 }
 
@@ -389,6 +390,7 @@ export async function sendMail(input: SendInput): Promise<boolean> {
         subject: input.subject,
         text: input.text,
         html: input.html || "",
+        account_id: input.accountId || "",
         reply_to_message_id: input.replyToId || "",
       },
     });
@@ -403,6 +405,7 @@ export async function sendMail(input: SendInput): Promise<boolean> {
             to: input.to, subject: input.subject,
             body: input.html || input.text,
             htmlMode: !!input.html,
+            accountId: input.accountId,
             replyToId: input.replyToId,
           });
           showToast("Send cancelled — your draft is back");

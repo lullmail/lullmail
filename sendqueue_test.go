@@ -45,3 +45,19 @@ func TestHTMLFallbackText(t *testing.T) {
 		})
 	}
 }
+
+func TestOutboundRecipientRejectsHeaderInjection(t *testing.T) {
+	for _, tc := range []struct{ to, subject string }{
+		{"person@example.com\r\nBcc: victim@example.com", "hello"},
+		{"person@example.com", "hello\nBcc: victim@example.com"},
+		{"not an address", "hello"},
+	} {
+		if _, ok := outboundRecipient(tc.to, tc.subject); ok {
+			t.Errorf("outboundRecipient(%q, %q) accepted", tc.to, tc.subject)
+		}
+	}
+	got, ok := outboundRecipient("Person <person@example.com>", "hello")
+	if !ok || got.Name != "Person" || got.Email != "person@example.com" {
+		t.Fatalf("valid recipient = %+v, %v", got, ok)
+	}
+}

@@ -174,10 +174,10 @@ func (a *App) handleMessageEML(w http.ResponseWriter, r *http.Request) {
 	}
 	var address string
 	err = a.db.QueryRowContext(r.Context(), `
-		SELECT ea.address FROM email_accounts ea
+		SELECT ea.address, ea.mirror_account_id FROM email_accounts ea
 		JOIN mail_messages m ON m.account_id = ea.mirror_account_id
-		WHERE ea.user_id = $1 AND ea.mirror_account_id = $2 AND m.id = $3`,
-		uid, mirrorID, messageID).Scan(&address)
+		WHERE ea.user_id = $1 AND (ea.mirror_account_id = $2 OR ea.id::text = $2) AND m.id = $3`,
+		uid, mirrorID, messageID).Scan(&address, &mirrorID)
 	if err == sql.ErrNoRows {
 		writeProblem(w, http.StatusNotFound, "Not Found", "no such message")
 		return

@@ -1,5 +1,5 @@
 import { useState } from "preact/hooks";
-import { checked, list, resetSelection } from "../lib/store";
+import { checked, list, resetSelection, rowIdentity } from "../lib/store";
 import { markDone, markRead, moveTo, snooze } from "../lib/actions";
 import { countOf } from "../lib/fmt";
 import { Icon } from "./Icon";
@@ -12,7 +12,7 @@ export function BulkBar() {
   const ids = checked.value;
   if (!ids.size) return null;
 
-  const rows = list.value.rows.filter((r) => ids.has(r.message_id));
+  const rows = list.value.rows.filter((r) => ids.has(rowIdentity(r)));
   if (!rows.length) return null;
   const allRead = rows.every((r) => r.read);
 

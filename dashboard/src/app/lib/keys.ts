@@ -55,6 +55,7 @@ function replyToCursor() {
     openCompose({
       to: who.email,
       subject: /^re:/i.test(source.subject) ? source.subject : "Re: " + source.subject,
+      accountId: source.account,
       replyToId: source.id,
       context: "Replying to " + (who.name || who.email),
     });
@@ -65,6 +66,7 @@ function replyToCursor() {
   openCompose({
     to: who.email,
     subject: /^re:/i.test(row.subject) ? row.subject : "Re: " + row.subject,
+    accountId: row.account,
     replyToId: row.message_id,
     context: "Replying to " + (who.name || who.email),
   });
@@ -160,7 +162,7 @@ export function installKeys(): () => void {
       case "x":
         ev.preventDefault();
         learn();
-        { const at = list.value.rows[cursor.value]; if (at) toggleChecked(at.message_id); }
+        { const at = list.value.rows[cursor.value]; if (at) toggleChecked(at); }
         return;
       case "e": ev.preventDefault(); learn(); markDone(rows); return;
       // One deferral key. Filing a single message into Reading or Receipts is

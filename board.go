@@ -200,12 +200,12 @@ func (a *App) handleBoardPin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var subject string
+	var mirror, subject string
 	if err := a.db.QueryRowContext(r.Context(), `
-		SELECT m.subject FROM mail_messages m
+		SELECT m.account_id, m.subject FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-		WHERE m.account_id = $2 AND m.thread_id = $3
-		ORDER BY m.received_at DESC NULLS LAST LIMIT 1`, uid, req.Account, req.ThreadID).Scan(&subject); err != nil {
+		WHERE (m.account_id = $2 OR ea.id::text = $2) AND m.thread_id = $3
+		ORDER BY m.received_at DESC NULLS LAST LIMIT 1`, uid, req.Account, req.ThreadID).Scan(&mirror, &subject); err != nil {
 		writeProblem(w, http.StatusNotFound, "Not Found", "no such thread")
 		return
 	}
@@ -215,12 +215,12 @@ func (a *App) handleBoardPin(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO board_cards (user_id, account_id, thread_key, title) VALUES ($1, $2, $3, $4)
 		ON CONFLICT (user_id, account_id, thread_key) WHERE thread_key IS NOT NULL
 		DO UPDATE SET done_at = NULL, title = EXCLUDED.title
-		RETURNING id::text`, uid, req.Account, req.ThreadID, subject).Scan(&id)
+		RETURNING id::text`, uid, mirror, req.ThreadID, subject).Scan(&id)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Pin Failed", err.Error())
 		return
 	}
-	writeJSON(w, boardCard{CardID: id, Account: req.Account, ThreadID: req.ThreadID, Subject: subject})
+	writeJSON(w, boardCard{CardID: id, Account: mirror, ThreadID: req.ThreadID, Subject: subject})
 }
 
 // handleBoardCard creates a manual note card — the only card with no mail

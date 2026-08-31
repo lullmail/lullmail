@@ -361,6 +361,10 @@ export const list = signal<ListState>({
 export const cursor = signal<number>(-1);
 export const checked = signal<Set<string>>(new Set());
 
+export function rowIdentity(row: Pick<Row, "account" | "message_id">): string {
+  return row.account + "\u0000" + row.message_id;
+}
+
 export function setList(next: Partial<ListState>) {
   list.value = { ...list.value, ...next };
 }
@@ -370,7 +374,8 @@ export function resetSelection() {
   checked.value = new Set();
 }
 
-export function toggleChecked(id: string) {
+export function toggleChecked(row: Pick<Row, "account" | "message_id">) {
+  const id = rowIdentity(row);
   const next = new Set(checked.value);
   if (next.has(id)) next.delete(id);
   else next.add(id);
@@ -384,7 +389,7 @@ export function toggleChecked(id: string) {
 export function targetRows(): Row[] {
   const l = list.value;
   if (l.kind !== "rows") return [];
-  if (checked.value.size) return l.rows.filter((r) => checked.value.has(r.message_id));
+  if (checked.value.size) return l.rows.filter((r) => checked.value.has(rowIdentity(r)));
   if (reader.value.threadId && layout.value !== "classic") {
     const messages = reader.value.messages;
     const last = messages[messages.length - 1];
@@ -409,6 +414,7 @@ export function targetRows(): Row[] {
 
 export interface ReaderState {
   threadId: string | null;
+  account: string | null;
   bucket: ListBucket | null;
   loading: boolean;
   error: string | null;
@@ -418,7 +424,7 @@ export interface ReaderState {
 }
 
 export const reader = signal<ReaderState>({
-  threadId: null, bucket: null, loading: false, error: null, messages: [], imagesOk: new Set(),
+  threadId: null, account: null, bucket: null, loading: false, error: null, messages: [], imagesOk: new Set(),
 });
 
 const imageSenderKey = "es-image-senders";
@@ -438,7 +444,7 @@ export function rememberListScroll() {
 }
 
 export function closeReader() {
-  reader.value = { threadId: null, bucket: null, loading: false, error: null, messages: [], imagesOk: new Set() };
+  reader.value = { threadId: null, account: null, bucket: null, loading: false, error: null, messages: [], imagesOk: new Set() };
   if (typeof window !== "undefined") {
     requestAnimationFrame(() => window.scrollTo({ top: listScroll }));
   }
@@ -467,6 +473,8 @@ export interface ComposeState {
   body: string;
   /** When true the body holds HTML source, sent as a rich message. */
   htmlMode?: boolean;
+  /** Product account id for new mail; mirror account id for replies. */
+  accountId?: string;
   replyToId?: string;
   /** Shown above the fields so a reply never looks like a fresh message. */
   context?: string;
@@ -543,7 +551,11 @@ export function newDraft() {
 }
 
 function pushDraft(seed: Partial<ComposeState>) {
-  const stack = [...draftStack.value, { id: newDraftId(), to: "", subject: "", body: "", ...seed }];
+  const stack = [...draftStack.value, {
+    id: newDraftId(), to: "", subject: "", body: "",
+    accountId: seed.accountId ?? accountFilter.value,
+    ...seed,
+  }];
   draftStack.value = stack;
   draftIndex.value = stack.length - 1;
   composeOpen.value = true;

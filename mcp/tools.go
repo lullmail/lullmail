@@ -58,7 +58,7 @@ func registerTools(s *mcp.Server, c *client) {
 		if err != nil {
 			return nil, nil, errArgs("id must be an account id from list_accounts")
 		}
-		return text(c.post(ctx, "/accounts/"+id+"?op=backfill", map[string]any{"days": args.Days}))
+		return text(c.postQuery(ctx, "/accounts/"+id, map[string]any{"days": args.Days}, url.Values{"op": {"backfill"}}))
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -84,7 +84,7 @@ func registerTools(s *mcp.Server, c *client) {
 		if err != nil {
 			return nil, nil, errArgs("id must be an account id from list_accounts")
 		}
-		return text(c.post(ctx, "/accounts/"+id+"?op=sync", struct{}{}))
+		return text(c.postQuery(ctx, "/accounts/"+id, struct{}{}, url.Values{"op": {"sync"}}))
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -125,21 +125,22 @@ func registerTools(s *mcp.Server, c *client) {
 		Name:        "read_thread",
 		Description: "Read every message in one thread, oldest first, including bodies.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
-		ThreadID string `json:"thread_id" jsonschema:"thread id from list_bucket or search_mail"`
+		ThreadID  string `json:"thread_id" jsonschema:"thread id from list_bucket or search_mail"`
+		AccountID string `json:"account_id" jsonschema:"account id from list_accounts or account from the message row"`
 	}) (*mcp.CallToolResult, any, error) {
-		if args.ThreadID == "" {
-			return nil, nil, errArgs("thread_id is required")
+		if args.ThreadID == "" || args.AccountID == "" {
+			return nil, nil, errArgs("thread_id and account_id are required")
 		}
 		// Thread ids may contain "/" (GitHub notification pattern); the
 		// server route is a suffix wildcard, so encoding is the only need.
-		return text(c.get(ctx, "/threads/"+url.PathEscape(args.ThreadID), nil))
+		return text(c.get(ctx, "/threads/"+url.PathEscape(args.ThreadID), url.Values{"account": {args.AccountID}}))
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "send_mail",
-		Description: "Send an email from a connected mailbox, plain text or HTML. Omit account_id to use the first " +
+		Description: "Send an email from a connected mailbox, plain text or HTML. Omit account_id for a new message to use the first " +
 			"connected account. HTML goes out as multipart/alternative with an automatic plain-text fallback. " +
-			"Reply threading is built server-side from reply_to_message_id.",
+			"Replies require account_id so the parent is unambiguous; threading is built server-side from reply_to_message_id.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
 		AccountID    string `json:"account_id,omitempty" jsonschema:"sending account id; default first connected"`
 		To           string `json:"to" jsonschema:"recipient address"`
@@ -150,6 +151,9 @@ func registerTools(s *mcp.Server, c *client) {
 	}) (*mcp.CallToolResult, any, error) {
 		if args.To == "" || args.Subject == "" || (args.Text == "" && args.HTML == "") {
 			return nil, nil, errArgs("to, subject, and a body (text or html) are required")
+		}
+		if args.ReplyToMsgID != "" && args.AccountID == "" {
+			return nil, nil, errArgs("account_id is required when replying")
 		}
 		payload := map[string]string{
 			"to": args.To, "subject": args.Subject, "text": args.Text, "html": args.HTML,
@@ -194,8 +198,8 @@ func registerTools(s *mcp.Server, c *client) {
 			return nil, nil, errArgs("action must be one of read, unread, imbox, paper_trail, feed, later, screener, set_aside")
 		}
 		query := url.Values{"account": {args.AccountID}}
-		return text(c.post(ctx, "/messages/"+url.PathEscape(args.MessageID)+"/action?"+query.Encode(),
-			map[string]any{"action": args.Action, "until_days": args.UntilDays}))
+		return text(c.postQuery(ctx, "/messages/"+url.PathEscape(args.MessageID)+"/action",
+			map[string]any{"action": args.Action, "until_days": args.UntilDays}, query))
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -211,7 +215,7 @@ func registerTools(s *mcp.Server, c *client) {
 			return nil, nil, errArgs("account_id, message_id, and part are required")
 		}
 		query := url.Values{"account": {args.AccountID}}
-		return b64(c.get(ctx, "/messages/"+url.PathEscape(args.MessageID)+"/attachment/"+url.PathEscape(args.Part)+"?"+query.Encode(), nil))
+		return b64(c.get(ctx, "/messages/"+url.PathEscape(args.MessageID)+"/attachment/"+url.PathEscape(args.Part), query))
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -226,7 +230,7 @@ func registerTools(s *mcp.Server, c *client) {
 			return nil, nil, errArgs("account_id and message_id are required")
 		}
 		query := url.Values{"account": {args.AccountID}}
-		return b64(c.get(ctx, "/messages/"+url.PathEscape(args.MessageID)+"/eml?"+query.Encode(), nil))
+		return b64(c.get(ctx, "/messages/"+url.PathEscape(args.MessageID)+"/eml", query))
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -487,21 +491,21 @@ func registerTools(s *mcp.Server, c *client) {
 		base := "/accounts/" + url.PathEscape(args.AccountID)
 		var results []string
 		if args.SyncEnabled != nil {
-			out, err := c.post(ctx, base+"?op=sync_enabled", map[string]bool{"enabled": *args.SyncEnabled})
+			out, err := c.postQuery(ctx, base, map[string]bool{"enabled": *args.SyncEnabled}, url.Values{"op": {"sync_enabled"}})
 			if err != nil {
 				return nil, nil, err
 			}
 			results = append(results, "sync_enabled: "+string(out))
 		}
 		if args.RetentionDays != nil {
-			out, err := c.post(ctx, base+"?op=retention", map[string]int{"days": *args.RetentionDays})
+			out, err := c.postQuery(ctx, base, map[string]int{"days": *args.RetentionDays}, url.Values{"op": {"retention"}})
 			if err != nil {
 				return nil, nil, err
 			}
 			results = append(results, "retention: "+string(out))
 		}
 		if args.BackfillDays != nil {
-			out, err := c.post(ctx, base+"?op=backfill", map[string]int{"days": *args.BackfillDays})
+			out, err := c.postQuery(ctx, base, map[string]int{"days": *args.BackfillDays}, url.Values{"op": {"backfill"}})
 			if err != nil {
 				return nil, nil, err
 			}

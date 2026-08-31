@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -96,5 +98,31 @@ func TestSafeSegmentRejectsMetacharacters(t *testing.T) {
 	}
 	if got, err := safeSegment("0f8c2d61-9a44-4a1e-b4c2-2f9d3a7e5b88"); err != nil || got == "" {
 		t.Errorf("uuid rejected: %v", err)
+	}
+}
+
+func TestClientKeepsQueryOutOfPath(t *testing.T) {
+	c, seen, server := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":true}`))
+	})
+	defer server.Close()
+
+	if _, err := c.postQuery(context.Background(), "/accounts/account-id", struct{}{}, url.Values{"op": {"sync"}}); err != nil {
+		t.Fatal(err)
+	}
+	entry := (*seen)[0]
+	if entry["path"] != "/api/accounts/account-id" || entry["query"] != "op=sync" {
+		t.Fatalf("request path/query = %v / %v", entry["path"], entry["query"])
+	}
+}
+
+func TestClientRejectsTruncatedResponse(t *testing.T) {
+	c, _, server := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(strings.Repeat("x", maxResponseBytes+1)))
+	})
+	defer server.Close()
+
+	if _, err := c.get(context.Background(), "/large", nil); err == nil {
+		t.Fatal("oversized response accepted")
 	}
 }

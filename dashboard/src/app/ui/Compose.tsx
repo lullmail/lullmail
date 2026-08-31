@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { closeCompose, compose, cycleDraft, draftIndex, draftStack, newDraft, retireDraft, updateDraft, type ComposeState } from "../lib/store";
 import { sendMail } from "../lib/actions";
 
+const previewPolicy = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data: cid:; style-src \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'">';
+
 /** One draft in the ring. Remounted per draftIndex so each draft owns its
     fields and its autosave slot — switching carousels nothing between them. */
 function DraftForm({ seed }: { seed: ComposeState }) {
@@ -29,6 +31,7 @@ function DraftForm({ seed }: { seed: ComposeState }) {
       to: to.trim(), subject,
       text: htmlMode ? "" : body,
       html: htmlMode ? body : undefined,
+      accountId: seed.accountId,
       replyToId: seed.replyToId,
     });
     setBusy(false);
@@ -66,7 +69,8 @@ function DraftForm({ seed }: { seed: ComposeState }) {
         {htmlMode && preview ? (
           /* sandbox with no allow-* tokens: styles render, scripts never run. */
           <iframe
-            class="compose-preview" title="HTML preview" sandbox="" srcDoc={body || "<p>(nothing written yet)</p>"}
+            class="compose-preview" title="HTML preview" sandbox=""
+            srcDoc={previewPolicy + (body || "<p>(nothing written yet)</p>")}
           />
         ) : (
           <textarea

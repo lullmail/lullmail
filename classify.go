@@ -670,7 +670,7 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		WHERE m.thread_id = $2`
 	threadArgs := []any{uid, thread}
 	if account != "" {
-		threadQuery += ` AND m.account_id = $3`
+		threadQuery += ` AND (m.account_id = $3 OR ea.id::text = $3)`
 		threadArgs = append(threadArgs, account)
 	}
 	threadQuery += ` ORDER BY m.received_at ASC NULLS LAST`
@@ -825,7 +825,7 @@ func (a *App) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		WHERE m.id = $2`
 	attachmentArgs := []any{uid, msgID}
 	if requestedAccount != "" {
-		attachmentQuery += ` AND m.account_id = $3`
+		attachmentQuery += ` AND (m.account_id = $3 OR ea.id::text = $3)`
 		attachmentArgs = append(attachmentArgs, requestedAccount)
 	}
 	attachmentQuery += ` LIMIT 1`
@@ -933,7 +933,7 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 		WHERE m.id = $2`
 	lookupArgs := []any{uid, msg}
 	if account != "" {
-		lookup += ` AND m.account_id = $3`
+		lookup += ` AND (m.account_id = $3 OR ea.id::text = $3)`
 		lookupArgs = append(lookupArgs, account)
 	}
 	lookup += ` ORDER BY m.received_at DESC NULLS LAST LIMIT 1`

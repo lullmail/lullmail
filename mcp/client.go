@@ -21,6 +21,8 @@ type client struct {
 	http  *http.Client
 }
 
+const maxResponseBytes = 8 << 20
+
 func newClient(baseURL, token string) (*client, error) {
 	base, err := url.Parse(strings.TrimRight(baseURL, "/"))
 	if err != nil || base.Scheme == "" || base.Host == "" {
@@ -91,9 +93,12 @@ func (c *client) do(ctx context.Context, method, path string, body any, query ur
 		return nil, err
 	}
 	defer res.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+	data, err := io.ReadAll(io.LimitReader(res.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(data) > maxResponseBytes {
+		return nil, fmt.Errorf("response exceeds %d MiB limit", maxResponseBytes>>20)
 	}
 	if res.StatusCode >= 400 {
 		apiErr := &apiError{Status: res.StatusCode, Title: res.Status}
@@ -115,6 +120,10 @@ func (c *client) get(ctx context.Context, path string, query url.Values) ([]byte
 
 func (c *client) post(ctx context.Context, path string, body any) ([]byte, error) {
 	return c.do(ctx, http.MethodPost, path, body, nil)
+}
+
+func (c *client) postQuery(ctx context.Context, path string, body any, query url.Values) ([]byte, error) {
+	return c.do(ctx, http.MethodPost, path, body, query)
 }
 
 func (c *client) del(ctx context.Context, path string) ([]byte, error) {

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"html"
 	"net/http"
+	netmail "net/mail"
 	"regexp"
 	"strings"
 	"sync"
@@ -52,6 +53,15 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusUnprocessableEntity, "Missing Fields", "to, subject and a body (text or html) are required")
 		return
 	}
+	recipient, ok := outboundRecipient(req.To, req.Subject)
+	if !ok {
+		writeProblem(w, http.StatusUnprocessableEntity, "Invalid Headers", "to must be one email address and headers cannot contain newlines")
+		return
+	}
+	if req.ReplyToID != "" && req.AccountID == "" {
+		writeProblem(w, http.StatusUnprocessableEntity, "Missing Account", "account_id is required when replying")
+		return
+	}
 	if strings.ContainsAny(strings.TrimSpace(req.HTML), "\r") {
 		req.HTML = strings.ReplaceAll(strings.ReplaceAll(req.HTML, "\r\n", "\n"), "\r", "\n")
 	}
@@ -67,7 +77,7 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 	q := `SELECT mirror_account_id FROM email_accounts WHERE user_id = $1`
 	args := []any{uid}
 	if req.AccountID != "" {
-		q += ` AND id = $2`
+		q += ` AND (id::text = $2 OR mirror_account_id = $2)`
 		args = append(args, req.AccountID)
 	}
 	q += ` ORDER BY created_at LIMIT 1`
@@ -87,7 +97,8 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		err := a.db.QueryRowContext(r.Context(), `
 			SELECT m.account_id FROM mail_messages m
 			JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-			WHERE m.id = $2`, uid, req.ReplyToID).Scan(&parentAcct)
+			WHERE m.id = $2 AND (ea.id::text = $3 OR m.account_id = $3)`,
+			uid, req.ReplyToID, req.AccountID).Scan(&parentAcct)
 		if err != nil {
 			writeProblem(w, http.StatusNotFound, "Parent Not Found", "reply_to_message_id does not resolve")
 			return
@@ -115,12 +126,23 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 	outgoing = &mail.Outgoing{
 		From:    from,
-		To:      []mail.Address{{Email: req.To}},
+		To:      []mail.Address{recipient},
 		Subject: req.Subject,
 		Text:    req.Text,
 		HTML:    req.HTML,
 	}
 	a.enqueue(w, deliver, outgoing)
+}
+
+func outboundRecipient(to, subject string) (mail.Address, bool) {
+	if strings.ContainsAny(to+subject, "\r\n") {
+		return mail.Address{}, false
+	}
+	parsed, err := netmail.ParseAddress(to)
+	if err != nil || parsed.Address == "" {
+		return mail.Address{}, false
+	}
+	return mail.Address{Name: parsed.Name, Email: parsed.Address}, true
 }
 
 // htmlFallbackText derives the plain-text alternative for an HTML-only
