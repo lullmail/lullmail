@@ -87,7 +87,7 @@ func connectApp(cfg *Config) *App {
 		db:            db,
 		log:           slog.Default(),
 		store:         store,
-		eng:           mail.NewEngine(store, slog.Default()),
+		eng:           newSyncEngine(store, cfg),
 		events:        newSyncEvents(),
 		sendq:         newSendQueue(),
 		authAttempts:  map[string]authAttempt{},
@@ -374,4 +374,23 @@ func apiUnavailable(mux *http.ServeMux, reason string) {
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusServiceUnavailable, "API unavailable", reason)
 	})
+}
+
+// newSyncEngine builds the sync engine with body prefetch ON.
+//
+// Without it, mail_bodies is filled only when someone opens a message, so the
+// FIRST open of every message is a live round trip to the provider — connect,
+// authenticate, select, fetch — and "first open" is every message a person has
+// not read yet. That is the slow path they actually notice, because the ones
+// they have already read are the ones already cached.
+//
+// The engine's own default is off, and correctly so: it is a library, and
+// bodies are what make a mirror unbounded. This is the server, where the mirror
+// is one operator's own accounts and the whole store is measured in hundreds of
+// messages. PREFETCH_BODIES=0 turns it back off for an install where that stops
+// being true.
+func newSyncEngine(store mail.Store, cfg *Config) *mail.Engine {
+	eng := mail.NewEngine(store, slog.Default())
+	eng.FetchBodies = envOr("PREFETCH_BODIES", "1") != "0"
+	return eng
 }
