@@ -44,21 +44,24 @@ export function Palette() {
   const [mailboxes, setMailboxes] = useState<Mailbox[]>([]);
   const [recent, setRecent] = useState<Row[]>([]);
   const [folderRows, setFolderRows] = useState<Row[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [cursor, setCursor] = useState(0);
 
   const close = () => { palette.value = false; };
 
   useEffect(() => {
-    api<Mailbox[]>(accountQS("/mailboxes")).then(setMailboxes).catch(() => {});
-    api<Row[]>(accountQS("/recent")).then(setRecent).catch(() => {});
+    const error = (e: unknown) => setLoadError(e instanceof Error ? e.message : "Some palette results did not load.");
+    api<Mailbox[]>(accountQS("/mailboxes")).then(setMailboxes).catch(error);
+    api<Row[]>(accountQS("/recent")).then(setRecent).catch(error);
   }, []);
 
   useEffect(() => {
     if (!folder) { setFolderRows(null); return; }
     setFolderRows(null);
+    setLoadError(null);
     api<Row[]>(accountQS("/folder?name=" + encodeURIComponent(folder)))
       .then(setFolderRows)
-      .catch(() => setFolderRows([]));
+      .catch((e) => { setFolderRows([]); setLoadError(e instanceof Error ? e.message : "That folder did not load."); });
   }, [folder]);
 
   const openRow = (row: Row) => { close(); openThread(row.thread_id, row.account, null); };
@@ -180,6 +183,7 @@ export function Palette() {
           <input
             class="palette-input" autofocus placeholder={folder ? "Filter " + folder + "…" : "Search the mail, or jump anywhere…"}
             value={q} onInput={(e) => setQ((e.target as HTMLInputElement).value)} onKeyDown={onKey}
+            role="combobox" aria-expanded="true" aria-controls="palette-results" aria-activedescendant={flat[cursor] ? "palette-option-" + cursor : undefined}
           />
           {folder && (
             <button class="btn btn-ghost btn-sm" type="button" onClick={() => { setFolder(null); setQ(""); }}>
@@ -188,9 +192,10 @@ export function Palette() {
           )}
         </div>
 
-        <div class="palette-body">
+        <div class="palette-body" id="palette-results" role="listbox" aria-label="Commands and results">
           {folder && folderRows === null && <div class="palette-empty">Loading {folder}…</div>}
-          {!flat.length && !(folder && folderRows === null) && (
+          {loadError && <div class="palette-empty" role="alert">Some results are unavailable: {loadError}</div>}
+          {!flat.length && !loadError && !(folder && folderRows === null) && (
             <div class="palette-empty">Nothing here.</div>
           )}
           {sections.map((section) => (
@@ -203,8 +208,11 @@ export function Palette() {
                   <div
                     class={"palette-row" + (at === cursor ? " cursor" : "")}
                     key={item.key}
+                    id={"palette-option-" + at}
+                    role="option" aria-selected={at === cursor} tabIndex={-1}
                     onMouseEnter={() => setCursor(at)}
                     onClick={item.run}
+                    onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); item.run(); } }}
                   >
                     <div class="palette-row-main">
                       <span class="palette-row-label">{item.label}</span>

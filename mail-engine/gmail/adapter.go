@@ -140,7 +140,11 @@ func (a *Adapter) Sync(ctx context.Context, box mail.MailboxID, cur mail.Cursor)
 		return a.initialSync(ctx, box, pageToken, historyID)
 	}
 
+	var pageToken string
 	start, err := strconv.ParseUint(string(cur), 10, 64)
+	if strings.HasPrefix(string(cur), "gmail-history:") {
+		pageToken, start, err = decodeHistoryCursor(cur)
+	}
 	if err != nil {
 		return &mail.Changes{Reset: true}, nil
 	}
@@ -149,6 +153,9 @@ func (a *Adapter) Sync(ctx context.Context, box mail.MailboxID, cur mail.Cursor)
 		StartHistoryId(start).
 		LabelId(string(box)).
 		MaxResults(500)
+	if pageToken != "" {
+		call = call.PageToken(pageToken)
+	}
 
 	res, err := call.Context(ctx).Do()
 	if err != nil {
@@ -159,9 +166,11 @@ func (a *Adapter) Sync(ctx context.Context, box mail.MailboxID, cur mail.Cursor)
 		return nil, classify(err)
 	}
 
-	changes := &mail.Changes{
-		Next: mail.Cursor(strconv.FormatUint(res.HistoryId, 10)),
-		More: res.NextPageToken != "",
+	changes := &mail.Changes{More: res.NextPageToken != ""}
+	if changes.More {
+		changes.Next = encodeHistoryCursor(res.NextPageToken, start)
+	} else {
+		changes.Next = mail.Cursor(strconv.FormatUint(res.HistoryId, 10))
 	}
 
 	// History records carry message IDs, not envelopes. Deduplicating here
@@ -277,6 +286,32 @@ func decodeInitialCursor(cur mail.Cursor) (string, uint64, error) {
 	return state.Page, state.History, nil
 }
 
+func encodeHistoryCursor(pageToken string, start uint64) mail.Cursor {
+	raw, _ := json.Marshal(struct {
+		Page  string `json:"page"`
+		Start uint64 `json:"start"`
+	}{pageToken, start})
+	return mail.Cursor("gmail-history:" + base64.RawURLEncoding.EncodeToString(raw))
+}
+
+func decodeHistoryCursor(cur mail.Cursor) (string, uint64, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(string(cur), "gmail-history:"))
+	if err != nil {
+		return "", 0, err
+	}
+	var state struct {
+		Page  string `json:"page"`
+		Start uint64 `json:"start"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil || state.Page == "" || state.Start == 0 {
+		if err == nil {
+			err = fmt.Errorf("missing history cursor fields")
+		}
+		return "", 0, err
+	}
+	return state.Page, state.Start, nil
+}
+
 // Envelopes fetches message metadata.
 func (a *Adapter) Envelopes(ctx context.Context, ids []mail.MessageID) ([]mail.Envelope, error) {
 	out := make([]mail.Envelope, 0, len(ids))
@@ -305,10 +340,11 @@ func nativeID(id mail.MessageID) string {
 
 func toEnvelope(m *gmail.Message) mail.Envelope {
 	env := mail.Envelope{
-		ID:       mail.NativeMessageID(mail.ProviderGmail, m.Id),
-		ThreadID: mail.ThreadID(m.ThreadId),
-		Size:     m.SizeEstimate,
-		Preview:  m.Snippet,
+		ID:                 mail.NativeMessageID(mail.ProviderGmail, m.Id),
+		ThreadID:           mail.ThreadID(m.ThreadId),
+		Size:               m.SizeEstimate,
+		Preview:            m.Snippet,
+		MailboxIDsComplete: true,
 	}
 
 	// InternalDate is milliseconds since the epoch.

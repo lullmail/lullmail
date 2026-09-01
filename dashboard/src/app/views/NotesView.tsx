@@ -4,7 +4,7 @@ import { useLoad } from "../lib/useLoad";
 import { resetSelection, setList } from "../lib/store";
 import { createNote, saveNote, throwAwayNote } from "../lib/actions";
 import type { StickyNote } from "../lib/types";
-import { ListSkeleton, PageHead } from "../ui/bits";
+import { ListSkeleton, LoadError } from "../ui/bits";
 import { Icon } from "../ui/Icon";
 
 const PALETTE = 5;
@@ -70,6 +70,18 @@ function Sticky({ note, pos, editing, onEdit, onMoved, onRemoved }: {
       class={"sticky sticky-" + color}
       style={{ left: pos.x, top: pos.y, transform: "rotate(" + tiltFor(note.id) + "deg)" }}
       onPointerDown={startDrag}
+      tabIndex={0} role="group" aria-label="Note"
+      onKeyDown={(e) => {
+        if ((e.target as HTMLElement).closest("textarea, button")) return;
+        const delta = e.shiftKey ? 10 : 1;
+        const next = { x: pos.x, y: pos.y };
+        if (e.key === "ArrowLeft") next.x = Math.max(0, next.x - delta);
+        else if (e.key === "ArrowRight") next.x += delta;
+        else if (e.key === "ArrowUp") next.y = Math.max(0, next.y - delta);
+        else if (e.key === "ArrowDown") next.y += delta;
+        else return;
+        e.preventDefault(); onMoved(note.id, next.x, next.y);
+      }}
     >
       <div class="sticky-tools">
         <button class="btn-icon sticky-tool" type="button" title="Change colour" aria-label="Change colour"
@@ -77,7 +89,7 @@ function Sticky({ note, pos, editing, onEdit, onMoved, onRemoved }: {
           <span class="sticky-swatch" />
         </button>
         <button class="btn-icon sticky-tool" type="button" title="Throw away" aria-label="Throw away"
-          onClick={() => throwAwayNote({ ...note, text, color }, onRemoved)}>
+          onClick={() => throwAwayNote({ ...note, x: pos.x, y: pos.y, text, color }, onRemoved)}>
           <Icon name="close" size={13} />
         </button>
       </div>
@@ -93,7 +105,7 @@ function Sticky({ note, pos, editing, onEdit, onMoved, onRemoved }: {
           }}
         />
       ) : (
-        <div class="sticky-text" onClick={() => onEdit(note.id)}>
+        <div class="sticky-text" role="button" tabIndex={0} aria-label="Edit note" onClick={() => onEdit(note.id)} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onEdit(note.id); } }}>
           {text || <span class="sticky-empty">Write something…</span>}
         </div>
       )}
@@ -149,7 +161,7 @@ export function NotesView() {
 
       <div class="canvas-frame">
         {loading && !data && <ListSkeleton rows={3} />}
-        {error && <div class="canvas-error">{error}</div>}
+        {error && <LoadError title="The notes didn't load." error={error} retry={reload} />}
         <div class="note-canvas">
           <div
             class="note-wall"
@@ -169,7 +181,7 @@ export function NotesView() {
               });
             }}
           >
-            {notes.length === 0 && !loading && (
+            {notes.length === 0 && !loading && !error && (
               <div class="canvas-hint">Double-click anywhere to stick the first note</div>
             )}
             {notes.map((n) => (

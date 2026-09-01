@@ -11,21 +11,103 @@ const PLACEHOLDER =
   "border:1.5px dashed var(--ph-line);border-radius:8px;color:var(--ph-ink);" +
   "font:12px sans-serif;padding:10px 14px\">image blocked</span>";
 
-/** Strips remote `src`s only — `data:` and `cid:` are already local to the message. */
+function imageUrlAllowed(value: string, allowRemote: boolean): boolean {
+	const url = value.trim().replace(/^(?:"([\s\S]*)"|'([\s\S]*)')$/, "$1$2");
+	if (!url) return true;
+	if (/^(?:data:|cid:|#)/i.test(url)) return true;
+	if (!allowRemote) return false;
+	try {
+		const parsed = new URL(url, "https://mail.invalid/");
+		return parsed.protocol === "http:" || parsed.protocol === "https:";
+	} catch {
+		return false;
+	}
+}
+
+function srcsetUrls(value: string): string[] {
+	const urls: string[] = [];
+	let offset = 0;
+	while (offset < value.length) {
+		while (/[\s,]/.test(value[offset] || "")) offset++;
+		if (offset >= value.length) break;
+		const start = offset;
+		if (/^data:/i.test(value.slice(offset))) {
+			while (offset < value.length && !/\s/.test(value[offset])) offset++;
+		} else {
+			while (offset < value.length && !/[\s,]/.test(value[offset])) offset++;
+		}
+		urls.push(value.slice(start, offset));
+		while (offset < value.length && value[offset] !== ",") offset++;
+		offset++;
+	}
+	return urls;
+}
+
+function cssHasBlockedResource(css: string, allowRemote: boolean): boolean {
+	if (/@\s*import\b/i.test(css)) return true;
+	const urls = [...css.matchAll(/url\(\s*((?:"[^"]*"|'[^']*'|[^)]*))\s*\)/gi)].map((match) => match[1]);
+	if (urls.some((url) => !imageUrlAllowed(url, allowRemote))) return true;
+	for (const match of css.matchAll(/(?:-webkit-)?image-set\s*\(([^)]*)\)/gi)) {
+		const candidates = [...match[1].matchAll(/(?:^|,)\s*(?:url\(\s*)?("[^"]*"|'[^']*'|[^\s,)]+)/gi)].map((candidate) => candidate[1]);
+		if (!candidates.length || candidates.some((url) => !imageUrlAllowed(url, allowRemote))) return true;
+	}
+	return false;
+}
+
+function sanitizeImageResources(doc: Document, allowRemote: boolean): number {
+	let blocked = 0;
+	doc.querySelectorAll<HTMLImageElement>("img").forEach((image) => {
+		const src = image.getAttribute("src");
+		const srcset = image.getAttribute("srcset");
+		if ((src !== null && !imageUrlAllowed(src, allowRemote)) ||
+			(srcset !== null && srcsetUrls(srcset).some((url) => !imageUrlAllowed(url, allowRemote)))) {
+			const holder = doc.createElement("span");
+			holder.innerHTML = PLACEHOLDER;
+			image.replaceWith(holder.firstElementChild!);
+			blocked++;
+		}
+	});
+	doc.querySelectorAll<SVGElement>("svg [href], svg [xlink\\:href]").forEach((node) => {
+		const href = node.getAttribute("href") || node.getAttribute("xlink:href") || "";
+		const imageElement = /^(?:image|feimage)$/i.test(node.localName);
+		if ((!imageElement && !href.startsWith("#")) || (imageElement && !imageUrlAllowed(href, allowRemote))) {
+			node.remove();
+			blocked++;
+		}
+	});
+	doc.querySelectorAll<SVGElement>("svg *").forEach((node) => {
+		for (const attr of [...node.attributes]) {
+			if (attr.name === "style" || !/url\s*\(/i.test(attr.value) || !cssHasBlockedResource(attr.value, false)) continue;
+			node.removeAttribute(attr.name);
+			blocked++;
+		}
+	});
+	doc.querySelectorAll<HTMLElement>("[background]").forEach((node) => {
+		if (!imageUrlAllowed(node.getAttribute("background") || "", allowRemote)) {
+			node.removeAttribute("background");
+			blocked++;
+		}
+	});
+	doc.querySelectorAll<HTMLElement>("[style]").forEach((node) => {
+		if (cssHasBlockedResource(node.getAttribute("style") || "", allowRemote)) {
+			node.removeAttribute("style");
+			blocked++;
+		}
+	});
+	doc.querySelectorAll("style").forEach((node) => {
+		if (cssHasBlockedResource(node.textContent || "", allowRemote)) {
+			node.remove();
+			blocked++;
+		}
+	});
+	return blocked;
+}
+
+/** Strips every network-backed image source; `data:` and `cid:` stay local. */
 export function stripRemoteImages(html: string): { html: string; blocked: number } {
 	if (typeof DOMParser !== "undefined") {
 		const doc = new DOMParser().parseFromString(html, "text/html");
-		let blocked = 0;
-		doc.querySelectorAll<HTMLImageElement>("img").forEach((image) => {
-			const remote = /^https?:/i.test(image.getAttribute("src") || "") || /https?:/i.test(image.getAttribute("srcset") || "");
-			if (!remote) return;
-			const holder = doc.createElement("span"); holder.innerHTML = PLACEHOLDER;
-			image.replaceWith(holder.firstElementChild!); blocked++;
-		});
-		doc.querySelectorAll<SVGImageElement>("svg image").forEach((image) => {
-			const href = image.getAttribute("href") || image.getAttribute("xlink:href") || "";
-			if (/^https?:/i.test(href)) { image.remove(); blocked++; }
-		});
+		const blocked = sanitizeImageResources(doc, false);
 		return { html: doc.body.innerHTML, blocked };
 	}
   let blocked = 0;
@@ -49,13 +131,19 @@ const REDIRECT_PARAMS = ["url", "u", "target", "redirect", "redirect_url", "dest
 export function cleanLinks(html: string): string {
   if (typeof DOMParser === "undefined") return html;
   const doc = new DOMParser().parseFromString(html, "text/html");
-  doc.querySelectorAll("script,object,embed,form,meta[http-equiv],base,iframe,frame,link,video,audio,source").forEach((node) => node.remove());
-	doc.querySelectorAll("style").forEach((node) => { if (/url\s*\(\s*['\"]?https?:/i.test(node.textContent || "")) node.remove(); });
+  doc.querySelectorAll("script,object,embed,form,meta[http-equiv],base,iframe,frame,link,video,audio,source,track,input,button,textarea,select").forEach((node) => node.remove());
   doc.querySelectorAll<HTMLElement>("*").forEach((node) => {
     for (const attr of [...node.attributes]) if (/^on/i.test(attr.name)) node.removeAttribute(attr.name);
-		if (/url\s*\(\s*['\"]?https?:/i.test(node.getAttribute("style") || "")) node.removeAttribute("style");
-		if (/^https?:/i.test(node.getAttribute("background") || "")) node.removeAttribute("background");
+		for (const name of ["ping", "srcdoc", "action", "formaction"]) node.removeAttribute(name);
   });
+	// Imported stylesheets are never an image permission and stay blocked in both modes.
+	doc.querySelectorAll<HTMLElement>("[style]").forEach((node) => {
+		if (/@\s*import\b/i.test(node.getAttribute("style") || "")) node.removeAttribute("style");
+	});
+	doc.querySelectorAll("style").forEach((node) => {
+		if (/@\s*import\b/i.test(node.textContent || "")) node.remove();
+	});
+	sanitizeImageResources(doc, true);
   doc.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((anchor) => {
     try {
       let target = new URL(anchor.href);
@@ -95,7 +183,7 @@ export function emailHasOwnColors(html: string): boolean {
   return doc.body.matches(paint) || !!doc.body.querySelector(paint);
 }
 
-function frameDoc(html: string, themed: boolean): string {
+export function frameDoc(html: string, themed: boolean, allowRemoteImages = false): string {
   // Themed mail wears our canvas and our ink. Self-colored mail gets a white
   // canvas instead: its own backgrounds and default-black text then read
   // exactly as authored. Without this, a reply with one styled quote or
@@ -103,8 +191,10 @@ function frameDoc(html: string, themed: boolean): string {
   const bg = themed ? (cssVar("--bg") || "transparent") : "#ffffff";
   const ink = themed ? cssVar("--ink") : "";
   const quoteInk = themed ? cssVar("--ink-2") : "";
+	const policy = "default-src 'none'; img-src data: cid:" + (allowRemoteImages ? " http: https:" : "") +
+		"; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none'; font-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
   return (
-    "<!doctype html><html><head><meta charset='utf-8'><base target='_blank'>" +
+    "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='Content-Security-Policy' content=\"" + policy + "\">" +
     "<style>" +
     ":root{--ph-line:" + (cssVar("--line-strong") || "#ccc") + ";--ph-ink:" + (cssVar("--ink-3") || "#999") + "}" +
     "html{margin:0;padding:0;background:" + bg + "}" +
@@ -194,7 +284,7 @@ function HtmlBody({ html, messageId, sender }: { html: string; messageId: string
         class="mail-frame"
         title="Message body"
         sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
-        srcdoc={frameDoc(safe, themed)}
+        srcdoc={frameDoc(safe, themed, ok)}
       />
     </>
   );

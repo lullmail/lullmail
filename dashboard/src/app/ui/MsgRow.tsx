@@ -16,11 +16,11 @@ function QuickActs({ row }: { row: Row }) {
   };
   return (
     <div class="row-acts" onClick={(e) => e.stopPropagation()}>
-      <button class="btn-icon" type="button" title="Done (e)" onClick={stop(() => markDone([row]))}>
+      <button class="btn-icon" type="button" title="Done (e)" aria-label="Mark done" onClick={stop(() => markDone([row]))}>
         <Icon name="check" size={15} />
       </button>
       <div style={{ position: "relative" }}>
-        <button class="btn-icon" type="button" title="Set aside (s)" onClick={stop(() => setAsideOpen((v) => !v))}>
+        <button class="btn-icon" type="button" title="Set aside (s)" aria-label="Set aside" aria-expanded={asideOpen} onClick={stop(() => setAsideOpen((v) => !v))}>
           <Icon name="aside" size={15} />
         </button>
         {asideOpen && (
@@ -30,7 +30,7 @@ function QuickActs({ row }: { row: Row }) {
           />
         )}
       </div>
-      <button class="btn-icon" type="button" title="Move to Snoozed" onClick={stop(() => moveTo([row], "later"))}>
+      <button class="btn-icon" type="button" title="Move to Snoozed" aria-label="Move to Snoozed" onClick={stop(() => moveTo([row], "later"))}>
         <Icon name="later" size={15} />
       </button>
     </div>

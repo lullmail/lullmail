@@ -4,8 +4,8 @@
 // bucket pages, so Today, the Screener and the reader were mouse-only. This is
 // one handler for the whole app: it reads the current list out of the store, so
 // every surface that publishes rows gets the same keys for free.
-import { closeCompose, compose, composeOpen, cursor, checked, list, newDraft, noteKeyUse, openCompose, overlayOpen, palette, reader, resetSelection, shortcuts, toggleChecked, closeReader, targetRows, dismissToast, toast } from "./store";
-import { decide, markDone, moveTo, openThread, pinThreads, snooze } from "./actions";
+import { closeCompose, compose, composeOpen, cursor, checked, list, newDraft, noteKeyUse, openCompose, overlayOpen, palette, reader, resetSelection, shortcuts, snoozePickerRows, toggleChecked, closeReader, targetRows, dismissToast, toast } from "./store";
+import { decide, markDone, moveTo, openThread, pinThreads } from "./actions";
 import { navigate } from "./router";
 import { splitFrom } from "./fmt";
 
@@ -89,6 +89,7 @@ export function installKeys(): () => void {
     if (ev.key === "Escape") {
       if (palette.value) { palette.value = false; return; }
       if (shortcuts.value) { shortcuts.value = false; return; }
+      if (snoozePickerRows.value.length) { snoozePickerRows.value = []; return; }
       if (composeOpen.value) { closeCompose(); return; }
       if (toast.value) { dismissToast(); return; }
       if (checked.value.size) { resetSelection(); return; }
@@ -167,7 +168,7 @@ export function installKeys(): () => void {
       case "e": ev.preventDefault(); learn(); markDone(rows); return;
       // One deferral key. Filing a single message into Reading or Receipts is
       // rare — you change the sender's rule instead — so those lost their keys.
-      case "s": ev.preventDefault(); learn(); snooze(rows, 3); return;
+      case "s": ev.preventDefault(); learn(); snoozePickerRows.value = rows; return;
       case "i": ev.preventDefault(); learn(); moveTo(rows, "imbox"); return;
       case "p": ev.preventDefault(); learn(); pinThreads(rows); return;
     }
@@ -183,7 +184,7 @@ export const SHORTCUTS: [string, string][] = [
   ["u", "Back to the list"],
   ["x", "Select — then any verb applies to all of them"],
   ["e", "Done"],
-  ["s", "Snooze for 3 days"],
+  ["s", "Choose when to snooze"],
   ["i", "Move to the Inbox"],
   ["p", "Pin to the board"],
   ["r", "Reply"],

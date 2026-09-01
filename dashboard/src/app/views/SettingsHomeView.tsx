@@ -8,7 +8,7 @@ import { navigate } from "../lib/router";
 
 const PAGES: { href: string; title: string; sub: string }[] = [
   { href: "/settings/accounts", title: "Mailboxes", sub: "Connect, sync, backfill, retention, and export." },
-  { href: "/settings/appearance", title: "Appearance", sub: "Ten themes, seven accents, two subject voices." },
+  { href: "/settings/appearance", title: "Appearance", sub: "Thirteen themes, seven accents, two subject voices." },
   { href: "/settings/security", title: "Security", sub: "Passkeys, recovery, sessions, agent tokens." },
 ];
 

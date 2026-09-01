@@ -100,7 +100,7 @@ function Bar({ row }: { row: Row }) {
         </button>
 
         <div style={{ position: "relative" }}>
-          <button class="btn btn-ghost" type="button" onClick={() => setAsideOpen((v) => !v)}>
+          <button class="btn btn-ghost" type="button" aria-haspopup="menu" aria-expanded={asideOpen} onClick={() => setAsideOpen((v) => !v)}>
             <Icon name="aside" size={14} /> Snooze <span class="kbd">s</span>
           </button>
           {asideOpen && (

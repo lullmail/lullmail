@@ -12,7 +12,7 @@
   --raise: #f2f3f7;
   --ink: #15161a;
   --ink-2: #565b65;
-  --ink-3: #8f95a1;
+  --ink-3: #626873;
   --line: #e9eaef;
   --line-strong: #d7d8e0;
   --hover: #f4f5f9;
@@ -69,7 +69,7 @@
   --raise: #1b1d23;
   --ink: #eceef2;
   --ink-2: #a2a7b3;
-  --ink-3: #6a7180;
+  --ink-3: #8e95a3;
   --line: #23252b;
   --line-strong: #31343c;
   --hover: #1a1c21;
@@ -96,7 +96,7 @@
   --raise: #e2d9c8;
   --ink: #3d3833;
   --ink-2: #6b635a;
-  --ink-3: #978d7f;
+  --ink-3: #675f56;
   --line: #d8cfbe;
   --line-strong: #c4b9a4;
   --hover: #e0d7c6;
@@ -149,7 +149,7 @@
   --raise: #1e170b;
   --ink: #f2c078;
   --ink-2: #c99a56;
-  --ink-3: #8f6f3e;
+  --ink-3: #a17e49;
   --line: #241b0f;
   --line-strong: #38301c;
   --hover: #1d150a;
@@ -199,7 +199,7 @@
   --raise: #343849;
   --ink: #f8f8f2;
   --ink-2: #ced0e0;
-  --ink-3: #8b95bb;
+  --ink-3: #919bc1;
   --line: #3a3d4e;
   --line-strong: #4d5268;
   --hover: #383b4b;
@@ -224,7 +224,7 @@
   --raise: #26233a;
   --ink: #e0def4;
   --ink-2: #b8b4d4;
-  --ink-3: #84809f;
+  --ink-3: #9691b2;
   --line: #2a2740;
   --line-strong: #3a3655;
   --hover: #252238;
@@ -249,7 +249,7 @@
   --raise: #f2ead2;
   --ink: #2c3f45;
   --ink-2: #586e75;
-  --ink-3: #93a1a1;
+  --ink-3: #586e74;
   --line: #e9e0c8;
   --line-strong: #d3cab0;
   --hover: #f4ecd6;
@@ -299,7 +299,7 @@
   --raise: #eaf2fb;
   --ink: #16344f;
   --ink-2: #47617a;
-  --ink-3: #7e93a8;
+  --ink-3: #566f87;
   --line: #c9dcef;
   --line-strong: #a8c4e0;
   --hover: #f0f6fd;
@@ -325,7 +325,7 @@
   --raise: #d8d4cc;
   --ink: #101010;
   --ink-2: #3c3c3c;
-  --ink-3: #707070;
+  --ink-3: #555555;
   --line: #b4b0a8;
   --line-strong: #8f8b84;
   --hover: #e6e2da;
@@ -352,7 +352,7 @@
   --raise: #2f1a52;
   --ink: #f4e9ff;
   --ink-2: #cdaef0;
-  --ink-3: #9372c4;
+  --ink-3: #aa87da;
   --line: #3a1f63;
   --line-strong: #55307f;
   --hover: #351e5c;
@@ -601,6 +601,7 @@ button { font: inherit; cursor: pointer; border: none; background: none; color: 
   padding: 0 var(--edge) 92px;
 }
 .workspace-column { max-width: var(--workspace); }
+.calendar-column { max-width: 1440px; }
 
 /* ---- topline: one quiet row, the only permanent chrome ---- */
 
@@ -927,7 +928,6 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 .device-install strong { font-size: var(--t-md); }
 .device-install p { margin: 3px 0 0; color: var(--ink-3); font-size: var(--t-sm); max-width: 60ch; }
 .offline-note {
-  position: fixed; z-index: 70; left: 50%; bottom: 18px; transform: translateX(-50%);
   padding: 7px 12px; border: 1px solid var(--line-strong); border-radius: var(--r-pill);
   background: var(--ink); color: var(--bg); box-shadow: var(--shadow-1);
   font-size: var(--t-sm); font-weight: 620; white-space: nowrap;
@@ -1217,8 +1217,7 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 /* ---- toast ---- */
 
 .toast {
-  position: fixed; bottom: var(--sp-5); left: 50%; transform: translateX(-50%);
-  z-index: 50; display: flex; align-items: center; gap: var(--sp-3);
+  display: flex; align-items: center; gap: var(--sp-3);
   padding: 9px 10px 9px var(--sp-5); border-radius: var(--r-pill);
   background: var(--ink); color: var(--bg);
   font-size: var(--t-base); font-weight: 580;
@@ -1226,6 +1225,12 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
   animation: rise 0.16s var(--ease);
   max-width: min(560px, calc(100vw - 32px));
 }
+.notice-stack {
+  position: fixed; z-index: 70; left: 50%; bottom: max(var(--sp-5), env(safe-area-inset-bottom));
+  transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: var(--sp-2);
+  width: min(620px, calc(100vw - 24px)); pointer-events: none;
+}
+.notice-stack > * { pointer-events: auto; }
 .toast.error { background: var(--danger); color: #fff; }
 .toast-msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toast .btn { background: var(--bg); color: var(--ink); padding: 5px 13px; font-size: var(--t-sm); flex: none; }
@@ -1342,6 +1347,7 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 .pane-split:hover::after, .pane-split:active::after {
   width: 2px; inset: 0 auto 0 2.5px; background: var(--accent);
 }
+.pane-split:focus-visible::after { width: 3px; inset: 0 auto 0 2px; background: var(--accent); }
 .page.classic .reader-pane {
   grid-row: 3; grid-column: 4; min-width: 0;
   display: flex; flex-direction: column;
@@ -1495,12 +1501,14 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 /* ============================================================ responsive */
 
 @media (max-width: 720px) {
-  :root { --edge: 18px; --t-hero: 27px; --t-subject: 18px; }
+  :root { --edge: 18px; --t-hero: calc(27px * var(--ts, 1)); --t-subject: calc(18px * var(--ts, 1)); }
   .topline-in { height: 50px; gap: var(--sp-2); padding: 0 var(--edge); }
   /* Below this width there is no room to centre anything: the nav takes what is
      left and scrolls. */
   .topline-side { flex: none; }
-  .topline-side.left { display: none; }
+  .topline-side.left { display: flex; flex: 0 1 auto; }
+  .topline-side.left .wordmark { display: none; }
+  .topline-side.left .acct-toggle { margin-left: 0; max-width: 88px; }
   .nav {
     flex: 1;
     overflow-x: auto;
@@ -1534,6 +1542,30 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
      The full list remains in the More menu on every screen size. */
   .hints { display: none; }
   .sticky-tools { opacity: 1; }
+
+  .compose-veil {
+    align-items: stretch; padding: var(--sp-3) var(--sp-3) max(var(--sp-3), env(safe-area-inset-bottom));
+    height: 100dvh;
+  }
+  .compose-panel { max-height: 100%; }
+  .compose-form { min-height: 0; padding: var(--sp-4); }
+  .compose-btns {
+    flex: none; padding: var(--sp-2) var(--sp-4) max(var(--sp-2), env(safe-area-inset-bottom));
+  }
+  .compose-btns .hint { display: none; }
+}
+
+@media (hover: none), (pointer: coarse) {
+  :root { --rail: 36px; }
+  .row-check {
+    display: flex; left: 0; top: 12px; width: 28px; height: 28px;
+  }
+  .msg-row.unread::before { display: none; }
+  .row-acts {
+    position: static; display: flex; justify-content: flex-end; gap: var(--sp-2);
+    margin-top: var(--sp-2); padding-left: 0; background: none;
+  }
+  .row-acts .btn-icon { border: 1px solid var(--line); background: var(--panel); color: var(--ink-2); }
 }
 
 /* ============================================================ Board */

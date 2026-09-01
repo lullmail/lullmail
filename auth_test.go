@@ -1,12 +1,26 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+type authExecFunc func(context.Context, string, ...any) (sql.Result, error)
+
+func (f authExecFunc) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return f(ctx, query, args...)
+}
+
+type authResult struct{}
+
+func (authResult) LastInsertId() (int64, error) { return 0, nil }
+func (authResult) RowsAffected() (int64, error) { return 1, nil }
 
 func TestTOTPValidationWindowAndFormatting(t *testing.T) {
 	secret, _ := hex.DecodeString("3132333435363738393031323334353637383930")
@@ -50,6 +64,38 @@ func TestCookieSecurityFollowsPublicOrigin(t *testing.T) {
 	cookie := w.Result().Cookies()[0]
 	if !cookie.HttpOnly || !cookie.Secure || cookie.SameSite == 0 {
 		t.Fatalf("weak cookie: %#v", cookie)
+	}
+}
+
+func TestPersistSessionReturnsTokenOnlyAfterInsert(t *testing.T) {
+	a := &App{}
+	r := httptest.NewRequest("POST", "/auth/recovery", nil)
+	r.Header.Set("User-Agent", strings.Repeat("a", 400))
+	var storedHash string
+	exec := authExecFunc(func(_ context.Context, query string, args ...any) (sql.Result, error) {
+		if !strings.Contains(query, "INSERT INTO auth_sessions") {
+			t.Fatalf("unexpected query: %s", query)
+		}
+		storedHash = args[0].(string)
+		if args[1] != "user-id" || args[3] != strings.Repeat("a", 300) || args[4] != loginMethodPasskey {
+			t.Fatalf("unexpected session args: %#v", args)
+		}
+		return authResult{}, nil
+	})
+	raw, err := a.persistSession(context.Background(), exec, r, "user-id", "unknown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw == "" || storedHash != tokenHash(raw) || storedHash == raw {
+		t.Fatal("session token was not returned only as a hash-backed opaque value")
+	}
+
+	wantErr := errors.New("insert failed")
+	raw, err = a.persistSession(context.Background(), authExecFunc(func(context.Context, string, ...any) (sql.Result, error) {
+		return nil, wantErr
+	}), r, "user-id", loginMethodRecovery)
+	if raw != "" || !errors.Is(err, wantErr) {
+		t.Fatalf("failed insert returned raw=%q err=%v", raw, err)
 	}
 }
 

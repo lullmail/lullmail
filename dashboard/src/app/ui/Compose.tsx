@@ -105,9 +105,9 @@ export function Compose() {
   const touchX = useRef(0);
   if (!seed) return null;
   return (
-    <div class="veil" onClick={(ev) => { if (ev.target === ev.currentTarget) closeCompose(); }}>
+    <div class="veil compose-veil" onClick={(ev) => { if (ev.target === ev.currentTarget) closeCompose(); }}>
       <div
-        class="panel panel-narrow" role="dialog" aria-modal="true" aria-label="Compose"
+        class="panel panel-narrow compose-panel" role="dialog" aria-modal="true" aria-label="Compose"
         onTouchStart={(ev) => { touchX.current = ev.touches[0].clientX; }}
         onTouchEnd={(ev) => {
           const dx = ev.changedTouches[0].clientX - touchX.current;

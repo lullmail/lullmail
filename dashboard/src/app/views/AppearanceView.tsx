@@ -1,10 +1,9 @@
 import { useEffect } from "preact/hooks";
 import {
   accent, accentCustom, density, measure, resetSelection, setAccent, setAccentCustom, setDensity, setList, setMeasure,
-  setTextSize, setTheme, theme, textSize, typeFlavor, setTypeFlavor, type Accent, type Theme,
+  layout, setTextSize, setTheme, theme, textSize, toggleLayout, typeFlavor, setTypeFlavor, type Accent, type Theme,
 } from "../lib/store";
 import { PageHead } from "../ui/bits";
-import { navigate } from "../lib/router";
 
 // Appearance is applied the moment it is picked — no save button, no "Apply".
 // The whole product reads CSS variables, so a choice here re-skins everything
@@ -37,7 +36,7 @@ const CHARACTERS: ThemeCard[] = [
 
 function ThemeCards({ cards }: { cards: ThemeCard[] }) {
   return (
-    <div class="theme-cards">
+    <div class="theme-cards" role="group" aria-label="Theme">
       {cards.map((t) => (
         <button
           key={t.id}
@@ -45,6 +44,7 @@ function ThemeCards({ cards }: { cards: ThemeCard[] }) {
           class={"theme-card" + (theme.value === t.id ? " active" : "")}
           onClick={() => setTheme(t.id)}
           title={t.blurb}
+          aria-pressed={theme.value === t.id}
         >
           <div class="theme-card-surface" style={{ background: t.bg }}>
             <span class="theme-chip" style={{ background: t.panel, border: `1px solid ${t.line}` }} />
@@ -130,7 +130,7 @@ export function AppearanceView() {
             <p>What "needs you" looks like — buttons, badges, and the waiting dot.</p>
           </div>
         </div>
-        <div class="accent-dots">
+        <div class="accent-dots" role="group" aria-label="Accent color">
           {(Object.keys(ACCENT_SWATCH) as Exclude<Accent, "custom">[]).map((id) => (
             <button
               key={id}
@@ -138,6 +138,7 @@ export function AppearanceView() {
               class={"accent-dot" + (accent.value === id ? " active" : "")}
               style={{ background: ACCENT_SWATCH[id] }}
               aria-label={id}
+              aria-pressed={accent.value === id}
               title={id.charAt(0).toUpperCase() + id.slice(1)}
               onClick={() => setAccent(id)}
             />
@@ -164,13 +165,14 @@ export function AppearanceView() {
             <p>Everything scales — subjects, previews, buttons, this page.</p>
           </div>
         </div>
-        <div class="type-row">
+        <div class="type-row" role="group" aria-label="Text size">
           {TEXT_SIZES.map((s) => (
             <button
               key={s.id}
               type="button"
               class={"type-card" + (textSize.value === s.id ? " active" : "")}
               onClick={() => setTextSize(s.id)}
+              aria-pressed={textSize.value === s.id} aria-label={s.label + " text size"}
             >
               <span class="type-card-sample" style={{ fontSize: s.px + "px", fontWeight: 660 }}>Aa</span>
               <span class="type-card-note">{s.label}</span>
@@ -186,13 +188,14 @@ export function AppearanceView() {
             <p>How much mail fits on a screen.</p>
           </div>
         </div>
-        <div class="type-row">
+        <div class="type-row" role="group" aria-label="Density">
           {DENSITIES.map((d) => (
             <button
               key={d.id}
               type="button"
               class={"type-card" + (density.value === d.id ? " active" : "")}
               onClick={() => setDensity(d.id)}
+              aria-pressed={density.value === d.id}
             >
               <span class="type-card-sample">{d.label}</span>
               <span class="type-card-note">{d.sub}</span>
@@ -208,13 +211,14 @@ export function AppearanceView() {
             <p>How wide a document the mail gets to be.</p>
           </div>
         </div>
-        <div class="type-row">
+        <div class="type-row" role="group" aria-label="Reading measure">
           {MEASURES.map((m) => (
             <button
               key={m.id}
               type="button"
               class={"type-card" + (measure.value === m.id ? " active" : "")}
               onClick={() => setMeasure(m.id)}
+              aria-pressed={measure.value === m.id}
             >
               <span class="measure-bar" style={{ width: m.bar }} />
               <span class="type-card-sample" style={{ fontSize: "16px" }}>{m.label}</span>
@@ -231,11 +235,12 @@ export function AppearanceView() {
             <p>The voice of subject lines and titles across the app.</p>
           </div>
         </div>
-        <div class="type-row">
+        <div class="type-row" role="group" aria-label="Subject typeface">
           <button
             type="button"
             class={"type-card" + (typeFlavor.value === "editorial" ? " active" : "")}
             onClick={() => setTypeFlavor("editorial")}
+            aria-pressed={typeFlavor.value === "editorial"}
           >
             <span class="type-card-sample" style={{ fontFamily: "var(--serif)" }}>Editorial</span>
             <span class="type-card-note">Serif subjects, like a front page</span>
@@ -244,6 +249,7 @@ export function AppearanceView() {
             type="button"
             class={"type-card" + (typeFlavor.value === "clean" ? " active" : "")}
             onClick={() => setTypeFlavor("clean")}
+            aria-pressed={typeFlavor.value === "clean"}
           >
             <span class="type-card-sample" style={{ fontFamily: "var(--sans)", fontWeight: 700 }}>Clean</span>
             <span class="type-card-note">Sans subjects, like an instrument</span>
@@ -255,12 +261,15 @@ export function AppearanceView() {
         <div class="settings-section-head">
           <div>
             <h2>Layout</h2>
-            <p>One column where mail is a document, or three panes like a workstation.</p>
+            <p>Use one reading column, or a mailbox rail with separate list and reader panes.</p>
           </div>
         </div>
-        <div class="inline-form">
-          <button class="btn btn-outline btn-sm" type="button" onClick={() => navigate("/settings/accounts")}>
-            Layout and mailboxes live in the overflow (⋯) menu
+        <div class="inline-form" role="group" aria-label="Layout">
+          <button class="btn btn-outline btn-sm" type="button" aria-pressed={layout.value === "document"} onClick={() => { if (layout.value !== "document") toggleLayout(); }}>
+            Document
+          </button>
+          <button class="btn btn-outline btn-sm" type="button" aria-pressed={layout.value === "classic"} onClick={() => { if (layout.value !== "classic") toggleLayout(); }}>
+            Mailbox workstation
           </button>
         </div>
       </section>

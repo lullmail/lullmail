@@ -10,7 +10,9 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/neutron-build/neutron/mail"
 )
@@ -131,13 +133,7 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 		backfill = *req.BackfillDays
 	}
 
-	cred := mail.Credential{
-		Provider: mail.Provider(req.Provider),
-		Email:    req.Address,
-		Password: req.Password,
-		Host:     req.Host,
-		Port:     req.Port,
-	}
+	cred := storedCredential(mail.Provider(req.Provider), req.Address, req.Password, req.Host, req.Port)
 
 	// Validate before storing: dial and list mailboxes. A typo'd host must
 	// not become a credential row that fails on every scheduler tick.
@@ -172,12 +168,25 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mirrorID := newID()
+	a.accountOwnerMu.RLock()
+	defer a.accountOwnerMu.RUnlock()
 	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Begin Failed", err.Error())
 		return
 	}
-	defer tx.Rollback()
+	committed := false
+	mirrorCreated := false
+	defer func() {
+		_ = tx.Rollback()
+		if mirrorCreated && !committed {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, cleanupErr := a.db.ExecContext(ctx, `DELETE FROM mail_accounts ma WHERE id=$1 AND NOT EXISTS (SELECT 1 FROM email_accounts ea WHERE ea.mirror_account_id=ma.id)`, mirrorID); cleanupErr != nil {
+				a.log.Error("orphan mirror cleanup failed", "account", mirrorID, "err", cleanupErr)
+			}
+		}
+	}()
 
 	if err := a.store.PutAccount(r.Context(), &mail.Account{
 		ID:       mail.AccountID(mirrorID),
@@ -188,6 +197,7 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadGateway, "Mirror Account Failed", err.Error())
 		return
 	}
+	mirrorCreated = true
 	_, err = tx.ExecContext(r.Context(), `
 		INSERT INTO email_accounts
 		  (user_id, mirror_account_id, provider, address, label, username, host, port,
@@ -196,8 +206,6 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 		uid, string(mirrorID), req.Provider, req.Address, req.Label, req.Username,
 		req.Host, req.Port, req.SMTPHost, req.SMTPPort, ciphertext, backfill)
 	if err != nil {
-		// Do not orphan the mirror row: nothing would own or clean it.
-		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM mail_accounts WHERE id=$1`, mirrorID)
 		writeProblem(w, http.StatusInternalServerError, "Insert Failed", err.Error())
 		return
 	}
@@ -205,6 +213,7 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Commit Failed", err.Error())
 		return
 	}
+	committed = true
 
 	// Initial sync in the background: the API answers immediately, the UI
 	// polls account status while envelopes land.
@@ -368,30 +377,44 @@ func (a *App) applyRetention(ctx context.Context, uid string) error {
 	}
 	rows.Close()
 	for _, p := range policies {
-		tx, err := a.db.BeginTx(ctx, nil)
-		if err != nil {
+		releaseUse, ok := a.beginAccountUse(mail.AccountID(p.mirror))
+		if !ok {
+			continue
+		}
+		if err := a.applyAccountRetention(ctx, uid, mail.AccountID(p.mirror), p.days); err != nil {
+			releaseUse()
 			return err
 		}
-		deletes := []struct {
-			query string
-			args  []any
-		}{
-			{`DELETE FROM hey_messages WHERE user_id=$1 AND account_id=$2 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$2 AND (received_at AT TIME ZONE 'UTC') < now()-($3 * interval '1 day'))`, []any{uid, p.mirror, p.days}},
-			{`DELETE FROM mail_message_mailboxes WHERE account_id=$1 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$1 AND (received_at AT TIME ZONE 'UTC') < now()-($2 * interval '1 day'))`, []any{p.mirror, p.days}},
-			{`DELETE FROM mail_bodies WHERE account_id=$1 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$1 AND (received_at AT TIME ZONE 'UTC') < now()-($2 * interval '1 day'))`, []any{p.mirror, p.days}},
-			{`DELETE FROM mail_messages WHERE account_id=$1 AND (received_at AT TIME ZONE 'UTC') < now()-($2 * interval '1 day')`, []any{p.mirror, p.days}},
-		}
-		for _, deletion := range deletes {
-			if _, err := tx.ExecContext(ctx, deletion.query, deletion.args...); err != nil {
-				_ = tx.Rollback()
-				return err
-			}
-		}
-		if err := tx.Commit(); err != nil {
+		releaseUse()
+	}
+	return nil
+}
+
+func (a *App) applyAccountRetention(ctx context.Context, uid string, acct mail.AccountID, days int) error {
+	if days <= 0 {
+		return nil
+	}
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	deletes := []struct {
+		query string
+		args  []any
+	}{
+		{`DELETE FROM hey_messages WHERE user_id=$1 AND account_id=$2 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$2 AND (received_at AT TIME ZONE 'UTC') < now()-($3 * interval '1 day'))`, []any{uid, string(acct), days}},
+		{`DELETE FROM push_deliveries WHERE user_id=$1 AND account_id=$2 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$2 AND (received_at AT TIME ZONE 'UTC') < now()-($3 * interval '1 day'))`, []any{uid, string(acct), days}},
+		{`DELETE FROM mail_message_mailboxes WHERE account_id=$1 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$1 AND (received_at AT TIME ZONE 'UTC') < now()-($2 * interval '1 day'))`, []any{string(acct), days}},
+		{`DELETE FROM mail_bodies WHERE account_id=$1 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$1 AND (received_at AT TIME ZONE 'UTC') < now()-($2 * interval '1 day'))`, []any{string(acct), days}},
+		{`DELETE FROM mail_messages WHERE account_id=$1 AND (received_at AT TIME ZONE 'UTC') < now()-($2 * interval '1 day')`, []any{string(acct), days}},
+	}
+	for _, deletion := range deletes {
+		if _, err := tx.ExecContext(ctx, deletion.query, deletion.args...); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (a *App) deleteAccount(w http.ResponseWriter, r *http.Request, id string) {
@@ -411,6 +434,13 @@ func (a *App) deleteAccount(w http.ResponseWriter, r *http.Request, id string) {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return
 	}
+	finishDelete, ok := a.beginAccountDeletion(mail.AccountID(mirror))
+	if !ok {
+		writeProblem(w, http.StatusConflict, "Delete In Progress", "this account is already being deleted")
+		return
+	}
+	committed := false
+	defer func() { finishDelete(committed) }()
 	// Mirror rows are derived state; dropping them wholesale is a supported
 	// operation upstream. hey_messages cascade via their own delete first.
 	tx, err := a.db.BeginTx(r.Context(), nil)
@@ -423,8 +453,8 @@ func (a *App) deleteAccount(w http.ResponseWriter, r *http.Request, id string) {
 		query string
 		args  []any
 	}{
-		{`DELETE FROM hey_messages WHERE user_id = $1 AND account_id = $2 AND message_id IN
-		   (SELECT id FROM mail_messages WHERE account_id = $2)`, []any{uid, mirror}},
+		{`DELETE FROM hey_messages WHERE user_id = $1 AND account_id = $2`, []any{uid, mirror}},
+		{`DELETE FROM push_deliveries WHERE user_id = $1 AND account_id = $2`, []any{uid, mirror}},
 		{`DELETE FROM mail_message_mailboxes WHERE account_id = $1`, []any{mirror}},
 		{`DELETE FROM mail_bodies WHERE account_id = $1`, []any{mirror}},
 		{`DELETE FROM mail_messages WHERE account_id = $1`, []any{mirror}},
@@ -443,6 +473,7 @@ func (a *App) deleteAccount(w http.ResponseWriter, r *http.Request, id string) {
 		writeProblem(w, http.StatusInternalServerError, "Commit Failed", err.Error())
 		return
 	}
+	committed = true
 	writeJSON(w, map[string]any{"deleted": id})
 }
 
@@ -476,6 +507,11 @@ func (a *App) triggerSync(w http.ResponseWriter, r *http.Request, id string) {
 // syncAccount dials with the stored credential and runs one full sync,
 // recording outcome on the account row.
 func (a *App) syncAccount(ctx context.Context, acct mail.AccountID) error {
+	releaseUse, ok := a.beginAccountUse(acct)
+	if !ok {
+		return fmt.Errorf("account %s is being deleted", acct)
+	}
+	defer releaseUse()
 	cred, err := a.Token(ctx, acct)
 	if err != nil {
 		a.finishSync(ctx, acct, nil, err)
@@ -526,6 +562,15 @@ func (a *App) finishSync(ctx context.Context, acct mail.AccountID, reports []mai
 		a.log.Error("record sync success failed", "account", acct, "err", err)
 		return
 	}
+	if err := a.cleanupMirrorOrphans(ctx, uid, acct); err != nil {
+		a.log.Error("post-sync orphan cleanup failed", "account", acct, "err", err)
+	}
+	var retentionDays int
+	if err := a.db.QueryRowContext(ctx, `SELECT retention_days FROM email_accounts WHERE mirror_account_id=$1`, string(acct)).Scan(&retentionDays); err == nil {
+		if err := a.applyAccountRetention(ctx, uid, acct, retentionDays); err != nil {
+			a.log.Error("post-sync retention failed", "account", acct, "err", err)
+		}
+	}
 	if err := a.classifyUser(ctx, uid); err != nil {
 		a.log.Error("post-sync classify failed", "account", acct, "err", err)
 	}
@@ -535,6 +580,23 @@ func (a *App) finishSync(ctx context.Context, acct mail.AccountID, reports []mai
 		a.sendPushForUser(ctx, uid)
 		a.events.publish(uid, syncEvent{Type: "sync-finished", AccountID: accountID, Changed: true})
 	}
+}
+
+func (a *App) cleanupMirrorOrphans(ctx context.Context, uid string, acct mail.AccountID) error {
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, query := range []string{
+		`DELETE FROM hey_messages h WHERE h.user_id=$1 AND h.account_id=$2 AND NOT EXISTS (SELECT 1 FROM mail_messages m WHERE m.account_id=h.account_id AND m.id=h.message_id)`,
+		`DELETE FROM push_deliveries p WHERE p.user_id=$1 AND p.account_id=$2 AND NOT EXISTS (SELECT 1 FROM mail_messages m WHERE m.account_id=p.account_id AND m.id=p.message_id)`,
+	} {
+		if _, err := tx.ExecContext(ctx, query, uid, string(acct)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func newID() string {

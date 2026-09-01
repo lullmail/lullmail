@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api } from "./lib/api";
 import { refreshAccounts, refreshCounts, reload } from "./lib/actions";
-import { accountFilter, accounts, counts, draftStack, layout, openCompose, palette, setAccountFilter, showError, showToast } from "./lib/store";
+import { accountFilter, accounts, counts, draftStack, openCompose, palette, setAccountFilter, showError, showToast } from "./lib/store";
 import { path, routeFor } from "./lib/router";
 import { Icon } from "./ui/Icon";
 import { MoreMenu } from "./ui/MoreMenu";
@@ -96,11 +96,10 @@ function AccountPicker() {
   );
 }
 
-export function Topline() {
+export function Topline({ classic = false }: { classic?: boolean }) {
   const here = path.value ? routeFor(path.value).nav : "";
   const [stuck, setStuck] = useState(false);
   const [syncing, setSyncing] = useState(false);
-  const classic = layout.value === "classic";
   const screenerWaiting = counts.value.screener || 0;
 
   useEffect(() => {

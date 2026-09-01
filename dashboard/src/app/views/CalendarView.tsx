@@ -4,7 +4,7 @@ import { useLoad } from "../lib/useLoad";
 import { accountFilter, accountQS, resetSelection, setList } from "../lib/store";
 import { openThread } from "../lib/actions";
 import type { Row } from "../lib/types";
-import { Empty, ListSkeleton, PageHead } from "../ui/bits";
+import { ListSkeleton, LoadError, PageHead } from "../ui/bits";
 import { Icon } from "../ui/Icon";
 import { splitFrom } from "../lib/fmt";
 
@@ -57,8 +57,8 @@ export function CalendarView() {
   const [anchor, setAnchor] = useState<Date>(today);
 
   const lens = accountFilter.value;
-  const { data, loading, error } = useLoad<Row[]>("cal:snoozed:" + lens, (signal) =>
-    api<Row[]>(accountQS("/buckets/snoozed"), { signal }).catch(() => [] as Row[])
+  const { data, loading, error, reload } = useLoad<Row[]>("cal:snoozed:" + lens, (signal) =>
+    api<Row[]>(accountQS("/buckets/snoozed"), { signal })
   );
 
   useEffect(() => { resetSelection(); setList({ kind: "none", key: "calendar", loading: false, error: null, rows: [], senders: [], origin: null }); }, []);
@@ -141,6 +141,7 @@ export function CalendarView() {
             {(["year", "month", "week"] as Zoom[]).map((z) => (
               <button
                 class={"cal-zoom-btn" + (zoom === z ? " active" : "")} type="button" key={z}
+                aria-pressed={zoom === z}
                 onClick={() => setZoom(z)}
               >
                 {z === "year" ? "Year" : z === "month" ? "Month" : "Week"}
@@ -158,7 +159,7 @@ export function CalendarView() {
         </div>
 
         {loading && !data && <ListSkeleton rows={4} />}
-        {error && <Empty title="The calendar didn't load." sub={error} />}
+        {error && <LoadError title="The calendar didn't load." error={error} retry={reload} />}
       </div>
 
       {data && zoom === "year" && (
@@ -181,6 +182,7 @@ export function CalendarView() {
                             (returnsOn(c).length ? " has" : "")}
                           type="button" key={i}
                           title={returnsOn(c).length ? returnsOn(c).length + " returning" : undefined}
+                          aria-label={c.toLocaleDateString([], { month: "long", day: "numeric" }) + (returnsOn(c).length ? ", " + returnsOn(c).length + " returning" : "")}
                           onClick={() => { setAnchor(c); setZoom("month"); }}
                         >
                           {c.getDate()}
@@ -217,6 +219,7 @@ export function CalendarView() {
                   <button
                     class={"cal-cell" + (sameDay(c, today) ? " today" : "") + (sameDay(c, anchor) ? " sel" : "")}
                     type="button" key={c.getTime()}
+                    aria-pressed={sameDay(c, anchor)} aria-label={c.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" }) + (n ? ", " + n + " returning" : "")}
                     onClick={() => setAnchor(c)}
                   >
                     <span class="cal-daynum">{c.getDate()}</span>

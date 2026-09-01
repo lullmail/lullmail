@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
 
 func TestHTMLFallbackText(t *testing.T) {
 	cases := []struct {
@@ -59,5 +64,44 @@ func TestOutboundRecipientRejectsHeaderInjection(t *testing.T) {
 	got, ok := outboundRecipient("Person <person@example.com>", "hello")
 	if !ok || got.Name != "Person" || got.Email != "person@example.com" {
 		t.Fatalf("valid recipient = %+v, %v", got, ok)
+	}
+}
+
+func TestUndoSendOnlyCancelsPendingDelivery(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		state      sendState
+		wantStatus int
+		wantCancel bool
+	}{
+		{"pending", sendPending, http.StatusOK, true},
+		{"delivering", sendDelivering, http.StatusGone, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			q := newSendQueue()
+			q.sends["send-1"] = &pendingSend{cancel: cancel, state: tc.state}
+			a := &App{sendq: q}
+			r := httptest.NewRequest(http.MethodDelete, "/api/send/send-1", nil)
+			r.SetPathValue("id", "send-1")
+			w := httptest.NewRecorder()
+
+			a.handleUndoSend(w, r)
+
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", w.Code, tc.wantStatus)
+			}
+			select {
+			case <-ctx.Done():
+				if !tc.wantCancel {
+					t.Fatal("delivery context was cancelled after delivery started")
+				}
+			default:
+				if tc.wantCancel {
+					t.Fatal("pending delivery context was not cancelled")
+				}
+			}
+			cancel()
+		})
 	}
 }

@@ -45,6 +45,16 @@ export function Empty({ title, sub }: { title: string; sub?: string }) {
   );
 }
 
+export function LoadError({ title, error, retry }: { title: string; error: string; retry: () => void }) {
+  return (
+    <div class="empty" role="alert">
+      <div class="empty-big">{title}</div>
+      <div class="empty-sub">{error}</div>
+      <button class="btn btn-outline btn-sm" type="button" onClick={retry}>Try again</button>
+    </div>
+  );
+}
+
 /** Keeps the list's shape while it loads, instead of collapsing to blank. */
 export function ListSkeleton({ rows = 6 }: { rows?: number }) {
   return (

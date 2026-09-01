@@ -597,9 +597,12 @@ export function cycleDraft(dir: 1 | -1) {
 export const palette = signal<boolean>(false);
 export const shortcuts = signal<boolean>(false);
 
+/** Rows awaiting a date choice from the global keyboard snooze command. */
+export const snoozePickerRows = signal<Row[]>([]);
+
 /** True when a modal surface owns the keyboard. */
 export const overlayOpen = computed(
-  () => palette.value || shortcuts.value || composeOpen.value
+  () => palette.value || shortcuts.value || composeOpen.value || snoozePickerRows.value.length > 0
 );
 
 /* ---- list-column search ---- */

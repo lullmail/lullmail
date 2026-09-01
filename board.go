@@ -68,10 +68,15 @@ func (a *App) handleBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.sweepSnoozed(r.Context(), uid); err != nil {
-		a.log.Error("board sweep failed", "err", err)
+		writeProblem(w, http.StatusInternalServerError, "Sweep Failed", err.Error())
+		return
 	}
 
-	needsYou, waiting := a.briefThreads(r.Context(), uid, r.URL.Query().Get("account"))
+	needsYou, waiting, err := a.briefThreads(r.Context(), uid, r.URL.Query().Get("account"))
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
 	cards := make([]boardCard, 0, len(needsYou))
 	derived := map[string]bool{}
 	for _, t := range needsYou {
@@ -87,15 +92,25 @@ func (a *App) handleBoard(w http.ResponseWriter, r *http.Request) {
 		SELECT id::text, COALESCE(account_id,''), COALESCE(thread_key,''), title, note FROM board_cards
 		WHERE user_id = $1 AND done_at IS NULL AND thread_key IS NOT NULL
 		ORDER BY created_at`, uid)
-	if err == nil {
-		for rows.Next() {
-			var c cardRow
-			if rows.Scan(&c.id, &c.account, &c.thread, &c.title, &c.note) == nil {
-				open = append(open, c)
-			}
-		}
-		rows.Close()
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
 	}
+	for rows.Next() {
+		var c cardRow
+		if err := rows.Scan(&c.id, &c.account, &c.thread, &c.title, &c.note); err != nil {
+			rows.Close()
+			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
+			return
+		}
+		open = append(open, c)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	rows.Close()
 	if len(open) > 0 {
 		live := map[string]briefThread{}
 		r2, err := a.db.QueryContext(r.Context(), `
@@ -106,21 +121,31 @@ func (a *App) handleBoard(w http.ResponseWriter, r *http.Request) {
 			JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 			WHERE b.user_id = $1 AND b.done_at IS NULL AND b.thread_key IS NOT NULL
 			ORDER BY b.id, m.received_at DESC NULLS LAST`, uid)
-		if err == nil {
-			for r2.Next() {
-				var t briefThread
-				var fromJSON string
-				var received *time.Time
-				if r2.Scan(&t.Account, &t.ThreadID, &t.MessageID, &t.Subject, &fromJSON, &received, &t.Preview) == nil {
-					if received != nil {
-						t.ReceivedAt = received.Format(time.RFC3339)
-					}
-					t.From = firstSenderName(fromJSON)
-					live[t.Account+"\x00"+t.ThreadID] = t
-				}
-			}
-			r2.Close()
+		if err != nil {
+			writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+			return
 		}
+		for r2.Next() {
+			var t briefThread
+			var fromJSON string
+			var received *time.Time
+			if err := r2.Scan(&t.Account, &t.ThreadID, &t.MessageID, &t.Subject, &fromJSON, &received, &t.Preview); err != nil {
+				r2.Close()
+				writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
+				return
+			}
+			if received != nil {
+				t.ReceivedAt = received.Format(time.RFC3339)
+			}
+			t.From = firstSenderName(fromJSON)
+			live[t.Account+"\x00"+t.ThreadID] = t
+		}
+		if err := r2.Err(); err != nil {
+			r2.Close()
+			writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+			return
+		}
+		r2.Close()
 		for _, c := range open {
 			if derived[c.account+"\x00"+c.thread] {
 				continue // already on the board on its own
@@ -141,16 +166,26 @@ func (a *App) handleBoard(w http.ResponseWriter, r *http.Request) {
 		SELECT id::text, title, note FROM board_cards
 		WHERE user_id = $1 AND done_at IS NULL AND thread_key IS NULL
 		ORDER BY created_at`, uid)
-	if err == nil {
-		for r3.Next() {
-			var c boardCard
-			if r3.Scan(&c.CardID, &c.Subject, &c.Note) == nil {
-				c.Manual = true
-				cards = append(cards, c)
-			}
-		}
-		r3.Close()
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
 	}
+	for r3.Next() {
+		var c boardCard
+		if err := r3.Scan(&c.CardID, &c.Subject, &c.Note); err != nil {
+			r3.Close()
+			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
+			return
+		}
+		c.Manual = true
+		cards = append(cards, c)
+	}
+	if err := r3.Err(); err != nil {
+		r3.Close()
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	r3.Close()
 
 	waitingCards := make([]boardCard, 0, len(waiting))
 	for _, t := range waiting {
@@ -162,15 +197,25 @@ func (a *App) handleBoard(w http.ResponseWriter, r *http.Request) {
 		SELECT id::text, COALESCE(account_id,''), COALESCE(thread_key,''), title, note FROM board_cards
 		WHERE user_id = $1 AND done_at IS NOT NULL
 		ORDER BY done_at DESC LIMIT 20`, uid)
-	if err == nil {
-		for r4.Next() {
-			var id, account, thread, title, note string
-			if r4.Scan(&id, &account, &thread, &title, &note) == nil {
-				done = append(done, boardCard{CardID: id, Account: account, ThreadID: thread, Subject: title, Note: note})
-			}
-		}
-		r4.Close()
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
 	}
+	for r4.Next() {
+		var id, account, thread, title, note string
+		if err := r4.Scan(&id, &account, &thread, &title, &note); err != nil {
+			r4.Close()
+			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
+			return
+		}
+		done = append(done, boardCard{CardID: id, Account: account, ThreadID: thread, Subject: title, Note: note})
+	}
+	if err := r4.Err(); err != nil {
+		r4.Close()
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	r4.Close()
 
 	writeJSON(w, map[string]any{
 		"needs_you":  cards,

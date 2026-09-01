@@ -2,8 +2,8 @@ import { useEffect, useState } from "preact/hooks";
 import { api, authApi, authed, refreshAuth } from "../lib/api";
 import { createPasskey } from "../lib/passkeys";
 import { fmtDate } from "../lib/fmt";
-import { resetSelection, setList, showError, showToast } from "../lib/store";
-import { Empty, ListSkeleton, PageHead } from "../ui/bits";
+import { resetSelection, setList, showToast } from "../lib/store";
+import { Empty, ListSkeleton, LoadError, PageHead } from "../ui/bits";
 import { navigate } from "../lib/router";
 import { clearOfflineData } from "../lib/offline";
 
@@ -32,12 +32,22 @@ export function SecurityView() {
   const [push, setPush] = useState<PushState | null>(null);
   const [agentTokens, setAgentTokens] = useState<AgentToken[]>([]);
   const [newToken, setNewToken] = useState("");
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [mutationError, setMutationError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const message = (e: unknown, fallback: string) => e instanceof Error && e.message ? fallback + ": " + e.message : fallback;
+  const report = (e: unknown, fallback: string) => setMutationError(message(e, fallback));
 
   const load = async () => {
+    setLoading(true);
+    setLoadError(null);
+    setMutationError(null);
     try {
       const [next, active, pushState, tokens] = await Promise.all([api<Security>("/security"), api<Session[]>("/security/sessions"), api<PushState>("/push"), api<AgentToken[]>("/security/agent-tokens")]);
       setSecurity(next); setSessions(active); setPush(pushState); setAgentTokens(tokens);
-    } catch (e) { showError(e instanceof Error ? e.message : "Security settings failed"); }
+    } catch (e) { setLoadError(message(e, "Security settings failed")); }
+    finally { setLoading(false); }
   };
   useEffect(() => {
     resetSelection();
@@ -54,7 +64,7 @@ export function SecurityView() {
       const credential = await createPasskey(options);
       await api("/security/passkeys/finish?name=" + encodeURIComponent(name), { body: credential });
       showToast("Passkey added"); await load();
-    } catch (e) { showError(e instanceof Error ? e.message : "Could not add passkey"); }
+    } catch (e) { report(e, "Could not add passkey"); }
     finally { setBusy(""); }
   };
 
@@ -62,20 +72,20 @@ export function SecurityView() {
     if (!window.confirm("Replace every unused recovery code? Existing codes will stop working.")) return;
     setBusy("recovery");
     try { const out = await api<{ recovery_codes: string[] }>("/security/recovery/regenerate", { method: "POST" }); setCodes(out.recovery_codes); await load(); }
-    catch (e) { showError(e instanceof Error ? e.message : "Could not create recovery codes"); }
+    catch (e) { report(e, "Could not create recovery codes"); }
     finally { setBusy(""); }
   };
 
   const beginTOTP = async () => {
     setBusy("totp");
     try { setTotp(await api("/security/totp/begin", { method: "POST" })); }
-    catch (e) { showError(e instanceof Error ? e.message : "Could not start authenticator setup"); }
+    catch (e) { report(e, "Could not start authenticator setup"); }
     finally { setBusy(""); }
   };
   const confirmTOTP = async () => {
     setBusy("totp");
     try { await api("/security/totp/confirm", { body: { code: totpCode } }); setTotp(null); setTotpCode(""); showToast("Authenticator enabled"); await load(); }
-    catch (e) { showError(e instanceof Error ? e.message : "Code did not match"); }
+    catch (e) { report(e, "Code did not match"); }
     finally { setBusy(""); }
   };
 
@@ -100,7 +110,7 @@ export function SecurityView() {
         await api("/push", { body: subscription.toJSON() }); showToast("Notifications enabled");
       }
       await load();
-    } catch (e) { showError(e instanceof Error ? e.message : "Notification setup failed"); }
+    } catch (e) { report(e, "Notification setup failed"); }
     finally { setBusy(""); }
   };
 
@@ -111,7 +121,7 @@ export function SecurityView() {
     try {
       const out = await api<{ token: string }>("/security/agent-tokens", { body: { name } });
       setNewToken(out.token); await load();
-    } catch (e) { showError(e instanceof Error ? e.message : "Could not create token"); }
+    } catch (e) { report(e, "Could not create token"); }
     finally { setBusy(""); }
   };
 
@@ -128,21 +138,23 @@ export function SecurityView() {
       await api("/account", { method: "DELETE", body: { confirmation: confirm } });
       await clearOfflineData();
       authed.value = false; await refreshAuth(); navigate("/today");
-    } catch (e) { showError(e instanceof Error ? e.message : "Could not delete account"); setDeleting(false); }
+    } catch (e) { report(e, "Could not delete account"); setDeleting(false); }
   };
 
-  if (!security) return <><PageHead kicker="Settings" title="Security" sub="Passkeys, recovery, and active sessions." /><ListSkeleton rows={3} /></>;
+  if (!security) return <><PageHead kicker="Settings" title="Security" sub="Passkeys, recovery, and active sessions." />{loading && <ListSkeleton rows={3} />}{loadError && <LoadError title="Security settings didn't load." error={loadError} retry={load} />}</>;
 
   return (
     <>
       <PageHead kicker="Settings" title="Security" sub={security.email + " · passkeys are primary; recovery stays in your hands."} />
       <div class="settings-tabs"><a href="/settings">Settings</a><a href="/settings/accounts">Mailboxes</a><a href="/settings/appearance">Appearance</a><a class="active" href="/settings/security">Security</a></div>
+      {loadError && <LoadError title="Some security details may be stale." error={loadError} retry={load} />}
+      {mutationError && <div class="settings-callout" role="alert">{mutationError} <button class="btn btn-ghost btn-sm" type="button" onClick={() => setMutationError(null)}>Dismiss</button></div>}
 
       <section class="settings-section">
         <div class="settings-section-head"><div><h2>Passkeys</h2><p>Device-bound credentials with user verification. Add two before you need the second.</p></div>
           <button class="btn btn-primary btn-sm" type="button" disabled={!!busy} onClick={addPasskey}>{busy === "passkey" ? "Waiting…" : "Add passkey"}</button></div>
         {security.passkeys.map((key) => <div class="security-row" key={key.id}><div><strong>{key.name}</strong><span>Added {fmtDate(key.created_at)}{key.last_used_at ? " · used " + fmtDate(key.last_used_at) : " · not used yet"}</span></div>
-          <button class="btn btn-quiet-danger btn-sm" type="button" disabled={security.passkeys.length < 2} onClick={async () => { try { await api("/security/passkeys/" + encodeURIComponent(key.id), { method: "DELETE" }); await load(); } catch (e) { showError(e instanceof Error ? e.message : "Could not remove passkey"); } }}>Remove</button></div>)}
+          <button class="btn btn-quiet-danger btn-sm" type="button" disabled={security.passkeys.length < 2} onClick={async () => { try { await api("/security/passkeys/" + encodeURIComponent(key.id), { method: "DELETE" }); await load(); } catch (e) { report(e, "Could not remove passkey"); } }}>Remove</button></div>)}
       </section>
 
       <section class="settings-section">
@@ -159,7 +171,7 @@ export function SecurityView() {
 
       <section class="settings-section">
         <div class="settings-section-head"><div><h2>Authenticator app</h2><p>An optional TOTP fallback, encrypted at rest.</p></div>
-          {security.totp_enabled ? <button class="btn btn-quiet-danger btn-sm" type="button" onClick={async () => { await api("/security/totp", { method: "DELETE" }); await load(); }}>Disable</button>
+          {security.totp_enabled ? <button class="btn btn-quiet-danger btn-sm" type="button" onClick={async () => { try { await api("/security/totp", { method: "DELETE" }); await load(); } catch (e) { report(e, "Could not disable authenticator"); } }}>Disable</button>
             : <button class="btn btn-outline btn-sm" type="button" disabled={!!busy} onClick={beginTOTP}>Set up</button>}</div>
         {totp && <div class="totp-setup"><p>Enter this key in your authenticator app, then verify one code.</p><code>{totp.secret}</code><div class="inline-form"><input value={totpCode} inputMode="numeric" autocomplete="one-time-code" placeholder="6-digit code" onInput={(e) => setTotpCode((e.target as HTMLInputElement).value)} /><button class="btn btn-primary btn-sm" type="button" disabled={totpCode.length < 6 || !!busy} onClick={confirmTOTP}>Verify</button></div></div>}
       </section>
@@ -167,7 +179,7 @@ export function SecurityView() {
       <section class="settings-section">
         <div class="settings-section-head"><div><h2>Active sessions</h2><p>Thirty-day server-side sessions. Revoke anything you do not recognise.</p></div><button class="btn btn-outline btn-sm" type="button" onClick={logout}>Sign out here</button></div>
         {sessions.length === 0 && <Empty title="No active sessions." />}
-        {sessions.map((session) => <div class="security-row" key={session.id}><div><strong>{session.current ? "This session" : "Signed-in device"}</strong><span>{session.user_agent || "Unknown browser"} · seen {fmtDate(session.last_seen_at)}</span></div><button class="btn btn-quiet-danger btn-sm" type="button" onClick={async () => { await api("/security/sessions/" + encodeURIComponent(session.id), { method: "DELETE" }); if (session.current) { authed.value = false; await refreshAuth(); } else await load(); }}>Revoke</button></div>)}
+        {sessions.map((session) => <div class="security-row" key={session.id}><div><strong>{session.current ? "This session" : "Signed-in device"}</strong><span>{session.user_agent || "Unknown browser"} · seen {fmtDate(session.last_seen_at)}</span></div><button class="btn btn-quiet-danger btn-sm" type="button" onClick={async () => { try { await api("/security/sessions/" + encodeURIComponent(session.id), { method: "DELETE" }); if (session.current) { authed.value = false; await refreshAuth(); } else await load(); } catch (e) { report(e, "Could not revoke session"); } }}>Revoke</button></div>)}
       </section>
 
       <section class="settings-section">
@@ -180,7 +192,7 @@ export function SecurityView() {
         </div>}
         {agentTokens.length === 0 && !newToken && <Empty title="No agent tokens." />}
         {agentTokens.map((token) => <div class="security-row" key={token.id}><div><strong>{token.name}</strong><span>Created {fmtDate(token.created_at)}{token.last_used_at ? " · used " + fmtDate(token.last_used_at) : " · not used yet"}</span></div>
-          <button class="btn btn-quiet-danger btn-sm" type="button" onClick={async () => { try { await api("/security/agent-tokens/" + encodeURIComponent(token.id), { method: "DELETE" }); await load(); } catch (e) { showError(e instanceof Error ? e.message : "Could not revoke token"); } }}>Revoke</button></div>)}
+          <button class="btn btn-quiet-danger btn-sm" type="button" onClick={async () => { try { await api("/security/agent-tokens/" + encodeURIComponent(token.id), { method: "DELETE" }); await load(); } catch (e) { report(e, "Could not revoke token"); } }}>Revoke</button></div>)}
       </section>
 
       <section class="settings-section danger-zone">

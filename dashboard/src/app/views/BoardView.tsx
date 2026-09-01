@@ -5,7 +5,7 @@ import { accountFilter, accountQS, cursor, resetSelection, setList } from "../li
 import { addCard, markDone, openThread, removeCard, setCardDone } from "../lib/actions";
 import type { Board, BoardCard, Row } from "../lib/types";
 import { daysSince, fmtDate, relativeAge, splitFrom } from "../lib/fmt";
-import { Empty, ListSkeleton, PageHead } from "../ui/bits";
+import { ListSkeleton, LoadError, PageHead } from "../ui/bits";
 import { Icon } from "../ui/Icon";
 
 /** A card the keyboard can act on is one with a message behind it. Manual
@@ -32,6 +32,7 @@ function NeedsCard({ card, index }: { card: BoardCard; index: number }) {
     <div
       class={"board-card" + (cursor.value === index ? " cursor" : "")}
       data-cursor-index={openable ? index : undefined}
+      tabIndex={openable ? 0 : undefined} role="group" aria-label={card.subject || "Board card"}
       onClick={() => { if (openable) cursor.value = index; }}
     >
       <div class="board-card-top">
@@ -73,7 +74,7 @@ function WaitCard({ card }: { card: BoardCard }) {
   const who = splitFrom(card.from || "");
   const age = daysSince(card.received_at);
   return (
-    <div class="board-card wait" onClick={() => card.thread_id && card.account && openThread(card.thread_id, card.account, null)}>
+    <div class="board-card wait" role="button" tabIndex={0} onClick={() => card.thread_id && card.account && openThread(card.thread_id, card.account, null)} onKeyDown={(e) => { if ((e.key === "Enter" || e.key === " ") && card.thread_id && card.account) { e.preventDefault(); openThread(card.thread_id, card.account, null); } }}>
       <div class="board-card-top">
         <span class="board-card-who">{who.name || who.email}</span>
         <span class={"wait-age" + (age >= 3 ? " stale" : "")}>{relativeAge(card.received_at)}</span>
@@ -86,7 +87,7 @@ function WaitCard({ card }: { card: BoardCard }) {
 function SnoozeCard({ row }: { row: Row }) {
   const who = splitFrom(row.from);
   return (
-    <div class="board-card snoozed" onClick={() => openThread(row.thread_id, row.account, "snoozed")}>
+    <div class="board-card snoozed" role="button" tabIndex={0} onClick={() => openThread(row.thread_id, row.account, "snoozed")} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openThread(row.thread_id, row.account, "snoozed"); } }}>
       <div class="board-card-subject">{row.subject || "(no subject)"}</div>
       <div class="board-card-top">
         <span class="board-card-who">{who.name || who.email}</span>
@@ -180,15 +181,17 @@ function Column({ title, count, sub, children }: {
 
 export function BoardView() {
   const lens = accountFilter.value;
-  const { data, loading, error } = useLoad<[Board, Row[]]>("board:" + lens, async (signal) =>
-    Promise.all([
-      api<Board>(accountQS("/board"), { signal }),
-      api<Row[]>(accountQS("/buckets/snoozed"), { signal }).catch(() => [] as Row[]),
-    ])
-  );
+  const { data, loading, error, reload } = useLoad<{ board: Board; snoozed: Row[]; snoozedError: string | null }>("board:" + lens, async (signal) => {
+    const board = await api<Board>(accountQS("/board"), { signal });
+    try {
+      return { board, snoozed: await api<Row[]>(accountQS("/buckets/snoozed"), { signal }), snoozedError: null };
+    } catch (e) {
+      return { board, snoozed: [], snoozedError: e instanceof Error ? e.message : "Snoozed mail did not load." };
+    }
+  });
 
-  const board = data?.[0];
-  const snoozed = data?.[1] || [];
+  const board = data?.board;
+  const snoozed = data?.snoozed || [];
   const needs = board?.needs_you || [];
   const waiting = board?.waiting_on || [];
   const done = board?.done || [];
@@ -214,7 +217,8 @@ export function BoardView() {
       />
 
       {loading && !data && <ListSkeleton rows={4} />}
-      {error && <Empty title="The board didn't load." sub={error} />}
+      {error && <LoadError title="The board didn't load." error={error} retry={reload} />}
+      {data?.snoozedError && <div class="empty" role="alert"><div class="empty-sub">The Snoozed column is unavailable: {data.snoozedError}</div><button class="btn btn-outline btn-sm" type="button" onClick={reload}>Try again</button></div>}
 
       {data && (
         <>
@@ -238,7 +242,7 @@ export function BoardView() {
             </Column>
 
             <Column title="Snoozed" count={snoozed.length}>
-              {snoozed.length === 0 && (
+              {snoozed.length === 0 && !data.snoozedError && (
                 <div class="board-col-empty">Nothing snoozed. Dated ones return here on their day.</div>
               )}
               {snoozed.map((r) => <SnoozeCard row={r} key={r.thread_id} />)}

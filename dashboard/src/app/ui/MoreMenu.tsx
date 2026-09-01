@@ -8,14 +8,24 @@ import { Icon } from "./Icon";
 export function MoreMenu() {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!open) return;
+    ref.current?.querySelector<HTMLButtonElement>("[role='menuitem']")?.focus();
     const away = (ev: MouseEvent) => {
       if (!ref.current?.contains(ev.target as Node)) setOpen(false);
     };
     const t = setTimeout(() => document.addEventListener("click", away), 0);
-    return () => { clearTimeout(t); document.removeEventListener("click", away); };
+    const key = (ev: KeyboardEvent) => {
+      const items = [...(ref.current?.querySelectorAll<HTMLButtonElement>("[role='menuitem']") || [])];
+      const at = items.indexOf(document.activeElement as HTMLButtonElement);
+      if (ev.key === "Escape") { ev.preventDefault(); setOpen(false); triggerRef.current?.focus(); }
+      else if (ev.key === "ArrowDown") { ev.preventDefault(); items[(at + 1 + items.length) % items.length]?.focus(); }
+      else if (ev.key === "ArrowUp") { ev.preventDefault(); items[(at - 1 + items.length) % items.length]?.focus(); }
+    };
+    document.addEventListener("keydown", key);
+    return () => { clearTimeout(t); document.removeEventListener("click", away); document.removeEventListener("keydown", key); };
   }, [open]);
 
   const pick = (fn: () => void) => () => { setOpen(false); fn(); };
@@ -24,8 +34,9 @@ export function MoreMenu() {
   return (
     <div style={{ position: "relative" }} ref={ref}>
       <button
+        ref={triggerRef}
         class="btn-icon" type="button" aria-label="Settings and shortcuts"
-        aria-expanded={open} title="Settings and shortcuts"
+        aria-haspopup="menu" aria-expanded={open} title="Settings and shortcuts"
         onClick={() => setOpen((v) => !v)}
       >
         <Icon name="more" size={16} />

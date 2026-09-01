@@ -13,6 +13,7 @@ import { Compose } from "./ui/Compose";
 import { Palette } from "./ui/Palette";
 import { Shortcuts } from "./ui/Shortcuts";
 import { Toast } from "./ui/Toast";
+import { KeyboardSnoozePicker } from "./ui/SnoozeMenu";
 import { Gate } from "./ui/Gate";
 import { ListSkeleton, RouteSkeleton } from "./ui/bits";
 import { TodayView } from "./views/TodayView";
@@ -79,9 +80,8 @@ function CurrentView() {
 function columnClass(): string {
   if (query.value.trim()) return "column";
   const kind = routeFor(path.value).kind;
-  return kind === "board" || kind === "calendar" || kind === "notes"
-    ? "column workspace-column"
-    : "column";
+  if (kind === "calendar") return "column workspace-column calendar-column";
+  return kind === "board" || kind === "notes" ? "column workspace-column" : "column";
 }
 
 /** A recovery-code or TOTP sign-in means this device has no passkey. One
@@ -137,6 +137,29 @@ function TabBadge() {
 /** The draggable hairline between the list and the reading pane. One number
     in the store (persisted), one grid variable — the panes do the rest. */
 function PaneSplit() {
+  const handleRef = useRef<HTMLDivElement>(null);
+  const [metrics, setMetrics] = useState({ min: 320, now: 320, max: 320 });
+
+  const measure = () => {
+    const page = handleRef.current?.closest(".page");
+    const list = page?.querySelector<HTMLElement>(".list-pane");
+    if (!page || !list) return metrics;
+    const sidebarW = page.querySelector<HTMLElement>(".sidebar")?.offsetWidth || 0;
+    const max = Math.max(page.clientWidth - sidebarW - 7 - 300, 320);
+    const next = { min: 320, now: Math.round(list.getBoundingClientRect().width), max: Math.round(max) };
+    setMetrics((current) => current.min === next.min && current.now === next.now && current.max === next.max ? current : next);
+    return next;
+  };
+
+  useEffect(() => {
+    measure();
+    const page = handleRef.current?.closest(".page");
+    if (!page || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(page);
+    return () => observer.disconnect();
+  }, []);
+
   const onDown = (ev: PointerEvent) => {
     const handle = ev.currentTarget as HTMLElement;
     const page = handle.closest(".page");
@@ -151,6 +174,7 @@ function PaneSplit() {
     const onMove = (e: PointerEvent) => {
       const w = Math.round(Math.min(Math.max(e.clientX - list.getBoundingClientRect().left, 320), Math.max(max, 320)));
       setSplitWidth(w);
+      setMetrics((current) => ({ ...current, now: w, max: Math.round(Math.max(max, 320)) }));
     };
     const onUp = () => {
       handle.releasePointerCapture(ev.pointerId);
@@ -161,12 +185,42 @@ function PaneSplit() {
     handle.addEventListener("pointermove", onMove);
     handle.addEventListener("pointerup", onUp);
   };
-  return <div class="pane-split" onPointerDown={onDown} role="separator" aria-orientation="vertical" aria-label="Resize list and reading panes" />;
+  const onKeyDown = (ev: KeyboardEvent) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(ev.key)) return;
+    ev.preventDefault();
+    const current = measure();
+    const step = ev.shiftKey ? 64 : 24;
+    const requested = ev.key === "Home"
+      ? current.min
+      : ev.key === "End"
+        ? current.max
+        : current.now + (ev.key === "ArrowLeft" ? -step : step);
+    const next = Math.min(Math.max(requested, current.min), current.max);
+    setSplitWidth(next);
+    setMetrics({ ...current, now: next });
+  };
+  return (
+    <div
+      ref={handleRef}
+      class="pane-split"
+      onPointerDown={onDown}
+      onKeyDown={onKeyDown}
+      role="separator"
+      tabIndex={0}
+      aria-orientation="vertical"
+      aria-label="Resize list and reading panes"
+      aria-valuemin={metrics.min}
+      aria-valuenow={metrics.now}
+      aria-valuemax={metrics.max}
+      aria-valuetext={`${metrics.now} pixels`}
+    />
+  );
 }
 
 export default function App() {
   const openThreadId = reader.value.threadId;
   const wide = useWide();
+  const classic = layout.value === "classic" && wide;
   // The island is prerendered at build time, where there is no token and no URL.
   // Painting the chrome until mount keeps the prerendered markup and the first
   // client render identical, so hydration has nothing to reconcile.
@@ -220,7 +274,7 @@ export default function App() {
   if (!mounted || !authReady.value) {
     return (
       <div class="page">
-        <Topline />
+        <Topline classic={classic} />
         <div class="column"><ListSkeleton /></div>
       </div>
     );
@@ -234,15 +288,13 @@ export default function App() {
     );
   }
 
-  const classic = layout.value === "classic" && wide;
-
   if (classic) {
     return (
       <div
         class="page classic"
         style={splitWidth.value ? ({ "--list-w": splitWidth.value + "px" } as any) : undefined}
       >
-        <Topline />
+        <Topline classic={classic} />
         <PasskeyNudge />
         <Sidebar />
         <div class="list-pane"><div class="column"><Suspense fallback={<RouteSkeleton />}><CurrentView /></Suspense></div></div>
@@ -268,7 +320,7 @@ export default function App() {
 
   return (
     <div class="page">
-      <Topline />
+      <Topline classic={classic} />
       <PasskeyNudge />
       {/* A thread replaces the list rather than sitting beside it: the mail
           gets the whole window, and there is never an empty pane. */}
@@ -283,7 +335,7 @@ export default function App() {
   );
 }
 
-function Overlays() {
+export function Overlays() {
   return (
     <>
       {palette.value && <Palette />}
@@ -291,9 +343,12 @@ function Overlays() {
       {compose.value && composeOpen.value && <Compose />}
       {/* The thread has its own verb bar with key chips; two stacked bars is noise. */}
       {accountCount.value !== 0 && !reader.value.threadId && <KeyHints />}
-      <Toast />
+      <KeyboardSnoozePicker />
+      <div class="notice-stack">
+        <Toast />
+        {offline.value && <div class="offline-note" role="status">Offline — cached mail is available; safe actions are queued for reconnect.</div>}
+      </div>
       <TabBadge />
-      {offline.value && <div class="offline-note" role="status">Offline — cached mail is available; safe actions are queued for reconnect.</div>}
     </>
   );
 }

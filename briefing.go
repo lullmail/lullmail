@@ -30,7 +30,7 @@ type briefThread struct {
 // requires: Imbox bucket, unread, and the thread's latest message is from
 // someone else. "You're waiting" requires the user to have spoken last in a
 // thread someone else started.
-func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, waiting []briefThread) {
+func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, waiting []briefThread, err error) {
 	// The user's own addresses, for whose-turn analysis.
 	myAddr := map[string]bool{}
 	{
@@ -41,14 +41,22 @@ func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, 
 			myArgs = append(myArgs, account)
 		}
 		rows, err := a.db.QueryContext(ctx, myQuery, myArgs...)
-		if err == nil {
-			for rows.Next() {
-				var s string
-				rows.Scan(&s)
-				myAddr[s] = true
-			}
-			rows.Close()
+		if err != nil {
+			return nil, nil, err
 		}
+		for rows.Next() {
+			var s string
+			if err := rows.Scan(&s); err != nil {
+				rows.Close()
+				return nil, nil, err
+			}
+			myAddr[s] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		rows.Close()
 	}
 
 	// Latest message of every Imbox thread the user owns.
@@ -67,7 +75,7 @@ func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, 
 	listQuery += ` ORDER BY m.account_id, m.thread_id, m.received_at DESC NULLS LAST`
 	rows, err := a.db.QueryContext(ctx, listQuery, listArgs...)
 	if err != nil {
-		return nil, nil
+		return nil, nil, err
 	}
 	defer rows.Close()
 
@@ -84,29 +92,43 @@ func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, 
 			FROM mail_messages m
 			JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 			GROUP BY m.account_id, m.thread_id`, uid, addrList(myAddr))
-		if err == nil {
-			for r2.Next() {
-				var acct, th string
-				var mine, theirs bool
-				if r2.Scan(&acct, &th, &mine, &theirs) == nil {
-					spoke[acct+"\x00"+th] = [2]bool{mine, theirs}
-				}
-			}
-			r2.Close()
+		if err != nil {
+			return nil, nil, err
 		}
+		for r2.Next() {
+			var acct, th string
+			var mine, theirs bool
+			if err := r2.Scan(&acct, &th, &mine, &theirs); err != nil {
+				r2.Close()
+				return nil, nil, err
+			}
+			spoke[acct+"\x00"+th] = [2]bool{mine, theirs}
+		}
+		if err := r2.Err(); err != nil {
+			r2.Close()
+			return nil, nil, err
+		}
+		r2.Close()
 		r3, err := a.db.QueryContext(ctx, `
 			SELECT h.account_id, h.message_id, h.read_at IS NOT NULL
 			FROM hey_messages h WHERE h.user_id = $1 AND h.bucket = 'imbox'`, uid)
-		if err == nil {
-			for r3.Next() {
-				var acct, id string
-				var read bool
-				if r3.Scan(&acct, &id, &read) == nil {
-					readState[acct+"\x00"+id] = read
-				}
-			}
-			r3.Close()
+		if err != nil {
+			return nil, nil, err
 		}
+		for r3.Next() {
+			var acct, id string
+			var read bool
+			if err := r3.Scan(&acct, &id, &read); err != nil {
+				r3.Close()
+				return nil, nil, err
+			}
+			readState[acct+"\x00"+id] = read
+		}
+		if err := r3.Err(); err != nil {
+			r3.Close()
+			return nil, nil, err
+		}
+		r3.Close()
 	}
 
 	for rows.Next() {
@@ -114,7 +136,7 @@ func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, 
 		var fromJSON string
 		var received *time.Time
 		if err := rows.Scan(&bt.Account, &bt.ThreadID, &bt.MessageID, &bt.Subject, &fromJSON, &received, &bt.Preview); err != nil {
-			continue
+			return nil, nil, err
 		}
 		if received != nil {
 			bt.ReceivedAt = received.Format(time.RFC3339)
@@ -132,7 +154,10 @@ func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, 
 			waiting = append(waiting, bt)
 		}
 	}
-	return needsYou, waiting
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return needsYou, waiting, nil
 }
 
 func (a *App) handleBriefing(w http.ResponseWriter, r *http.Request) {
@@ -143,10 +168,15 @@ func (a *App) handleBriefing(w http.ResponseWriter, r *http.Request) {
 	}
 	// Returned snoozes re-enter the picture before it is drawn.
 	if err := a.sweepSnoozed(r.Context(), uid); err != nil {
-		a.log.Error("briefing sweep failed", "err", err)
+		writeProblem(w, http.StatusInternalServerError, "Sweep Failed", err.Error())
+		return
 	}
 	account := r.URL.Query().Get("account")
-	needsYou, waiting := a.briefThreads(r.Context(), uid, account)
+	needsYou, waiting, err := a.briefThreads(r.Context(), uid, account)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
 
 	// Feed + Paper Trail unread counts, screener total.
 	var feedN, paperN, screenerN int
@@ -164,7 +194,10 @@ func (a *App) handleBriefing(w http.ResponseWriter, r *http.Request) {
 		briefCounts += ` AND ea.id = $2`
 		briefArgs = append(briefArgs, account)
 	}
-	a.db.QueryRowContext(r.Context(), briefCounts, briefArgs...).Scan(&feedN, &paperN, &screenerN)
+	if err := a.db.QueryRowContext(r.Context(), briefCounts, briefArgs...).Scan(&feedN, &paperN, &screenerN); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
 
 	writeJSON(w, map[string]any{
 		"needs_you":    orEmpty(needsYou),

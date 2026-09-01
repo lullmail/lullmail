@@ -23,7 +23,15 @@ const undoWindow = 5 * time.Second
 type pendingSend struct {
 	cancel context.CancelFunc
 	done   <-chan error
+	state  sendState
 }
+
+type sendState uint8
+
+const (
+	sendPending sendState = iota
+	sendDelivering
+)
 
 type sendQueue struct {
 	mu    sync.Mutex
@@ -230,6 +238,15 @@ func (a *App) enqueue(w http.ResponseWriter, deliver deliverFunc, outgoing *mail
 			return
 		case <-time.After(undoWindow):
 		}
+		a.sendq.mu.Lock()
+		p, ok := a.sendq.sends[id]
+		if ok && p.state == sendPending {
+			p.state = sendDelivering
+		}
+		a.sendq.mu.Unlock()
+		if !ok {
+			return
+		}
 		err := deliver(ctx, outgoing)
 		if err != nil {
 			a.log.Error("send failed", "err", err)
@@ -244,8 +261,10 @@ func (a *App) handleUndoSend(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	a.sendq.mu.Lock()
 	p, ok := a.sendq.sends[id]
-	if ok {
+	if ok && p.state == sendPending {
 		delete(a.sendq.sends, id)
+	} else {
+		ok = false
 	}
 	a.sendq.mu.Unlock()
 	if !ok {

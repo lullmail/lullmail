@@ -5,7 +5,7 @@ import { accountFilter, accountQS, cursor, resetSelection, setList } from "../li
 import { markDone, openThread, sendMail } from "../lib/actions";
 import type { Briefing, BriefThread, Row, ScreenerSender } from "../lib/types";
 import { countOf, daysSince, fmtDate, relativeAge, splitFrom } from "../lib/fmt";
-import { Empty, ListSkeleton, PageHead, SectionHead } from "../ui/bits";
+import { Empty, ListSkeleton, LoadError, PageHead, SectionHead } from "../ui/bits";
 import { ScreenerCard } from "../ui/ScreenerCard";
 import { Icon } from "../ui/Icon";
 
@@ -92,7 +92,7 @@ function WaitingRow({ thread }: { thread: BriefThread }) {
   const who = splitFrom(thread.from);
   const age = daysSince(thread.received_at);
   return (
-    <div class="wait-row" onClick={() => openThread(thread.thread_id, thread.account, "imbox")}>
+    <div class="wait-row" role="button" tabIndex={0} onClick={() => openThread(thread.thread_id, thread.account, "imbox")} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openThread(thread.thread_id, thread.account, "imbox"); } }}>
       <span class="wait-who">{who.name || who.email}</span>
       <span class="wait-what">{thread.subject || "(no subject)"}</span>
       {/* Ageing is the point of this section: a three-day silence is the nudge. */}
@@ -103,15 +103,17 @@ function WaitingRow({ thread }: { thread: BriefThread }) {
 
 export function TodayView() {
   const lens = accountFilter.value;
-  const { data, loading, error } = useLoad<[Briefing, ScreenerSender[]]>("today:" + lens, async (signal) =>
-    Promise.all([
-      api<Briefing>(accountQS("/briefing"), { signal }),
-      api<ScreenerSender[]>(accountQS("/screener"), { signal }).catch(() => [] as ScreenerSender[]),
-    ])
-  );
+  const { data, loading, error, reload } = useLoad<{ brief: Briefing; senders: ScreenerSender[]; sendersError: string | null }>("today:" + lens, async (signal) => {
+    const brief = await api<Briefing>(accountQS("/briefing"), { signal });
+    try {
+      return { brief, senders: await api<ScreenerSender[]>(accountQS("/screener"), { signal }), sendersError: null };
+    } catch (e) {
+      return { brief, senders: [], sendersError: e instanceof Error ? e.message : "New senders did not load." };
+    }
+  });
 
-  const brief = data?.[0];
-  const senders = data?.[1] || [];
+  const brief = data?.brief;
+  const senders = data?.senders || [];
   const needs = brief?.needs_you || [];
   const waiting = brief?.waiting_on || [];
 
@@ -130,7 +132,7 @@ export function TodayView() {
   const sub = parts.length ? parts.join(", ") + "." : "Everything's handled. This is the whole picture.";
 
   const nothingAtAll =
-    !loading && !error && !needs.length && !senders.length && !waiting.length &&
+    !loading && !error && !data?.sendersError && !needs.length && !senders.length && !waiting.length &&
     !brief?.feed_unread && !brief?.paper_unread;
 
   return (
@@ -146,7 +148,8 @@ export function TodayView() {
       </div>
 
       {loading && !data && <ListSkeleton rows={3} />}
-      {error && <Empty title="The briefing didn't load." sub={error} />}
+      {error && <LoadError title="The briefing didn't load." error={error} retry={reload} />}
+      {data?.sendersError && <div class="empty" role="alert"><div class="empty-sub">New senders are unavailable: {data.sendersError}</div><button class="btn btn-outline btn-sm" type="button" onClick={reload}>Try again</button></div>}
 
       {needs.length > 0 && (
         <>

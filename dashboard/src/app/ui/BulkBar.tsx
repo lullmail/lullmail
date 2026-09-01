@@ -25,7 +25,7 @@ export function BulkBar() {
       </button>
 
       <div style={{ position: "relative" }}>
-        <button class="btn btn-ghost btn-sm" type="button" onClick={() => setAsideOpen((v) => !v)}>
+        <button class="btn btn-ghost btn-sm" type="button" aria-haspopup="menu" aria-expanded={asideOpen} onClick={() => setAsideOpen((v) => !v)}>
           <Icon name="aside" size={14} /> Snooze
         </button>
         {asideOpen && (

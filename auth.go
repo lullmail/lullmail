@@ -29,6 +29,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/neutron-build/neutron/mail"
 )
 
 const (
@@ -368,31 +369,44 @@ func (a *App) handleBootstrapFinish(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 401, "Unauthorized", "the one-time setup token is required")
 		return
 	}
-	uid, err := a.finishRegistration(w, r, "bootstrap")
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeProblem(w, 500, "Setup Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+	uid, err := a.finishRegistration(w, r, "bootstrap", tx)
 	if err != nil {
 		return
 	}
-	// Setup is complete: pin the origin this ceremony used (unless PUBLIC_URL
-	// was set explicitly) and retire the one-time token for good.
+	// The first credential, detected origin, and recovery path become visible
+	// together. A failed setup therefore remains a bootstrap-able installation.
 	if !a.cfg.PublicURLSet && a.cfg.RPID != "" {
-		if err := storeSetting(a.db, "public_url", a.cfg.PublicURL); err != nil {
+		if _, err := tx.ExecContext(r.Context(), `INSERT INTO app_settings (key,value) VALUES ('public_url',$1)
+			ON CONFLICT (key) DO UPDATE SET value=excluded.value`, a.cfg.PublicURL); err != nil {
 			writeProblem(w, 500, "Setup Failed", "could not persist the site origin: "+err.Error())
 			return
 		}
 	}
-	if a.cfg.DataDir != "" && !a.tokenFromEnv {
-		deleteSetupToken(a.cfg.DataDir)
-	}
-	a.setupTokenCreated = time.Time{}
-	codes, err := a.replaceRecoveryCodes(r.Context(), uid)
+	codes, err := a.replaceRecoveryCodesTx(r.Context(), tx, uid)
 	if err != nil {
 		writeProblem(w, 500, "Recovery Setup Failed", err.Error())
 		return
 	}
-	if err := a.createSession(w, r, uid, loginMethodBootstrap); err != nil {
+	rawSession, err := a.persistSession(r.Context(), tx, r, uid, loginMethodBootstrap)
+	if err != nil {
 		writeProblem(w, 500, "Session Failed", err.Error())
 		return
 	}
+	if err := tx.Commit(); err != nil {
+		writeProblem(w, 500, "Setup Failed", err.Error())
+		return
+	}
+	a.setCookie(w, sessionCookie, rawSession, sessionLifetime)
+	if a.cfg.DataDir != "" && !a.tokenFromEnv {
+		deleteSetupToken(a.cfg.DataDir)
+	}
+	a.setupTokenCreated = time.Time{}
 	writeJSON(w, map[string]any{"ok": true, "recovery_codes": codes})
 }
 
@@ -431,14 +445,24 @@ func (a *App) beginRegistration(w http.ResponseWriter, r *http.Request, uid, kin
 }
 
 func (a *App) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Request) {
-	uid, err := a.finishRegistration(w, r, "register")
+	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
+		writeProblem(w, 500, "Passkey Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+	uid, err := a.finishRegistration(w, r, "register", tx)
+	if err != nil {
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeProblem(w, 500, "Passkey Failed", err.Error())
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "user_id": uid})
 }
 
-func (a *App) finishRegistration(w http.ResponseWriter, r *http.Request, kind string) (string, error) {
+func (a *App) finishRegistration(w http.ResponseWriter, r *http.Request, kind string, tx *sql.Tx) (string, error) {
 	uid, session, err := a.takeCeremony(r, kind)
 	if err != nil {
 		writeProblem(w, 400, "Passkey Expired", "start the passkey step again")
@@ -472,7 +496,11 @@ func (a *App) finishRegistration(w http.ResponseWriter, r *http.Request, kind st
 		name = name[:80]
 	}
 	id := base64.RawURLEncoding.EncodeToString(credential.ID)
-	_, err = a.db.ExecContext(r.Context(), `INSERT INTO auth_credentials
+	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+		writeProblem(w, 409, "Passkey Failed", "the account is being deleted")
+		return "", err
+	}
+	_, err = tx.ExecContext(r.Context(), `INSERT INTO auth_credentials
 		(id,user_id,name,credential_ciphertext) VALUES ($1,$2,$3,$4)`, id, uid, name, sealed)
 	if err != nil {
 		writeProblem(w, 409, "Passkey Exists", "this passkey is already registered")
@@ -599,21 +627,33 @@ func (a *App) takeCeremony(r *http.Request, kind string) (string, *webauthn.Sess
 }
 
 func (a *App) createSession(w http.ResponseWriter, r *http.Request, uid, method string) error {
+	raw, err := a.persistSession(r.Context(), a.db, r, uid, method)
+	if err == nil {
+		a.setCookie(w, sessionCookie, raw, sessionLifetime)
+	}
+	return err
+}
+
+type sqlExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func (a *App) persistSession(ctx context.Context, db sqlExecer, r *http.Request, uid, method string) (string, error) {
 	raw, err := opaqueToken(32)
 	if err != nil {
-		return err
+		return "", err
 	}
 	ua := r.UserAgent()
 	if len(ua) > 300 {
 		ua = ua[:300]
 	}
-	_, err = a.db.ExecContext(r.Context(), `INSERT INTO auth_sessions
+	_, err = db.ExecContext(ctx, `INSERT INTO auth_sessions
 		(id_hash,user_id,expires_at,user_agent,login_method) VALUES ($1,$2,$3,$4,$5)`,
 		tokenHash(raw), uid, time.Now().Add(sessionLifetime), ua, normalizeLoginMethod(method))
-	if err == nil {
-		a.setCookie(w, sessionCookie, raw, sessionLifetime)
+	if err != nil {
+		return "", err
 	}
-	return err
+	return raw, nil
 }
 
 // sessionLoginMethod reports how the session backing a request was created.
@@ -721,12 +761,23 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) replaceRecoveryCodes(ctx context.Context, uid string) ([]string, error) {
-	codes := make([]string, 10)
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+	if err := lockAuthUser(ctx, tx, uid); err != nil {
+		return nil, err
+	}
+	codes, err := a.replaceRecoveryCodesTx(ctx, tx, uid)
+	if err != nil {
+		return nil, err
+	}
+	return codes, tx.Commit()
+}
+
+func (a *App) replaceRecoveryCodesTx(ctx context.Context, tx *sql.Tx, uid string) ([]string, error) {
+	codes := make([]string, 10)
 	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_recovery_codes WHERE user_id=$1`, uid); err != nil {
 		return nil, err
 	}
@@ -741,7 +792,7 @@ func (a *App) replaceRecoveryCodes(ctx context.Context, uid string) ([]string, e
 			return nil, err
 		}
 	}
-	return codes, tx.Commit()
+	return codes, nil
 }
 
 func (a *App) recoveryDigest(code string) string {
@@ -777,7 +828,17 @@ func (a *App) handleRecoveryLogin(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 401, "Recovery Failed", "that recovery code is not valid")
 		return
 	}
-	result, err := a.db.ExecContext(r.Context(), `UPDATE auth_recovery_codes SET used_at=now()
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeProblem(w, 500, "Recovery Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+		writeProblem(w, 401, "Recovery Failed", "that recovery code is not valid")
+		return
+	}
+	result, err := tx.ExecContext(r.Context(), `UPDATE auth_recovery_codes SET used_at=now()
 		WHERE user_id=$1 AND code_hash=$2 AND used_at IS NULL`, uid, a.recoveryDigest(req.Code))
 	if err != nil {
 		writeProblem(w, 500, "Recovery Failed", err.Error())
@@ -788,10 +849,16 @@ func (a *App) handleRecoveryLogin(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 401, "Recovery Failed", "that recovery code is not valid or was already used")
 		return
 	}
-	if err := a.createSession(w, r, uid, loginMethodRecovery); err != nil {
+	rawSession, err := a.persistSession(r.Context(), tx, r, uid, loginMethodRecovery)
+	if err != nil {
 		writeProblem(w, 500, "Session Failed", err.Error())
 		return
 	}
+	if err := tx.Commit(); err != nil {
+		writeProblem(w, 500, "Session Failed", err.Error())
+		return
+	}
+	a.setCookie(w, sessionCookie, rawSession, sessionLifetime)
 	a.clearAuthAttempts(r)
 	writeJSON(w, map[string]any{"ok": true})
 }
@@ -890,21 +957,49 @@ func (a *App) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"email": email, "passkeys": passkeys, "totp_enabled": totp, "recovery_codes_remaining": recovery})
 }
 
+// Auth-material mutations lock the owner row first. PostgreSQL holds this
+// lock through commit, serializing passkey changes with full account deletion.
+func lockAuthUser(ctx context.Context, tx *sql.Tx, uid string) error {
+	var locked string
+	return tx.QueryRowContext(ctx, `SELECT id FROM users WHERE id=$1 FOR UPDATE`, uid).Scan(&locked)
+}
+
 func (a *App) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 	uid, _ := a.userID(r.Context())
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeProblem(w, 500, "Delete Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeProblem(w, 404, "Not Found", "no such account")
+		} else {
+			writeProblem(w, 500, "Delete Failed", err.Error())
+		}
+		return
+	}
 	var count int
-	_ = a.db.QueryRowContext(r.Context(), `SELECT count(*) FROM auth_credentials WHERE user_id=$1`, uid).Scan(&count)
+	if err := tx.QueryRowContext(r.Context(), `SELECT count(*) FROM auth_credentials WHERE user_id=$1`, uid).Scan(&count); err != nil {
+		writeProblem(w, 500, "Delete Failed", err.Error())
+		return
+	}
 	if count <= 1 {
 		writeProblem(w, 409, "Last Passkey", "add another passkey before removing this one")
 		return
 	}
-	result, err := a.db.ExecContext(r.Context(), `DELETE FROM auth_credentials WHERE id=$1 AND user_id=$2`, r.PathValue("id"), uid)
+	result, err := tx.ExecContext(r.Context(), `DELETE FROM auth_credentials WHERE id=$1 AND user_id=$2`, r.PathValue("id"), uid)
 	if err != nil {
 		writeProblem(w, 500, "Delete Failed", err.Error())
 		return
 	}
 	if n, _ := result.RowsAffected(); n != 1 {
 		writeProblem(w, 404, "Not Found", "no such passkey")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeProblem(w, 500, "Delete Failed", err.Error())
 		return
 	}
 	a.revokeOtherSessions(r, uid)
@@ -1055,22 +1150,29 @@ func (a *App) handleFullAccountDelete(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 422, "Confirmation Mismatch", "type the account email address exactly")
 		return
 	}
+	finishFullDelete := a.beginFullAccountDeletion()
+	committed := false
+	var mirrors []mail.AccountID
+	defer func() { finishFullDelete(mirrors, committed) }()
 	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeProblem(w, 500, "Delete Failed", err.Error())
 		return
 	}
 	defer tx.Rollback()
+	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+		writeProblem(w, 500, "Delete Failed", err.Error())
+		return
+	}
 	rows, err := tx.QueryContext(r.Context(), `SELECT mirror_account_id FROM email_accounts WHERE user_id=$1`, uid)
 	if err != nil {
 		writeProblem(w, 500, "Delete Failed", err.Error())
 		return
 	}
-	var mirrors []string
 	for rows.Next() {
 		var id string
 		if rows.Scan(&id) == nil {
-			mirrors = append(mirrors, id)
+			mirrors = append(mirrors, mail.AccountID(id))
 		}
 	}
 	rows.Close()
@@ -1081,7 +1183,7 @@ func (a *App) handleFullAccountDelete(w http.ResponseWriter, r *http.Request) {
 			`DELETE FROM mail_sync_state WHERE account_id=$1`, `DELETE FROM mail_accounts WHERE id=$1`,
 		}
 		for _, q := range queries {
-			if _, err = tx.ExecContext(r.Context(), q, mirror); err != nil {
+			if _, err = tx.ExecContext(r.Context(), q, string(mirror)); err != nil {
 				writeProblem(w, 500, "Delete Failed", err.Error())
 				return
 			}
@@ -1095,6 +1197,7 @@ func (a *App) handleFullAccountDelete(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Delete Failed", err.Error())
 		return
 	}
+	committed = true
 	a.clearCookie(w, sessionCookie)
 	writeJSON(w, map[string]any{"deleted": true})
 }

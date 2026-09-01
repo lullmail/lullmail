@@ -10,12 +10,20 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/neutron-build/neutron/mail"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
+
+var oauthRefreshLocks sync.Map
+
+func oauthRefreshLock(account string) *sync.Mutex {
+	lock, _ := oauthRefreshLocks.LoadOrStore(account, &sync.Mutex{})
+	return lock.(*sync.Mutex)
+}
 
 func (a *App) mountOAuthCallbacks(mux *http.ServeMux) {
 	mux.HandleFunc("GET /oauth/google/callback", func(w http.ResponseWriter, r *http.Request) { a.handleOAuthCallback(w, r, "gmail") })
@@ -184,6 +192,15 @@ func oauthIdentity(ctx context.Context, provider string, client *http.Client) (s
 }
 
 func (a *App) oauthToken(ctx context.Context, provider, account, address, sealed string) (mail.Credential, error) {
+	lock := oauthRefreshLock(account)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// Token() reads the account before entering this lock. Reload it so a
+	// concurrent refresh cannot continue from the ciphertext it saw earlier.
+	if err := a.db.QueryRowContext(ctx, `SELECT cred_ciphertext FROM email_accounts WHERE mirror_account_id=$1`, account).Scan(&sealed); err != nil {
+		return mail.Credential{}, err
+	}
 	plain, err := openSecret(a.cfg, sealed)
 	if err != nil {
 		return mail.Credential{}, err
@@ -200,11 +217,25 @@ func (a *App) oauthToken(ctx context.Context, provider, account, address, sealed
 	if err != nil {
 		return mail.Credential{}, err
 	}
+	if fresh.RefreshToken == "" {
+		fresh.RefreshToken = token.RefreshToken
+	}
 	if fresh.AccessToken != token.AccessToken || fresh.RefreshToken != token.RefreshToken || !fresh.Expiry.Equal(token.Expiry) {
 		raw, _ := json.Marshal(fresh)
-		next, sealErr := sealSecret(a.cfg, string(raw))
-		if sealErr == nil {
-			_, _ = a.db.ExecContext(ctx, `UPDATE email_accounts SET cred_ciphertext=$1 WHERE mirror_account_id=$2`, next, account)
+		next, err := sealSecret(a.cfg, string(raw))
+		if err != nil {
+			return mail.Credential{}, err
+		}
+		result, err := a.db.ExecContext(ctx, `UPDATE email_accounts SET cred_ciphertext=$1 WHERE mirror_account_id=$2 AND cred_ciphertext=$3`, next, account, sealed)
+		if err != nil {
+			return mail.Credential{}, err
+		}
+		updated, err := result.RowsAffected()
+		if err != nil {
+			return mail.Credential{}, err
+		}
+		if updated != 1 {
+			return mail.Credential{}, fmt.Errorf("OAuth credential changed concurrently for account %s", account)
 		}
 	}
 	return mail.Credential{Provider: mail.Provider(provider), Email: address, AccessToken: fresh.AccessToken}, nil

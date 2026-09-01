@@ -83,15 +83,16 @@ func connectApp(cfg *Config) *App {
 	}
 
 	app := &App{
-		cfg:          cfg,
-		db:           db,
-		log:          slog.Default(),
-		store:        store,
-		eng:          mail.NewEngine(store, slog.Default()),
-		events:       newSyncEvents(),
-		sendq:        newSendQueue(),
-		authAttempts: map[string]authAttempt{},
-		tokenFromEnv: cfg.APIToken != "",
+		cfg:           cfg,
+		db:            db,
+		log:           slog.Default(),
+		store:         store,
+		eng:           mail.NewEngine(store, slog.Default()),
+		events:        newSyncEvents(),
+		sendq:         newSendQueue(),
+		authAttempts:  map[string]authAttempt{},
+		accountStates: map[mail.AccountID]*accountLifecycle{},
+		tokenFromEnv:  cfg.APIToken != "",
 	}
 	// Restore a setup-pinned origin and surface the first-run token before
 	// WebAuthn is constructed: both decide whether this boot runs configured
@@ -109,14 +110,14 @@ func connectApp(cfg *Config) *App {
 		log.Println("app: no origin pinned — first-run setup will detect it from the browser")
 	}
 	app.svc = mail.NewService(store, app.eng)
-	app.svc.Resolve = newResolver()
+	app.svc.Resolve = app.accountResolver()
 	app.svc.Senders = func(acct mail.AccountID) (*mail.Sender, mail.Address, bool) {
 		return app.SMTPFor(context.Background(), acct)
 	}
 
 	app.sched = mail.NewScheduler(store, app.eng, nil, slog.Default())
 	app.sched.Tokens = app
-	app.sched.Resolve = newResolver()
+	app.sched.Resolve = app.accountResolver()
 	app.sched.Interval = time.Minute
 	app.sched.AfterSync = func(ctx context.Context, account mail.Account, reports []mail.SyncReport, err error) {
 		app.finishSync(ctx, account.ID, reports, err)
@@ -295,7 +296,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	api.HandleFunc("GET /accounts/{id}", a.handleAccountItem)
 	api.HandleFunc("DELETE /accounts/{id}", a.handleAccountItem)
 	api.HandleFunc("POST /accounts/{id}", a.handleAccountItem)
-	api.HandleFunc("GET /accounts/{id}/export", a.handleAccountExport)
+	api.Handle("GET /accounts/{id}/export", a.accountExportLifecycle(http.HandlerFunc(a.handleAccountExport)))
 	api.HandleFunc("GET /events", a.handleEvents)
 	api.HandleFunc("GET /security", a.handleSecurity)
 	api.HandleFunc("POST /security/passkeys/begin", a.handlePasskeyRegisterBegin)
@@ -339,10 +340,10 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	api.HandleFunc("GET /buckets/{bucket}", a.handleBucket)
 	// GitHub-derived thread ids contain "/" (repo/check-suites/...@github.com),
 	// so the segment is a suffix wildcard, not a single path element.
-	api.HandleFunc("GET /threads/{thread...}", a.handleThread)
+	api.Handle("GET /threads/{thread...}", a.accountWorkLifecycle(http.HandlerFunc(a.handleThread)))
 	api.HandleFunc("POST /messages/{message}/action", a.handleMessageAction)
-	api.HandleFunc("GET /messages/{message}/attachment/{part}", a.handleAttachment)
-	api.HandleFunc("GET /messages/{message}/eml", a.handleMessageEML)
+	api.Handle("GET /messages/{message}/attachment/{part}", a.accountWorkLifecycle(http.HandlerFunc(a.handleAttachment)))
+	api.Handle("GET /messages/{message}/eml", a.accountWorkLifecycle(http.HandlerFunc(a.handleMessageEML)))
 	api.HandleFunc("POST /send", a.handleSend)
 	api.HandleFunc("DELETE /outbox/{id}", a.handleUndoSend)
 	api.HandleFunc("POST /classify", func(w http.ResponseWriter, r *http.Request) {

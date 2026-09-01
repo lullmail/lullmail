@@ -422,20 +422,21 @@ func decodeEmails(raw json.RawMessage) ([]mail.Envelope, error) {
 	envs := make([]mail.Envelope, 0, len(out.List))
 	for _, m := range out.List {
 		env := mail.Envelope{
-			ID:            mail.NativeMessageID(mail.ProviderJMAP, m.ID),
-			ThreadID:      mail.ThreadID(m.ThreadID),
-			Subject:       m.Subject,
-			Preview:       m.Preview,
-			Size:          m.Size,
-			ReceivedAt:    m.ReceivedAt,
-			HasAttachment: m.HasAttachment,
-			From:          addrs(m.From),
-			To:            addrs(m.To),
-			Cc:            addrs(m.Cc),
-			Bcc:           addrs(m.Bcc),
-			ReplyTo:       addrs(m.ReplyTo),
-			InReplyTo:     m.InReplyTo,
-			References:    m.References,
+			ID:                 mail.NativeMessageID(mail.ProviderJMAP, m.ID),
+			ThreadID:           mail.ThreadID(m.ThreadID),
+			Subject:            m.Subject,
+			Preview:            m.Preview,
+			Size:               m.Size,
+			ReceivedAt:         m.ReceivedAt,
+			HasAttachment:      m.HasAttachment,
+			From:               addrs(m.From),
+			To:                 addrs(m.To),
+			Cc:                 addrs(m.Cc),
+			Bcc:                addrs(m.Bcc),
+			ReplyTo:            addrs(m.ReplyTo),
+			InReplyTo:          m.InReplyTo,
+			References:         m.References,
+			MailboxIDsComplete: true,
 		}
 		if m.SentAt != nil {
 			env.SentAt = *m.SentAt

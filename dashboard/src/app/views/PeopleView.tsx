@@ -25,7 +25,7 @@ function PersonRow({ person }: { person: Person }) {
         </div>
       </div>
 
-      <div class="people-acts">
+      <div class="people-acts" role="group" aria-label={"Routing for " + (who.name || who.email)}>
         {blocked ? (
           <span class="chip chip-danger">Blocked</span>
         ) : (
@@ -36,6 +36,7 @@ function PersonRow({ person }: { person: Person }) {
               key={r} type="button"
               class={"btn btn-sm " + (person.route === r ? "btn-primary" : "btn-ghost")}
               title={"Send future mail to " + BUCKET_LABEL[r]}
+              aria-pressed={person.route === r}
               onClick={() => person.route !== r && decide(person.sender, true, r)}
             >
               {BUCKET_LABEL[r]}
