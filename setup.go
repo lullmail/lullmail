@@ -240,7 +240,7 @@ func (a *App) prepareSetup() {
 			expires = remaining.Round(time.Minute).String()
 		}
 		log.Printf("\n=======================================================================\n"+
-			"  email-soft first-run setup\n"+
+			"  Lull Mail first-run setup\n"+
 			"  Open the site in your browser and paste this one-time token:\n\n"+
 			"      %s\n\n"+
 			"  It expires in %s. Find it again later with:\n"+

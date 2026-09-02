@@ -333,7 +333,7 @@ export function AccountsView() {
       {data && (
         <section class="device-install">
           <div><strong>Notes and board archive</strong><p>Portable Markdown plus JSON that preserves note positions, colours, card state, and thread references.</p></div>
-          <button class="btn btn-outline btn-sm" type="button" onClick={async () => { try { await download("/personal/export", "email-soft-personal-data.zip"); showToast("Personal data downloaded"); } catch (e) { showError(e instanceof Error ? e.message : "Export failed"); } }}>Export personal data</button>
+          <button class="btn btn-outline btn-sm" type="button" onClick={async () => { try { await download("/personal/export", "lullmail-personal-data.zip"); showToast("Personal data downloaded"); } catch (e) { showError(e instanceof Error ? e.message : "Export failed"); } }}>Export personal data</button>
         </section>
       )}
       {data && <ConnectForm onDone={reload} />}

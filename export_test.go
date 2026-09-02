@@ -48,10 +48,10 @@ func TestMirrorEMLIsParseableAndHonestAboutFallback(t *testing.T) {
 	if parsed.Header.Get("Message-ID") != "<real@example.com>" {
 		t.Fatalf("message-id = %q", parsed.Header.Get("Message-ID"))
 	}
-	if !strings.Contains(parsed.Header.Get("X-Email-Soft-Export-Warning"), "mirror") {
-		t.Fatalf("missing fallback warning: %q", parsed.Header.Get("X-Email-Soft-Export-Warning"))
+	if !strings.Contains(parsed.Header.Get("X-Lullmail-Export-Warning"), "mirror") {
+		t.Fatalf("missing fallback warning: %q", parsed.Header.Get("X-Lullmail-Export-Warning"))
 	}
-	if parsed.Header.Get("X-Email-Soft-Attachment-Warning") == "" {
+	if parsed.Header.Get("X-Lullmail-Attachment-Warning") == "" {
 		t.Fatal("attachment loss was not disclosed")
 	}
 	if !strings.HasPrefix(parsed.Header.Get("Content-Type"), "multipart/alternative") {

@@ -71,7 +71,7 @@ func (a *App) handlePersonalExport(w http.ResponseWriter, r *http.Request) {
 	rows.Close()
 
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", `attachment; filename="email-soft-personal-data.zip"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="lullmail-personal-data.zip"`)
 	w.Header().Set("Cache-Control", "no-store")
 	zw := zip.NewWriter(w)
 	defer zw.Close()
@@ -107,7 +107,7 @@ func (a *App) handlePersonalExport(w http.ResponseWriter, r *http.Request) {
 	}
 	notesJSON, _ := json.MarshalIndent(notes, "", "  ")
 	cardsJSON, _ := json.MarshalIndent(cards, "", "  ")
-	manifest, _ := json.MarshalIndent(map[string]any{"format": "email-soft-personal-export", "version": 1, "exported_at": time.Now().UTC(), "notes": len(notes), "board_cards": len(cards)}, "", "  ")
+	manifest, _ := json.MarshalIndent(map[string]any{"format": "lullmail-personal-export", "version": 1, "exported_at": time.Now().UTC(), "notes": len(notes), "board_cards": len(cards)}, "", "  ")
 	for name, data := range map[string][]byte{"notes.md": []byte(notesMD.String()), "notes-layout.json": notesJSON, "board.md": []byte(cardsMD.String()), "board.json": cardsJSON, "export-manifest.json": manifest} {
 		if err := write(name, data); err != nil {
 			a.log.Error("personal export stream failed", "err", err)

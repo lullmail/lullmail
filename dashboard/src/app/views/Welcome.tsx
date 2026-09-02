@@ -9,7 +9,7 @@ export function Welcome() {
       <div class="page-kicker">Welcome</div>
       <h1 class="page-title">Let's get your mail in here.</h1>
       <p class="welcome-lede">
-        Connect a mailbox and email-soft mirrors it — your mail stays with your provider,
+        Connect a mailbox and Lull Mail mirrors it — your mail stays with your provider,
         this is a better way to read it.
       </p>
 

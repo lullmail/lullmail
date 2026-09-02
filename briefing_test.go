@@ -97,7 +97,7 @@ var stepDriverID atomic.Uint64
 
 func openStepDB(t *testing.T, steps ...dbStep) *sql.DB {
 	t.Helper()
-	name := fmt.Sprintf("email-soft-step-%d", stepDriverID.Add(1))
+	name := fmt.Sprintf("lullmail-step-%d", stepDriverID.Add(1))
 	sql.Register(name, &stepDriver{steps: steps})
 	db, err := sql.Open(name, "")
 	if err != nil {

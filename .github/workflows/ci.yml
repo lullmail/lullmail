@@ -32,6 +32,6 @@ jobs:
         working-directory: dashboard
         run: npm ci && npm test && npm run typecheck && npm run build
       - name: Static Linux binary
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /tmp/email-soft .
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /tmp/lullmail .
       - name: Production container
-        run: docker build -t email-soft:ci .
+        run: docker build -t lullmail:ci .

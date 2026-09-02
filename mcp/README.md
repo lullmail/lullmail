@@ -1,28 +1,28 @@
-# email-soft MCP adapter
+# Lull Mail MCP adapter
 
-An MCP server that exposes [email-soft](..) to AI agents and scripts.
-email-soft itself is agent-agnostic: it has an HTTP API and revocable agent
+An MCP server that exposes [Lull Mail](..) to AI agents and scripts.
+Lull Mail itself is agent-agnostic: it has an HTTP API and revocable agent
 tokens, nothing more. This adapter is one optional client of that API — any
-MCP-capable agent can use it, and email-soft keeps working without it.
+MCP-capable agent can use it, and Lull Mail keeps working without it.
 
-A nested Go module on purpose: it depends only on email-soft's HTTP surface,
+A nested Go module on purpose: it depends only on Lull Mail's HTTP surface,
 never its internals, and the main build never compiles it.
 
 ## Setup
 
-1. In email-soft: **Settings → Security → Agent tokens → Create token**.
-   Copy the `es_...` value (shown once).
-2. Build: `go build -o email-soft-mcp .`
+1. In Lull Mail: **Settings → Security → Agent tokens → Create token**.
+   Copy the `lull_...` value (shown once).
+2. Build: `go build -o lullmail-mcp .`
 3. Point any MCP client at it:
 
 ```json
 {
   "mcpServers": {
-    "email-soft": {
-      "command": "/usr/local/bin/email-soft-mcp",
+    "lullmail": {
+      "command": "/usr/local/bin/lullmail-mcp",
       "env": {
-        "EMAILSOFT_URL": "https://mail.example.com",
-        "EMAILSOFT_AGENT_TOKEN": "es_..."
+        "LULL_URL": "https://lullmail.com",
+        "LULL_AGENT_TOKEN": "lull_..."
       }
     }
   }

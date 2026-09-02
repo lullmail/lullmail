@@ -1,4 +1,4 @@
-module email-soft
+module lullmail
 
 go 1.26
 

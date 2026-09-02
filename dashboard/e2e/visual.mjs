@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const baseURL = process.env.E2E_BASE_URL;
 const setupToken = process.env.E2E_SETUP_TOKEN;
-const output = process.env.E2E_OUTPUT || "/tmp/email-soft-visual";
+const output = process.env.E2E_OUTPUT || "/tmp/lullmail-visual";
 if (!baseURL || !setupToken) throw new Error("E2E_BASE_URL and E2E_SETUP_TOKEN are required");
 await mkdir(output, { recursive: true });
 

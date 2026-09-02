@@ -135,7 +135,7 @@ export function Topline({ classic = false }: { classic?: boolean }) {
     <header class={"topline" + (stuck || classic ? " stuck" : "")}>
       <div class="topline-in">
         <div class="topline-side left">
-          <a href="/today" class="wordmark">email-soft</a>
+          <a href="/today" class="wordmark">Lull Mail</a>
           <AccountPicker />
         </div>
 

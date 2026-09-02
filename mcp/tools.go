@@ -47,7 +47,7 @@ func registerTools(s *mcp.Server, c *client) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "set_backfill",
-		Description: "Set how much history email-soft organizes for a mailbox: 0 = all history, or days (30/90/365/1095). " +
+		Description: "Set how much history Lull Mail organizes for a mailbox: 0 = all history, or days (30/90/365/1095). " +
 			"Growing the window classifies older mail into the views; shrinking removes product rows outside the window " +
 			"without touching the local mirror or provider mail.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {

@@ -1,4 +1,4 @@
--- email-soft product layer.
+-- Lull Mail product layer.
 -- The mail mirror (mail_accounts, mail_mailboxes, mail_messages,
 -- mail_message_mailboxes, mail_bodies, mail_sync_state) is created and owned
 -- by neutron-mail's own schema migration. Read from it; never write to it or

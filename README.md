@@ -1,6 +1,6 @@
-# email-soft
+# Lull Mail
 
-A briefing-first mail client. Mail is a document you read, not a console you
+[lullmail.com](https://lullmail.com) — a briefing-first mail client. Mail is a document you read, not a console you
 operate: senders are screened once and routed forever, a daily digest tells
 you what actually needs you, and the work surfaces (board, calendar, notes)
 derive themselves from your mail instead of asking you to maintain them.
@@ -32,7 +32,7 @@ RFC 4155) is a table-stakes feature, not a cancellation flow.
 - **Leave cleanly** — download one original message as EML or a whole account
   as mailbox-by-mailbox mboxrd, with a manifest that discloses any local-mirror
   fallback instead of silently dropping data.
-- **Explicit history** — every account states how much history email-soft
+- **Explicit history** — every account states how much history Lull Mail
   organizes: 30 days, 90 days (default), 1 year, 3 years, or "All history."
   Changing the window grows or shrinks the organized views only; the local
   mirror obeys the separate retention setting, and provider mail is never
@@ -68,7 +68,7 @@ boot and kept in the `appdata` volume; the browser origin is detected from
 your first visit and pinned — so behind a reverse proxy, reach the app
 through the final public URL when you run setup. Set the env vars below only
 to override any of this; env always wins. Migrations run automatically at
-boot (`email-soft migrate` runs them by hand).
+boot (`lullmail migrate` runs them by hand).
 
 ## Environment
 
@@ -76,8 +76,8 @@ boot (`email-soft migrate` runs them by hand).
 |---|---|---|
 | `DATABASE_URL` | yes | Postgres, e.g. `postgres://user:pass@host:5432/emailsoft` |
 | `SECRET_KEY` | no | Seals mail credentials, OAuth/passkey records, TOTP, and push subscriptions with AES-256-GCM. Generated on first boot into `DATA_DIR/secret.key` when unset; changing it invalidates sealed data. |
-| `EMAILSOFT_TOKEN` | no | One-time installation token for registering the first passkey. Generated (24h expiry, printed to logs) when unset. Rejected after first setup; restart regenerates while no passkey exists. |
-| `EMAILSOFT_USER_EMAIL` | no | Owner address; normally entered on the setup page instead. |
+| `LULL_TOKEN` | no | One-time installation token for registering the first passkey. Generated (24h expiry, printed to logs) when unset. Rejected after first setup; restart regenerates while no passkey exists. |
+| `LULL_USER_EMAIL` | no | Owner address; normally entered on the setup page instead. |
 | `PUBLIC_URL` | no | Browser origin, e.g. `https://mail.example.com`. Auto-detected from the first setup visit and pinned in the database; the env var forces an origin. WebAuthn and mutation-origin checks reject a different origin. |
 | `DATA_DIR` | no | Where the generated key and setup token live (default `./data`). Mount it as a volume or restarts regenerate them. |
 | `WEBAUTHN_RP_ID` | no | Relying-party domain; derived from the effective origin. |
@@ -110,14 +110,13 @@ go run . serve
 dashboard code, rebuild the dashboard, then rebuild/restart the binary; a
 running process keeps serving the copy it embedded.
 
-The private marketing-site prototype is a separate Astro build:
+The marketing site is a separate Astro build:
 
 ```
 cd site && npm install && npm run dev
 ```
 
-It uses `email-soft` only as a working label. The product name and public
-domain remain intentionally undecided.
+It lives at lullmail.com.
 
 A local mail world for testing (GreenMail — real IMAP/SMTP against fake
 accounts):

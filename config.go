@@ -56,7 +56,7 @@ func loadConfig() *Config {
 			rpID = parsed.Hostname()
 		}
 	}
-	ownerEmail := strings.TrimSpace(os.Getenv("EMAILSOFT_USER_EMAIL"))
+	ownerEmail := strings.TrimSpace(os.Getenv("LULL_USER_EMAIL"))
 	vapidSubject := strings.TrimSpace(os.Getenv("VAPID_SUBJECT"))
 	if vapidSubject == "" && ownerEmail != "" {
 		vapidSubject = "mailto:" + ownerEmail
@@ -65,7 +65,7 @@ func loadConfig() *Config {
 		Addr:                  addr,
 		DatabaseURL:           os.Getenv("DATABASE_URL"),
 		SecretKey:             strings.TrimSpace(os.Getenv("SECRET_KEY")),
-		APIToken:              strings.TrimSpace(os.Getenv("EMAILSOFT_TOKEN")),
+		APIToken:              strings.TrimSpace(os.Getenv("LULL_TOKEN")),
 		UserEmail:             ownerEmail,
 		PublicURL:             publicURL,
 		PublicURLSet:          publicURLSet,

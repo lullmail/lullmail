@@ -16,7 +16,15 @@ import (
 	"time"
 )
 
-const agentTokenPrefix = "es_"
+// New tokens carry the lull_ prefix. es_ is the email-soft era prefix and
+// stays valid so existing integrations (Akiroo's stored token) survive the
+// rename.
+const agentTokenPrefix = "lull_"
+const legacyAgentTokenPrefix = "es_"
+
+func isAgentToken(raw string) bool {
+	return strings.HasPrefix(raw, agentTokenPrefix) || strings.HasPrefix(raw, legacyAgentTokenPrefix)
+}
 
 // agentAPIPrefixes are everything a token may touch. Auth ceremonies,
 // passkey/TOTP/session management, and token management itself stay
@@ -64,12 +72,12 @@ func agentAllowedPath(path string) bool {
 	return false
 }
 
-// authenticateAgent resolves an "Authorization: Bearer es_..." token to its
-// owner, updating last_used_at at most once a minute so hot polling loops
-// do not turn into write storms.
+// authenticateAgent resolves an "Authorization: Bearer lull_..." (or legacy
+// es_...) token to its owner, updating last_used_at at most once a minute so
+// hot polling loops do not turn into write storms.
 func (a *App) authenticateAgent(r *http.Request) (string, bool) {
 	raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !strings.HasPrefix(raw, agentTokenPrefix) {
+	if !isAgentToken(raw) {
 		return "", false
 	}
 	var uid string
@@ -84,10 +92,10 @@ func (a *App) authenticateAgent(r *http.Request) (string, bool) {
 	return uid, true
 }
 
-// hasAgentBearer reports whether the request carries an es_-prefixed Bearer
-// credential, which routes it through the agent path.
+// hasAgentBearer reports whether the request carries an lull_/es_-prefixed
+// Bearer credential, which routes it through the agent path.
 func hasAgentBearer(r *http.Request) bool {
-	return strings.HasPrefix(r.Header.Get("Authorization"), "Bearer "+agentTokenPrefix)
+	return isAgentToken(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 }
 
 // requireAgent wraps requireAuth's tree with the token path. Agent requests

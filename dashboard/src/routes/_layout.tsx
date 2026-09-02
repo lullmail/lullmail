@@ -3,7 +3,7 @@ import App from "../app/App";
 
 export function head() {
   return {
-    titleTemplate: "%s — email-soft",
+    titleTemplate: "%s — Lull Mail",
     meta: [
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { name: "theme-color", content: "#15161a" },

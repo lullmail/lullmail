@@ -12,10 +12,10 @@ services:
     ports:
       - "8080:8080"
     environment:
-      DATABASE_URL: postgres://emailsoft:emailsoft@db:5432/emailsoft?sslmode=disable
+      DATABASE_URL: postgres://lull:lull@db:5432/lull?sslmode=disable
       SECRET_KEY: ${SECRET_KEY:-}
-      EMAILSOFT_TOKEN: ${EMAILSOFT_TOKEN:-}
-      EMAILSOFT_USER_EMAIL: ${EMAILSOFT_USER_EMAIL:-}
+      LULL_TOKEN: ${LULL_TOKEN:-}
+      LULL_USER_EMAIL: ${LULL_USER_EMAIL:-}
       PUBLIC_URL: ${PUBLIC_URL:-}
     volumes:
       - appdata:/app/data
@@ -27,13 +27,13 @@ services:
   db:
     image: postgres:17
     environment:
-      POSTGRES_DB: emailsoft
-      POSTGRES_USER: emailsoft
-      POSTGRES_PASSWORD: emailsoft
+      POSTGRES_DB: lull
+      POSTGRES_USER: lull
+      POSTGRES_PASSWORD: lull
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U emailsoft"]
+      test: ["CMD-SHELL", "pg_isready -U lull"]
       interval: 2s
       timeout: 2s
       retries: 15

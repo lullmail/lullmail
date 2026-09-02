@@ -108,7 +108,7 @@ func (a *App) sendPushForUser(ctx context.Context, uid string) {
 	if err != nil {
 		return
 	}
-	payload, _ := json.Marshal(map[string]string{"title": "New mail needs you", "body": "Open email-soft to read it.", "path": "/today", "thread": threadID, "account": accountID})
+	payload, _ := json.Marshal(map[string]string{"title": "New mail needs you", "body": "Open Lull Mail to read it.", "path": "/today", "thread": threadID, "account": accountID})
 	sent := false
 	for _, item := range subs {
 		response, err := webpush.SendNotificationWithContext(ctx, payload, &item.sub, &webpush.Options{HTTPClient: &http.Client{Timeout: 15 * time.Second}, Subscriber: a.cfg.VAPIDSubject, VAPIDPublicKey: a.cfg.VAPIDPublic, VAPIDPrivateKey: a.cfg.VAPIDPrivate, TTL: 3600, Topic: "new-mail", Urgency: webpush.UrgencyNormal})

@@ -12,8 +12,8 @@ import (
 	"time"
 )
 
-// client is a thin authenticated wrapper around email-soft's HTTP API.
-// It exists only here: email-soft knows nothing about MCP, and this binary
+// client is a thin authenticated wrapper around Lull Mail's HTTP API.
+// It exists only here: Lull Mail knows nothing about MCP, and this binary
 // knows nothing about any specific agent.
 type client struct {
 	base  *url.URL
@@ -26,10 +26,10 @@ const maxResponseBytes = 8 << 20
 func newClient(baseURL, token string) (*client, error) {
 	base, err := url.Parse(strings.TrimRight(baseURL, "/"))
 	if err != nil || base.Scheme == "" || base.Host == "" {
-		return nil, fmt.Errorf("EMAILSOFT_URL must be an absolute origin like https://mail.example.com")
+		return nil, fmt.Errorf("LULL_URL must be an absolute origin like https://lullmail.com")
 	}
 	if token == "" {
-		return nil, fmt.Errorf("EMAILSOFT_AGENT_TOKEN is required (create one in email-soft under Settings -> Security -> Agent tokens)")
+		return nil, fmt.Errorf("LULL_AGENT_TOKEN is required (create one in Lull Mail under Settings -> Security -> Agent tokens)")
 	}
 	return &client{base: base, token: token, http: &http.Client{Timeout: 60 * time.Second}}, nil
 }

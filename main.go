@@ -25,7 +25,7 @@ func main() {
 			os.Exit(1)
 		}
 	default:
-		fmt.Fprintln(os.Stderr, "usage: email-soft [serve|migrate|backfill-bodies]")
+		fmt.Fprintln(os.Stderr, "usage: lullmail [serve|migrate|backfill-bodies]")
 		os.Exit(2)
 	}
 }

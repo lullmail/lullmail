@@ -85,7 +85,7 @@ func TestOAuthRefreshSerializesCASAndPreservesRefreshToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := &oauthStateDriver{ciphertext: sealed}
-	driverName := fmt.Sprintf("email-soft-oauth-%d", oauthDriverID.Add(1))
+	driverName := fmt.Sprintf("lullmail-oauth-%d", oauthDriverID.Add(1))
 	sql.Register(driverName, state)
 	db, err := sql.Open(driverName, "")
 	if err != nil {
@@ -169,7 +169,7 @@ func TestOAuthRefreshReturnsErrorWhenCASUpdatesNoRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := &oauthStateDriver{ciphertext: sealed, forceZero: true}
-	driverName := fmt.Sprintf("email-soft-oauth-%d", oauthDriverID.Add(1))
+	driverName := fmt.Sprintf("lullmail-oauth-%d", oauthDriverID.Add(1))
 	sql.Register(driverName, state)
 	db, err := sql.Open(driverName, "")
 	if err != nil {

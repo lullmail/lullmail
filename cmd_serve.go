@@ -89,7 +89,7 @@ func serve() {
 		Handler:           securityHeaders(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	log.Printf("email-soft listening on %s", addr)
+	log.Printf("lullmail listening on %s", addr)
 	log.Fatal(srv.ListenAndServe())
 }
 
@@ -123,8 +123,8 @@ func serveServiceWorker(w http.ResponseWriter, r *http.Request, fsys fs.FS) {
 	shell, _ := fs.ReadFile(fsys, "index.html")
 	sum := sha256.Sum256(shell)
 	body := strings.Replace(string(data),
-		`const VERSION = "email-soft-shell-v4";`,
-		`const VERSION = "email-soft-shell-`+hex.EncodeToString(sum[:6])+`";`, 1)
+		`const VERSION = "lull-shell-v1";`,
+		`const VERSION = "lull-shell-`+hex.EncodeToString(sum[:6])+`";`, 1)
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 	io.WriteString(w, body)
 }

@@ -4,7 +4,7 @@ import { defineConfig, type Plugin } from "vite";
 
 function serveBrowserEntry(): Plugin {
   return {
-    name: "email-soft:browser-entry",
+    name: "lullmail:browser-entry",
     configureServer(server) {
       server.middlewares.use((request, _response, next) => {
         if (request.url?.split("?", 1)[0] === "/assets/site.js") {

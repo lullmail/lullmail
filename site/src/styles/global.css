@@ -151,12 +151,12 @@ button, a { font: inherit; }
 .trust-intro { position: sticky; top: 135px; align-self: start; }
 .trust-intro h2 { max-width: 620px; font-size: clamp(62px, 7vw, 106px); line-height: .88; }
 .trust-intro > p:last-child { max-width: 500px; margin: 36px 0 0; color: rgba(251,250,247,.56); font-size: 16px; }
-.trust-list { border-top: 1px solid rgba(255,255,255,.2); }
-.trust-list article { display: grid; grid-template-columns: 38px minmax(170px, .7fr) minmax(220px, 1fr); gap: 24px; padding: 34px 0; border-bottom: 1px solid rgba(255,255,255,.14); }
+.trust-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 22px; }
+.trust-list article { aspect-ratio: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 15px; padding: 32px; text-align: center; border: 1px solid rgba(255,255,255,.14); border-radius: 12px; background: rgba(255,255,255,.03); }
 .trust-list span { color: #edb08f; font-size: 10px; font-weight: 700; }
 .trust-list h3, .trust-list p { margin: 0; }
-.trust-list h3 { font-family: var(--serif); font-size: 23px; font-weight: 450; line-height: 1.15; }
-.trust-list p { color: rgba(251,250,247,.5); font-size: 13px; }
+.trust-list h3 { max-width: 16ch; font-family: var(--serif); font-size: 23px; font-weight: 450; line-height: 1.15; }
+.trust-list p { max-width: 30ch; color: rgba(251,250,247,.5); font-size: 13px; line-height: 1.6; }
 
 .availability { padding: 190px var(--edge) 0; color: var(--ink); background: var(--paper-deep); scroll-margin-top: 72px; }
 .availability-copy { max-width: 1050px; }
@@ -175,7 +175,6 @@ button, a { font: inherit; }
   .proof-copy { max-width: 580px; }
   .trust { grid-template-columns: 1fr; }
   .trust-intro { position: static; }
-  .trust-list article { grid-template-columns: 38px minmax(180px, .65fr) 1fr; }
 }
 
 @media (max-width: 700px) {
@@ -230,9 +229,9 @@ button, a { font: inherit; }
 
   .trust { gap: 75px; padding-top: 110px; padding-bottom: 110px; scroll-margin-top: 62px; }
   .trust-intro h2 { font-size: 58px; }
-  .trust-list article { grid-template-columns: 30px 1fr; gap: 12px; padding: 28px 0; }
+  .trust-list { grid-template-columns: 1fr; }
+  .trust-list article { padding: 26px 22px; }
   .trust-list h3 { font-size: 21px; }
-  .trust-list p { grid-column: 2; font-size: 13px; }
 
   .availability { padding-top: 120px; scroll-margin-top: 62px; }
   .availability h2 { font-size: 66px; }

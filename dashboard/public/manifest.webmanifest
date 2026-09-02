@@ -1,6 +1,6 @@
 {
-  "name": "email-soft",
-  "short_name": "email-soft",
+  "name": "Lull Mail",
+  "short_name": "Lull",
   "description": "A briefing-first, privacy-respecting mail reader.",
   "start_url": "/today",
   "scope": "/",

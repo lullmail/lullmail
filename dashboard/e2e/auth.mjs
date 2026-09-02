@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 
 const baseURL = process.env.E2E_BASE_URL;
 const setupToken = process.env.E2E_SETUP_TOKEN;
-const output = process.env.E2E_OUTPUT || "/tmp/email-soft-e2e";
+const output = process.env.E2E_OUTPUT || "/tmp/lullmail-e2e";
 if (!baseURL || !setupToken) throw new Error("E2E_BASE_URL and E2E_SETUP_TOKEN are required");
 await mkdir(output, { recursive: true });
 

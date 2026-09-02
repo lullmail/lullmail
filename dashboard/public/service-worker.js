@@ -1,4 +1,4 @@
-const VERSION = "email-soft-shell-v4";
+const VERSION = "lull-shell-v1";
 const SHELL = [
   "/", "/today", "/board", "/calendar", "/notes", "/people",
   "/reading", "/receipts", "/screener", "/snoozed", "/settings/accounts", "/settings/security",
@@ -39,7 +39,9 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
-    await Promise.all(keys.filter((key) => key.startsWith("email-soft-shell-") && key !== VERSION)
+    // "email-soft-shell-" is the pre-rename prefix; purge those legacy
+    // caches too so they do not linger forever.
+    await Promise.all(keys.filter((key) => (key.startsWith("lull-shell-") || key.startsWith("email-soft-shell-")) && key !== VERSION)
       .map((key) => caches.delete(key)));
     await self.clients.claim();
   })());
@@ -98,11 +100,11 @@ self.addEventListener("fetch", (event) => {
 });
 
 self.addEventListener("push", (event) => {
-  let data = { title: "New mail", body: "Open email-soft to read it.", path: "/today" };
+  let data = { title: "New mail", body: "Open Lull Mail to read it.", path: "/today" };
   try { data = { ...data, ...(event.data ? event.data.json() : {}) }; } catch { /* generic notification */ }
   event.waitUntil(self.registration.showNotification(data.title, {
     body: data.body, icon: "/icon-192.png", badge: "/icon-192.png",
-    tag: "email-soft-new-mail", renotify: true, data: { path: data.path || "/today" },
+    tag: "lull-new-mail", renotify: true, data: { path: data.path || "/today" },
   }));
 });
 

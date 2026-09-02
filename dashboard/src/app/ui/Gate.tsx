@@ -64,7 +64,7 @@ export function Gate() {
     <div class="gate-wrap">
       <section class="gate" aria-labelledby="gate-title">
         <GateFan />
-        <div class="gate-brand">email-soft</div>
+        <div class="gate-brand">Lull Mail</div>
         <h1 id="gate-title">Welcome back</h1>
         <p class="gate-sub">Use a passkey to open your mailbox.</p>
         {mode === "passkey" ? (
@@ -133,11 +133,11 @@ function SetupWizard({ status }: { status: AuthStatus }) {
 
   const downloadCodes = () => {
     const today = new Date().toISOString().slice(0, 10);
-    const text = ["email-soft recovery codes", "", "Owner: " + (name.trim() || "you"), "Generated: " + today, "", ...recoveryCodes, ""].join("\n");
+    const text = ["Lull Mail recovery codes", "", "Owner: " + (name.trim() || "you"), "Generated: " + today, "", ...recoveryCodes, ""].join("\n");
     const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = "email-soft-recovery-codes.txt";
+    anchor.download = "lullmail-recovery-codes.txt";
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
@@ -166,7 +166,7 @@ function SetupWizard({ status }: { status: AuthStatus }) {
     <div class="gate-wrap">
       <section class={"gate" + (step === 3 ? " gate-wide" : "")} aria-labelledby="setup-title">
         <GateFan />
-        <div class="gate-brand">email-soft</div>
+        <div class="gate-brand">Lull Mail</div>
         <div class="gate-progress" role="progressbar" aria-label={`Setup, step ${step + 1} of 4`} aria-valuemin={1} aria-valuemax={4} aria-valuenow={step + 1}>
           <span>Step {step + 1} of 4</span>
           <i><b style={{ width: `${(step + 1) * 25}%` }} /></i>
@@ -185,7 +185,7 @@ function SetupWizard({ status }: { status: AuthStatus }) {
           {step === 1 && (
             <form onSubmit={enterToken}>
               <h1 id="setup-title">Enter your setup code</h1>
-              <p class="gate-sub">email-soft added a one-time code to your container logs when it started. Paste it here to confirm this is your server.</p>
+              <p class="gate-sub">Lull Mail added a one-time code to your container logs when it started. Paste it here to confirm this is your server.</p>
               {!status.bootstrap_available && <div class="gate-error">This setup code has expired. Restart the container to create a new one.</div>}
               <label class="sr-only" for="setup-token">Setup code</label>
               <input id="setup-token" type="password" placeholder="Setup code" autocomplete="off" autofocus value={token}

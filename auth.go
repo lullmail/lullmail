@@ -137,7 +137,7 @@ func newWebAuthn(cfg *Config) (*webauthn.WebAuthn, error) {
 		return nil, errors.New("PUBLIC_URL must be an absolute browser origin")
 	}
 	return webauthn.New(&webauthn.Config{
-		RPDisplayName: "email-soft",
+		RPDisplayName: "Lull Mail",
 		RPID:          cfg.RPID,
 		RPOrigins:     []string{cfg.PublicURL},
 		AuthenticatorSelection: protocol.AuthenticatorSelection{
@@ -198,7 +198,7 @@ func (a *App) authenticateRequest(r *http.Request) (string, string, error) {
 		}
 	}
 
-	// EMAILSOFT_TOKEN is an installation/bootstrap secret, not a permanent
+	// LULL_TOKEN is an installation/bootstrap secret, not a permanent
 	// parallel login. It stops opening product data after the first passkey,
 	// and a generated token additionally expires 24h after it was minted.
 	var credentials int
@@ -345,7 +345,7 @@ func (a *App) handleBootstrapBegin(w http.ResponseWriter, r *http.Request) {
 			email = ownerEmailFromName(name)
 		}
 		if email == "" {
-			writeProblem(w, 422, "Name Missing", "enter your name so email-soft knows whose mail this is")
+			writeProblem(w, 422, "Name Missing", "enter your name so Lull Mail knows whose mail this is")
 			return
 		}
 		a.cfg.UserEmail = email
@@ -1044,7 +1044,7 @@ func (a *App) handleTOTPBegin(w http.ResponseWriter, r *http.Request) {
 	}
 	var email string
 	_ = a.db.QueryRowContext(r.Context(), `SELECT email FROM users WHERE id=$1`, uid).Scan(&email)
-	uri := "otpauth://totp/" + url.PathEscape("email-soft:"+email) + "?secret=" + encoded + "&issuer=email-soft&algorithm=SHA1&digits=6&period=30"
+	uri := "otpauth://totp/" + url.PathEscape("lullmail:"+email) + "?secret=" + encoded + "&issuer=lullmail&algorithm=SHA1&digits=6&period=30"
 	writeJSON(w, map[string]any{"secret": encoded, "uri": uri})
 }
 

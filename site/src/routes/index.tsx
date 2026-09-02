@@ -1,4 +1,4 @@
-const title = "email-soft — Less time on email";
+const title = "Lull Mail — Less time on email";
 const description = "A focused email client that screens new senders, shows what needs you today, and brings unfinished mail back at the right time.";
 
 export const config = { mode: "static" };
@@ -21,9 +21,9 @@ export default function Home() {
       <a class="skip" href="#main">Skip to content</a>
 
       <header class="site-head" data-header>
-        <a class="brand" href="#top" aria-label="email-soft home">
+        <a class="brand" href="#top" aria-label="Lull Mail home">
           <span class="brand-mark" aria-hidden="true"><i></i></span>
-          <span>email-soft</span>
+          <span>Lull Mail</span>
         </a>
         <nav aria-label="Main navigation">
           <a href="#product">Product</a>
@@ -64,7 +64,7 @@ export default function Home() {
           <header class="section-lead">
             <p class="overline dark">How it works</p>
             <h2 id="product-title">A short list, not an endless inbox.</h2>
-            <p>email-soft shows you what needs a decision today. Handle it, set it aside, or leave it for later without losing track of anything.</p>
+            <p>Lull Mail shows you what needs a decision today. Handle it, set it aside, or leave it for later without losing track of anything.</p>
           </header>
 
           <div class="proof-list">
@@ -78,7 +78,7 @@ export default function Home() {
 
               <div class="app-frame" role="img" aria-label="The Screener showing a new sender waiting for a routing decision">
                 <div class="app-topline">
-                  <b>email-soft</b>
+                  <b>Lull Mail</b>
                   <span>Today&nbsp;&nbsp; Inbox&nbsp;&nbsp; Screener</span>
                   <i>Compose</i>
                 </div>
@@ -112,7 +112,7 @@ export default function Home() {
 
               <div class="app-frame today-frame" role="img" aria-label="The Today briefing showing two messages that need attention and one person being waited on">
                 <div class="app-topline">
-                  <b>email-soft</b>
+                  <b>Lull Mail</b>
                   <span>Today&nbsp;&nbsp; Inbox&nbsp;&nbsp; Screener</span>
                   <i>Compose</i>
                 </div>
@@ -159,7 +159,7 @@ export default function Home() {
           <header class="trust-intro">
             <p class="overline dark">Privacy without fine print</p>
             <h2 id="trust-title">Your mail stays yours.</h2>
-            <p>email-soft reads your mail only to sync and organize it for you. Your messages are never used for ads, tracking, or model training.</p>
+            <p>Lull Mail reads your mail only to sync and organize it for you. Your messages are never used for ads, tracking, or model training.</p>
           </header>
 
           <div class="trust-list">
@@ -180,8 +180,8 @@ export default function Home() {
             <span>IMAP + JMAP</span><span>One owner</span><span>MIT licensed</span><span>Self-hostable</span>
           </div>
           <footer class="site-foot">
-            <a class="brand" href="#top"><span class="brand-mark" aria-hidden="true"><i></i></span><span>email-soft</span></a>
-            <p>Working name · 2026</p>
+            <a class="brand" href="#top"><span class="brand-mark" aria-hidden="true"><i></i></span><span>Lull Mail</span></a>
+            <p>lullmail.com · 2026</p>
             <div><a href="#product">Product</a><a href="#trust">Trust</a><a href="#top">Back to top ↑</a></div>
           </footer>
         </section>

@@ -231,9 +231,9 @@ func (a *App) handleMessageEML(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if fallback {
-		w.Header().Set("X-Email-Soft-Export-Source", "mirror-fallback")
+		w.Header().Set("X-Lullmail-Export-Source", "mirror-fallback")
 	} else {
-		w.Header().Set("X-Email-Soft-Export-Source", "provider-original")
+		w.Header().Set("X-Lullmail-Export-Source", "provider-original")
 	}
 	_, _ = w.Write(raw)
 }
@@ -411,7 +411,7 @@ func mirrorEML(envelope *nmail.Envelope, body *nmail.Body, rawErr error) []byte 
 	fmt.Fprintf(&out, "Subject: %s\r\n", subject)
 	messageID := nmail.NormalizeMessageIDHeader(cleanHeader(envelope.MessageIDHeader))
 	if messageID == "" {
-		messageID = fmt.Sprintf("email-soft-export-%s@local.invalid", safeExportName(envelope.ID))
+		messageID = fmt.Sprintf("lullmail-export-%s@local.invalid", safeExportName(envelope.ID))
 	}
 	fmt.Fprintf(&out, "Message-ID: <%s>\r\n", messageID)
 	if len(envelope.InReplyTo) > 0 {
@@ -426,7 +426,7 @@ func mirrorEML(envelope *nmail.Envelope, body *nmail.Body, rawErr error) []byte 
 	}
 	fmt.Fprint(&out, "MIME-Version: 1.0\r\n")
 	if rawErr != nil {
-		fmt.Fprintf(&out, "X-Email-Soft-Export-Warning: %s\r\n", cleanHeader("provider original unavailable; rendered from mirror: "+rawErr.Error()))
+		fmt.Fprintf(&out, "X-Lullmail-Export-Warning: %s\r\n", cleanHeader("provider original unavailable; rendered from mirror: "+rawErr.Error()))
 	}
 
 	textBody, htmlBody := "", ""
@@ -435,10 +435,10 @@ func mirrorEML(envelope *nmail.Envelope, body *nmail.Body, rawErr error) []byte 
 	}
 	if textBody == "" && htmlBody == "" {
 		textBody = envelope.Preview
-		fmt.Fprint(&out, "X-Email-Soft-Body-Source: envelope-preview\r\n")
+		fmt.Fprint(&out, "X-Lullmail-Body-Source: envelope-preview\r\n")
 	}
 	if envelope.HasAttachment {
-		fmt.Fprint(&out, "X-Email-Soft-Attachment-Warning: attachment bytes require the provider original and are omitted from this fallback\r\n")
+		fmt.Fprint(&out, "X-Lullmail-Attachment-Warning: attachment bytes require the provider original and are omitted from this fallback\r\n")
 	}
 
 	if textBody != "" && htmlBody != "" {

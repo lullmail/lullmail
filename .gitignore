@@ -4,7 +4,7 @@ dashboard/node_modules/
 dashboard/dist/
 site/node_modules/
 site/dist/
-/email-soft
+/lullmail
 /output/
 
 # Dev-only workspace into the live Neutron checkout; deploy vendoring is

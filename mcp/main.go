@@ -9,19 +9,19 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// email-soft-mcp: an agnostic MCP adapter over email-soft's HTTP API.
+// lullmail-mcp: an agnostic MCP adapter over Lull Mail's HTTP API.
 // Any MCP-capable client (Claude Desktop, opencode, anything else) can use
-// it; email-soft itself has no knowledge of MCP. Configure with:
+// it; Lull Mail itself has no knowledge of MCP. Configure with:
 //
-//	EMAILSOFT_URL           e.g. https://mail.example.com
-//	EMAILSOFT_AGENT_TOKEN   an es_... token from Settings -> Security
+//	LULL_URL              e.g. https://lullmail.com
+//	LULL_AGENT_TOKEN      a lull_... token from Settings -> Security
 func main() {
-	c, err := newClient(os.Getenv("EMAILSOFT_URL"), os.Getenv("EMAILSOFT_AGENT_TOKEN"))
+	c, err := newClient(os.Getenv("LULL_URL"), os.Getenv("LULL_AGENT_TOKEN"))
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "email-soft-mcp:", err)
+		fmt.Fprintln(os.Stderr, "lullmail-mcp:", err)
 		os.Exit(1)
 	}
-	server := mcp.NewServer(&mcp.Implementation{Name: "email-soft", Version: "0.1.0"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "lullmail", Version: "0.1.0"}, nil)
 	registerTools(server, c)
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		log.Fatal(err)

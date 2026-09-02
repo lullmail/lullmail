@@ -121,7 +121,7 @@ function TabBadge() {
       link.rel = "icon";
       document.head.appendChild(link);
     }
-    document.title = count > 0 ? "(" + count + ") email-soft" : "email-soft";
+    document.title = count > 0 ? "(" + count + ") Lull Mail" : "Lull Mail";
     const bg = dark ? "#ecedf1" : "#20242b";
     const fg = dark ? "#20242b" : "#f4efe6";
     const glyph =

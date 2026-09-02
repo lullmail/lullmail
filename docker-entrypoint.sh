@@ -2,6 +2,6 @@
 set -eu
 
 mkdir -p /app/data
-chown es:es /app/data
+chown lull:lull /app/data
 
-exec su-exec es /app/email-soft "$@"
+exec su-exec lull /app/lullmail "$@"

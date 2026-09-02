@@ -2,7 +2,7 @@
 // caches only the shell; API data is account-namespaced here so owner changes
 // and account deletion can provably evict it.
 
-const DB = "email-soft-offline-v1";
+const DB = "lullmail-offline-v1";
 const VERSION = 1;
 const CACHE = "responses";
 const QUEUE = "mutations";
