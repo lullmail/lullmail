@@ -19,8 +19,13 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("migrate: ok")
+	case "backfill-bodies":
+		if err := backfillBodies(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "backfill-bodies:", err)
+			os.Exit(1)
+		}
 	default:
-		fmt.Fprintln(os.Stderr, "usage: email-soft [serve|migrate]")
+		fmt.Fprintln(os.Stderr, "usage: email-soft [serve|migrate|backfill-bodies]")
 		os.Exit(2)
 	}
 }
