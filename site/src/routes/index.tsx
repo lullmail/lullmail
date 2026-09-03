@@ -7,10 +7,16 @@ export function head() {
   return {
     title,
     description,
+    canonical: "https://lullmail.com/",
     openGraph: {
       title,
       description,
       type: "website",
+      url: "https://lullmail.com/",
+      image: "https://lullmail.com/og.png",
+    },
+    twitter: {
+      card: "summary_large_image",
     },
   };
 }
