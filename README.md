@@ -46,9 +46,8 @@ RFC 4155) is a table-stakes feature, not a cancellation flow.
   optional TOTP, HttpOnly server sessions, revocation, rate limiting, and
   provable self-serve deletion.
 
-Standalone and single-owner by design. Fylun may consume mail context and
-Akiroo may present a thin business-mail surface, but this repository remains
-the canonical mailbox and does not absorb campaign infrastructure.
+Standalone and single-owner by design: one owner per install, no multi-user
+tenancy, no campaign-sending infrastructure.
 
 ## Quickstart (self-host)
 
@@ -62,6 +61,10 @@ docker compose logs app      # one-time setup token, valid 24h
 Open `http://localhost:8080` and finish setup in the browser: paste the
 token, enter your address, create a passkey, save the recovery codes. The
 token stops authenticating the moment the first passkey exists.
+
+Deploying with [teploy](https://teploy.com) instead of raw Docker? A
+template `teploy.yml` is committed — point `server:` at a host from your
+`~/.teploy/servers.yml` and `teploy deploy <server>`.
 
 `SECRET_KEY` (seals credentials) and the setup token are generated on first
 boot and kept in the `appdata` volume; the browser origin is detected from
@@ -110,25 +113,34 @@ go run . serve
 dashboard code, rebuild the dashboard, then rebuild/restart the binary; a
 running process keeps serving the copy it embedded.
 
-The marketing site is a separate Astro build:
+The marketing site is a separate Neutron static build (`site/`), deployed
+at [lullmail.com](https://lullmail.com):
 
 ```
 cd site && npm install && npm run dev
 ```
 
-It lives at lullmail.com.
-
 A local mail world for testing (GreenMail — real IMAP/SMTP against fake
 accounts):
 
 ```
-docker run -d --name es-mail -p 127.0.0.1:10143:3143 -p 127.0.0.1:10025:3025 \
+docker run -d --name lullmail-mail -p 127.0.0.1:10143:3143 -p 127.0.0.1:10025:3025 \
   greenmail/standalone:2.0.1 -Dgreenmail.setup.test.all \
   -Dgreenmail.users=you@local.test:password
 ```
 
 Connect `you@local.test` / `password` / host `127.0.0.1` port `10143` from
 the Accounts page. Loopback IMAP is allowed plaintext for exactly this.
+
+## Agents and MCP
+
+Mail is a great context source for scripts and AI agents, so the agent
+surface is first-class: long-lived revocable Bearer tokens (fenced to mail
+and work surfaces — they can never touch sign-in, passkeys, or sessions),
+and a standalone MCP adapter in [`mcp/`](./mcp) that exposes the whole
+read/screener/send/board/notes surface to any MCP-capable client. The
+server itself stays agent-agnostic; the adapter is optional and the product
+never depends on it.
 
 ## Architecture
 
@@ -144,15 +156,15 @@ provider ──sync──> mail_* mirror ──classify──> buckets ──der
 
 ## Status
 
-Release-candidate standalone reader. The complete local product path is
-implemented: auth/recovery, IMAP/JMAP, provider-OAuth plumbing and refresh,
+Release-candidate. The complete local product path is implemented:
+auth/recovery, IMAP/JMAP, provider-OAuth plumbing and refresh,
 sync/triage/read/send, responsive PWA/offline behavior, privacy controls,
 push, standards exports, retention, mailbox disconnect, and full-account
-deletion. Google/Microsoft public consent approval, a named-domain production
-deployment, and a real-provider credential smoke test are operator/release
-work—not missing code—and are listed explicitly in TASKS.md. Alias-domain and
-campaign-sending infrastructure are not part of this standalone mailbox;
-those belong with Akiroo if pursued.
+deletion. What remains is operator work, not missing code: Google/Microsoft
+public consent approval for a distributed OAuth client (self-hosters can
+bring their own client IDs today — see Environment), and a real-provider
+credential smoke test. Campaign-sending infrastructure is deliberately out
+of scope for this mailbox.
 
 ## License
 
