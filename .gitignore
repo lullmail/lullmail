@@ -17,3 +17,7 @@ NEUTRON_BUGS.md
 # NEUTRON_BUGS.md N4 / TASKS D2. Not committable: clones without the sibling
 # would fail every build.
 go.work
+
+# go:embed needs dashboard/dist to exist on a fresh clone; the app serves a
+# "dashboard not built" notice from this placeholder until npm run build.
+!dashboard/dist/.gitkeep
