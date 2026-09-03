@@ -30,7 +30,7 @@ export default function Home() {
           <a href="#trust">Trust</a>
           <a href="https://github.com/lullmail/lullmail">GitHub</a>
         </nav>
-        <a class="preview-link" href="#availability"><i aria-hidden="true"></i>Private preview</a>
+        <a class="preview-link" href="#availability"><i aria-hidden="true"></i>Open source</a>
       </header>
 
       <main id="main">
@@ -167,19 +167,19 @@ export default function Home() {
             <article><span>01</span><h3>Tracking stays out.</h3><p>Remote images are blocked by default. Common tracking links and campaign parameters are removed.</p></article>
             <article><span>02</span><h3>Your secrets stay encrypted.</h3><p>Account credentials are encrypted at rest. Passkeys, recovery codes, authenticator codes, and session revocation are built in.</p></article>
             <article><span>03</span><h3>Your mail comes with you.</h3><p>Download individual messages as EML or export a complete account in the standard mboxrd format. Delete your local data whenever you want.</p></article>
-            <article><span>04</span><h3>Run it on your own server.</h3><p>The complete core is one Go binary and Postgres, MIT licensed, with no telemetry and no required cloud service.</p></article>
+            <article><span>04</span><h3>Run it on your own server.</h3><p>The complete core is one Go binary and Postgres, AGPL licensed, with no telemetry and no required cloud service.</p></article>
           </div>
         </section>
 
         <section class="availability" id="availability" aria-labelledby="availability-title">
           <div class="availability-copy">
-            <p class="overline">Private preview</p>
-            <h2 id="availability-title">Private for now.</h2>
-            <p>The core product works. We are testing it with real accounts and finishing the public provider integrations before opening access more widely.</p>
+            <p class="overline">Free and open source</p>
+            <h2 id="availability-title">Yours to run.</h2>
+            <p>The complete product is AGPL-licensed and self-hostable: one Go binary and Postgres, deployable with Docker or teploy. A hosted offering may come later; the source is yours now.</p>
             <a class="arrow-link" href="https://github.com/lullmail/lullmail">Read the source on GitHub <span aria-hidden="true">&#8599;</span></a>
           </div>
           <div class="availability-meta">
-            <span>IMAP + JMAP</span><span>One owner</span><span>MIT licensed</span><span>Self-hostable</span>
+            <span>IMAP + JMAP</span><span>One owner</span><span>AGPL-3.0</span><span>Self-hostable</span>
           </div>
           <footer class="site-foot">
             <a class="brand" href="#top"><span class="brand-mark" aria-hidden="true"><i></i></span><span>Lull Mail</span></a>

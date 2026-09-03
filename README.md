@@ -156,4 +156,6 @@ those belong with Akiroo if pursued.
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+AGPL-3.0 — see [LICENSE](./LICENSE). The copyright is held by a single
+author, so a commercial/hosted license remains possible alongside the AGPL;
+the vendored `mail-engine/` module is covered by the same license.
