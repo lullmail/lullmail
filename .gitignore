@@ -7,6 +7,12 @@ site/dist/
 /lullmail
 /output/
 
+# Local-only working docs. Public-repo policy (AGENTS.md): never commit
+# these; they stay on disk as untracked scratch.
+SPEC.md
+TASKS.md
+NEUTRON_BUGS.md
+
 # Dev-only workspace into the live Neutron checkout; deploy vendoring is
 # NEUTRON_BUGS.md N4 / TASKS D2. Not committable: clones without the sibling
 # would fail every build.

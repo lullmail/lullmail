@@ -1,0 +1,40 @@
+# Public teploy template for Lull Mail.
+#
+# This file is the shape a fresh self-hosted teploy deploy takes — edit
+# `server:` to a host alias from your ~/.teploy/servers.yml (or a bare IP),
+# then `teploy deploy <server>`. The production instance's own yml (bind
+# addresses, secret references, deployment identity) lives in the private
+# infra repo, not here.
+#
+# The one-time setup flow: deploy, `teploy logs` (or `docker compose logs
+# app`) for the 24h setup token, open the published origin in a browser, and
+# complete passkey setup. PUBLIC_URL can stay unset — the origin is detected
+# from the setup visit and pinned.
+app: lullmail
+type: container
+server: changeme
+
+build_local: false
+platform: linux/amd64
+
+# Publish a raw port; put Caddy/HTTPS in front by setting `domain:` instead.
+ingress: host
+port: 8080
+
+health:
+  path: /health
+stop_timeout: 30
+
+accessories:
+  postgres:
+    image: postgres:17
+    port: 5432
+    env:
+      POSTGRES_DB: lullmail
+      POSTGRES_USER: lullmail
+      POSTGRES_PASSWORD: secret:LULLMAIL_POSTGRES_PASSWORD
+    volumes:
+      lullmailpgdata: /var/lib/postgresql/data
+
+volumes:
+  lullmaildata: /app/data
