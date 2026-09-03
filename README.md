@@ -74,7 +74,7 @@ boot (`lullmail migrate` runs them by hand).
 
 | Variable | Required | Notes |
 |---|---|---|
-| `DATABASE_URL` | yes | Postgres, e.g. `postgres://user:pass@host:5432/emailsoft` |
+| `DATABASE_URL` | yes | Postgres, e.g. `postgres://user:pass@host:5432/lullmail` |
 | `SECRET_KEY` | no | Seals mail credentials, OAuth/passkey records, TOTP, and push subscriptions with AES-256-GCM. Generated on first boot into `DATA_DIR/secret.key` when unset; changing it invalidates sealed data. |
 | `LULL_TOKEN` | no | One-time installation token for registering the first passkey. Generated (24h expiry, printed to logs) when unset. Rejected after first setup; restart regenerates while no passkey exists. |
 | `LULL_USER_EMAIL` | no | Owner address; normally entered on the setup page instead. |
