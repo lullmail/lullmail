@@ -51,19 +51,22 @@ func TestHTMLFallbackText(t *testing.T) {
 	}
 }
 
-func TestOutboundRecipientRejectsHeaderInjection(t *testing.T) {
-	for _, tc := range []struct{ to, subject string }{
-		{"person@example.com\r\nBcc: victim@example.com", "hello"},
-		{"person@example.com", "hello\nBcc: victim@example.com"},
-		{"not an address", "hello"},
+func TestOutboundRecipients(t *testing.T) {
+	for _, tc := range []struct{ name, list string }{
+		{"header injection", "person@example.com\r\nBcc: victim@example.com"},
+		{"not an address", "not an address"},
+		{"one bad spoils the list", "person@example.com, garbage"},
 	} {
-		if _, ok := outboundRecipient(tc.to, tc.subject); ok {
-			t.Errorf("outboundRecipient(%q, %q) accepted", tc.to, tc.subject)
+		if _, ok := outboundRecipients(tc.list); ok {
+			t.Errorf("outboundRecipients(%q) accepted", tc.list)
 		}
 	}
-	got, ok := outboundRecipient("Person <person@example.com>", "hello")
-	if !ok || got.Name != "Person" || got.Email != "person@example.com" {
-		t.Fatalf("valid recipient = %+v, %v", got, ok)
+	if got, ok := outboundRecipients(""); !ok || len(got) != 0 {
+		t.Errorf("empty list = %+v, %v; want empty ok", got, ok)
+	}
+	got, ok := outboundRecipients("Person <person@example.com>, other@example.com")
+	if !ok || len(got) != 2 || got[0].Name != "Person" || got[0].Email != "person@example.com" || got[1].Email != "other@example.com" {
+		t.Fatalf("valid list = %+v, %v", got, ok)
 	}
 }
 

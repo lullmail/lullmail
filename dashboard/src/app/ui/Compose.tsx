@@ -1,51 +1,101 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { closeCompose, compose, cycleDraft, draftIndex, draftStack, newDraft, retireDraft, updateDraft, type ComposeState } from "../lib/store";
+import { accounts, closeCompose, compose, cycleDraft, draftIndex, draftStack, newDraft, retireDraft, updateDraft, type ComposeState } from "../lib/store";
 import { sendMail } from "../lib/actions";
 
 const previewPolicy = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data: cid:; style-src \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'">';
+
+/** Wrap the textarea's current selection with an HTML tag pair (or an
+    <a href> shell the cursor lands inside). */
+function wrapSelection(el: HTMLTextAreaElement, before: string, after: string, cursorOffset?: number) {
+  const start = el.selectionStart;
+  const end = el.selectionEnd;
+  const value = el.value;
+  const next = value.slice(0, start) + before + value.slice(start, end) + after + value.slice(end);
+  el.value = next;
+  const caret = start + before.length + (end - start) + (cursorOffset ?? 0);
+  el.setSelectionRange(caret, caret);
+  el.focus();
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+}
 
 /** One draft in the ring. Remounted per draftIndex so each draft owns its
     fields and its autosave slot — switching carousels nothing between them. */
 function DraftForm({ seed }: { seed: ComposeState }) {
   const draftKey = "es-draft-" + seed.id;
-  let saved: { to?: string; subject?: string; body?: string; htmlMode?: boolean } = {};
+  let saved: { to?: string; cc?: string; bcc?: string; subject?: string; body?: string; htmlMode?: boolean; accountId?: string } = {};
   try { saved = JSON.parse(localStorage.getItem(draftKey) || "{}"); } catch { /* private mode */ }
   const [to, setTo] = useState(saved.to ?? seed.to ?? "");
+  const [cc, setCc] = useState(saved.cc ?? "");
+  const [bcc, setBcc] = useState(saved.bcc ?? "");
+  const [showCc, setShowCc] = useState(!!(saved.cc || saved.bcc));
   const [subject, setSubject] = useState(saved.subject ?? seed.subject ?? "");
   const [body, setBody] = useState(saved.body ?? seed.body ?? "");
   const [htmlMode, setHtmlMode] = useState(saved.htmlMode ?? seed.htmlMode ?? false);
   const [preview, setPreview] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [accountId, setAccountId] = useState(saved.accountId ?? seed.accountId ?? "");
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      try { localStorage.setItem(draftKey, JSON.stringify({ to, subject, body, htmlMode })); } catch { /* private mode */ }
+      try { localStorage.setItem(draftKey, JSON.stringify({ to, cc, bcc, subject, body, htmlMode, accountId })); } catch { /* private mode */ }
     }, 250);
     return () => clearTimeout(timer);
-  }, [draftKey, to, subject, body, htmlMode]);
+  }, [draftKey, to, cc, bcc, subject, body, htmlMode, accountId]);
 
   const send = async () => {
     if (!to.trim() || busy) return;
     setBusy(true);
     const ok = await sendMail({
-      to: to.trim(), subject,
+      to: to.trim(), cc: cc.trim(), bcc: bcc.trim(), subject,
       text: htmlMode ? "" : body,
       html: htmlMode ? body : undefined,
-      accountId: seed.accountId,
+      accountId: accountId || seed.accountId,
       replyToId: seed.replyToId,
     });
     setBusy(false);
     if (ok) { localStorage.removeItem(draftKey); retireDraft(seed.id); }
   };
 
+  const accountList = accounts.value;
+  const fromLabel = accountList.find((a) => a.id === (accountId || seed.accountId))?.address || accountList[0]?.address || "";
+
   return (
     <>
       <div class="compose-form">
         <div class="compose-kicker">{seed.context || "New message"}</div>
+        <div class="compose-head-row">
+          <select
+            class="compose-from" aria-label="Send from account"
+            value={accountId || seed.accountId || ""}
+            onChange={(e) => { const v = (e.target as HTMLSelectElement).value; setAccountId(v); updateDraft({ accountId: v }); }}
+          >
+            {accountList.length === 0 && <option value="">{fromLabel || "First connected account"}</option>}
+            {accountList.map((a) => <option value={a.id}>{a.address}</option>)}
+          </select>
+          <button
+            class={"btn btn-ghost btn-sm" + (showCc ? " lens-on" : "")} type="button"
+            aria-pressed={showCc}
+            title="Show or hide the Cc and Bcc fields"
+            onClick={() => setShowCc((v) => !v)}
+          >Cc/Bcc</button>
+        </div>
         <input
-          class="compose-to" type="email" placeholder="To" autocomplete="off" autofocus={!to}
+          class="compose-to" type="text" placeholder="To — comma-separated" autocomplete="off" autofocus={!to}
           value={to} onInput={(e) => { const v = (e.target as HTMLInputElement).value; setTo(v); updateDraft({ to: v }); }}
         />
+        {showCc && (
+          <>
+            <input
+              class="compose-to" type="text" placeholder="Cc" autocomplete="off"
+              value={cc} onInput={(e) => { const v = (e.target as HTMLInputElement).value; setCc(v); updateDraft({ cc: v }); }}
+            />
+            <input
+              class="compose-to" type="text" placeholder="Bcc" autocomplete="off"
+              value={bcc} onInput={(e) => { const v = (e.target as HTMLInputElement).value; setBcc(v); updateDraft({ bcc: v }); }}
+            />
+          </>
+        )}
         <input
           class="compose-subject" type="text" placeholder="Subject"
           value={subject} onInput={(e) => { const v = (e.target as HTMLInputElement).value; setSubject(v); updateDraft({ subject: v }); }}
@@ -57,6 +107,13 @@ function DraftForm({ seed }: { seed: ComposeState }) {
             title="Toggle HTML source composing: paste or write styled HTML, send it as a rich message"
             onClick={() => { setHtmlMode((v) => !v); setPreview(false); updateDraft({ htmlMode: !htmlMode }); }}
           >HTML</button>
+          {htmlMode && !preview && (
+            <>
+              <button class="btn btn-ghost btn-sm" type="button" title="Bold" onClick={() => bodyRef.current && wrapSelection(bodyRef.current, "<b>", "</b>")}>B</button>
+              <button class="btn btn-ghost btn-sm compose-tool-i" type="button" title="Italic" onClick={() => bodyRef.current && wrapSelection(bodyRef.current, "<i>", "</i>")}>I</button>
+              <button class="btn btn-ghost btn-sm" type="button" title="Link" onClick={() => bodyRef.current && wrapSelection(bodyRef.current, '<a href="', '"></a>', -6)}>Link</button>
+            </>
+          )}
           {htmlMode && (
             <button
               class={"btn btn-ghost btn-sm" + (preview ? " lens-on" : "")} type="button"
@@ -64,7 +121,7 @@ function DraftForm({ seed }: { seed: ComposeState }) {
               onClick={() => setPreview((v) => !v)}
             >{preview ? "Edit source" : "Preview"}</button>
           )}
-          {htmlMode && <span class="compose-modes-note">plain-text readers get an automatic fallback</span>}
+          {htmlMode && !preview && <span class="compose-modes-note">plain-text readers get an automatic fallback</span>}
         </div>
         {htmlMode && preview ? (
           /* sandbox with no allow-* tokens: styles render, scripts never run. */
@@ -74,6 +131,7 @@ function DraftForm({ seed }: { seed: ComposeState }) {
           />
         ) : (
           <textarea
+            ref={bodyRef}
             class={"compose-body" + (htmlMode ? " html-source" : "")}
             placeholder={htmlMode ? "Write or paste HTML — inline styles travel best in email." : "Write something worth reading."}
             autofocus={!!to && !htmlMode}

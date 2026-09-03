@@ -1043,6 +1043,17 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 }
 .panel-narrow { max-width: 420px; }
 
+/* Compose is a workspace, not a prompt: wide panel, tall body. */
+.compose-panel { width: min(880px, 94vw); max-width: min(880px, 94vw); }
+.compose-head-row { display: flex; align-items: center; gap: var(--sp-2); }
+.compose-from {
+  flex: 1; min-width: 0; font-size: var(--t-sm); color: var(--ink-2);
+  background: transparent; border: 1px dashed var(--line); border-radius: var(--r-sm);
+  padding: var(--sp-1) var(--sp-2);
+}
+.compose-from:focus { outline: none; border-color: var(--accent); border-style: solid; }
+.compose-tool-i { font-style: italic; }
+
 .palette-input-row {
   display: flex; align-items: center; gap: var(--sp-2);
   padding: var(--sp-3) var(--sp-4); border-bottom: 1px solid var(--line); flex: none;
@@ -1079,7 +1090,7 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 .compose-form input::placeholder, .compose-form textarea::placeholder { color: var(--ink-3); }
 .compose-to { font-size: var(--t-md); border-bottom: 1px solid var(--line) !important; padding-bottom: var(--sp-2) !important; }
 .compose-subject { font-family: var(--serif); font-size: 22px; font-weight: 680; letter-spacing: -0.018em; }
-.compose-body { flex: 1; min-height: 220px; resize: none; line-height: 1.62; font-size: var(--t-lg); }
+.compose-body { flex: 1; min-height: 320px; resize: none; line-height: 1.62; font-size: var(--t-lg); }
 .compose-body.html-source { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: var(--t-sm); line-height: 1.5; }
 .compose-modes { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-1) 0 0; }
 .compose-modes-note { font-size: var(--t-xs); color: var(--ink-3); }

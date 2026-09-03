@@ -48,6 +48,8 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		AccountID string `json:"account_id"` // email_accounts.id; empty = first
 		To        string `json:"to"`
+		Cc        string `json:"cc"`
+		Bcc       string `json:"bcc"`
 		Subject   string `json:"subject"`
 		Text      string `json:"text"`
 		HTML      string `json:"html"` // optional rich body; sent as multipart/alternative with Text
@@ -61,9 +63,19 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusUnprocessableEntity, "Missing Fields", "to, subject and a body (text or html) are required")
 		return
 	}
-	recipient, ok := outboundRecipient(req.To, req.Subject)
+	toAddrs, ok := outboundRecipients(req.To)
+	if !ok || len(toAddrs) == 0 || strings.ContainsAny(req.Subject, "\r\n") {
+		writeProblem(w, http.StatusUnprocessableEntity, "Invalid Headers", "to must be a comma-separated address list and headers cannot contain newlines")
+		return
+	}
+	ccAddrs, ok := outboundRecipients(req.Cc)
 	if !ok {
-		writeProblem(w, http.StatusUnprocessableEntity, "Invalid Headers", "to must be one email address and headers cannot contain newlines")
+		writeProblem(w, http.StatusUnprocessableEntity, "Invalid Headers", "cc must be a comma-separated address list")
+		return
+	}
+	bccAddrs, ok := outboundRecipients(req.Bcc)
+	if !ok {
+		writeProblem(w, http.StatusUnprocessableEntity, "Invalid Headers", "bcc must be a comma-separated address list")
 		return
 	}
 	if req.ReplyToID != "" && req.AccountID == "" {
@@ -123,6 +135,8 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		}
 		outgoing = mail.ReplyTo(parent, from, req.Text)
 		outgoing.HTML = req.HTML
+		outgoing.Cc = ccAddrs
+		outgoing.Bcc = bccAddrs
 		a.enqueue(w, deliver, outgoing)
 		return
 	}
@@ -134,7 +148,9 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 	outgoing = &mail.Outgoing{
 		From:    from,
-		To:      []mail.Address{recipient},
+		To:      toAddrs,
+		Cc:      ccAddrs,
+		Bcc:     bccAddrs,
 		Subject: req.Subject,
 		Text:    req.Text,
 		HTML:    req.HTML,
@@ -142,15 +158,26 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 	a.enqueue(w, deliver, outgoing)
 }
 
-func outboundRecipient(to, subject string) (mail.Address, bool) {
-	if strings.ContainsAny(to+subject, "\r\n") {
-		return mail.Address{}, false
+func outboundRecipients(list string) ([]mail.Address, bool) {
+	if strings.ContainsAny(list, "\r\n") {
+		return nil, false
 	}
-	parsed, err := netmail.ParseAddress(to)
-	if err != nil || parsed.Address == "" {
-		return mail.Address{}, false
+	list = strings.TrimSpace(list)
+	if list == "" {
+		return nil, true
 	}
-	return mail.Address{Name: parsed.Name, Email: parsed.Address}, true
+	parsed, err := netmail.ParseAddressList(list)
+	if err != nil {
+		return nil, false
+	}
+	out := make([]mail.Address, 0, len(parsed))
+	for _, p := range parsed {
+		if p.Address == "" {
+			return nil, false
+		}
+		out = append(out, mail.Address{Name: p.Name, Email: p.Address})
+	}
+	return out, true
 }
 
 // htmlFallbackText derives the plain-text alternative for an HTML-only

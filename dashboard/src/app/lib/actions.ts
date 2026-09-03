@@ -374,6 +374,8 @@ function markRowRead(threadId: string, account: string) {
 
 export interface SendInput {
   to: string;
+  cc?: string;
+  bcc?: string;
   subject: string;
   text: string;
   /** Optional rich body; the server derives the plain-text alternative when absent. */
@@ -387,6 +389,8 @@ export async function sendMail(input: SendInput): Promise<boolean> {
     const res = await api<{ queued: string }>("/send", {
       body: {
         to: input.to,
+        cc: input.cc || "",
+        bcc: input.bcc || "",
         subject: input.subject,
         text: input.text,
         html: input.html || "",

@@ -469,6 +469,8 @@ export interface ComposeState {
   /** Stable identity: one autosave slot per draft, carousel-safe. */
   id: string;
   to: string;
+  cc?: string;
+  bcc?: string;
   subject: string;
   body: string;
   /** When true the body holds HTML source, sent as a rich message. */
