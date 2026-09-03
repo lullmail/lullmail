@@ -15,9 +15,11 @@ Never create or commit session, handoff, or local-only context as tracked files:
 ## Deployment notes
 - The committed `teploy.yml` is a public template. The production instance's real
   deploy config lives in the private infra repo — never copy it here.
-- Deployment identity (teploy app name, DB name, volume names) on the production
-  host deliberately predates the email-soft → Lull Mail rename and must not be
-  "cleaned up" without a deliberate data-migration plan.
+- Production on infra-home was migrated on 2026-09-02 from the email-soft
+  identity to app `lullmail` on the GHCR image (pg dump restored, secret.key
+  carried, origin unchanged). The pre-migration backup and rollback live in
+  /root/lullmail-migration on that host; the old email-soft containers were
+  left stopped as the rollback path.
 - Agent API tokens minted before the rename carry the `es_` prefix and must stay
   valid; new tokens are `lull_`.
 
