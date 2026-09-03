@@ -152,7 +152,7 @@ button, a { font: inherit; }
 .trust-intro h2 { max-width: 620px; font-size: clamp(62px, 7vw, 106px); line-height: .88; }
 .trust-intro > p:last-child { max-width: 500px; margin: 36px 0 0; color: rgba(251,250,247,.56); font-size: 16px; }
 .trust-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 22px; }
-.trust-list article { aspect-ratio: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 15px; padding: 32px; text-align: center; border: 1px solid rgba(255,255,255,.14); border-radius: 12px; background: rgba(255,255,255,.03); }
+.trust-list article { min-width: 0; aspect-ratio: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 15px; padding: 32px; text-align: center; border: 1px solid rgba(255,255,255,.14); border-radius: 12px; background: rgba(255,255,255,.03); }
 .trust-list span { color: #edb08f; font-size: 10px; font-weight: 700; }
 .trust-list h3, .trust-list p { margin: 0; }
 .trust-list h3 { max-width: 16ch; font-family: var(--serif); font-size: 23px; font-weight: 450; line-height: 1.15; }

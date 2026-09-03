@@ -1,7 +1,6 @@
 const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-const desktop = window.matchMedia("(min-width: 701px)").matches;
 
-if (!reduced && desktop) {
+if (!reduced) {
   requestAnimationFrame(() => requestAnimationFrame(() => import("./cinematic")));
 }
 
