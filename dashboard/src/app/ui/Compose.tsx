@@ -1,8 +1,31 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { accounts, closeCompose, compose, cycleDraft, draftIndex, draftStack, newDraft, retireDraft, updateDraft, type ComposeState } from "../lib/store";
-import { sendMail } from "../lib/actions";
+import { accounts, closeCompose, compose, cycleDraft, draftIndex, draftStack, newDraft, retireDraft, showToast, updateDraft, type ComposeState } from "../lib/store";
+import { sendMail, type SendAttachment } from "../lib/actions";
 
 const previewPolicy = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data: cid:; style-src \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'">';
+
+const MAX_FILE_BYTES = 15 << 20;
+
+async function fileToAttachment(file: File): Promise<SendAttachment | null> {
+  if (file.size > MAX_FILE_BYTES) {
+    showToast(`"${file.name}" is over 15 MiB and was skipped`);
+    return null;
+  }
+  const buf = await file.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return { filename: file.name, contentType: file.type || "application/octet-stream", dataBase64: btoa(binary) };
+}
+
+function formatBytes(n: number): string {
+  if (n >= 1 << 20) return (n / (1 << 20)).toFixed(1) + " MB";
+  if (n >= 1 << 10) return Math.round(n / (1 << 10)) + " KB";
+  return n + " B";
+}
 
 /** Wrap the textarea's current selection with an HTML tag pair (or an
     <a href> shell the cursor lands inside). */
@@ -34,7 +57,26 @@ function DraftForm({ seed }: { seed: ComposeState }) {
   const [preview, setPreview] = useState(false);
   const [busy, setBusy] = useState(false);
   const [accountId, setAccountId] = useState(saved.accountId ?? seed.accountId ?? "");
+  const [attachments, setAttachments] = useState<SendAttachment[]>([]);
+  const [fileBytes, setFileBytes] = useState(0);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  const addFiles = async (files: FileList | null) => {
+    if (!files) return;
+    const next: SendAttachment[] = [];
+    let bytes = 0;
+    for (const f of files) {
+      const att = await fileToAttachment(f);
+      if (att) { next.push(att); bytes += f.size; }
+    }
+    if (next.length) { setAttachments((a) => [...a, ...next]); setFileBytes((n) => n + bytes); }
+  };
+
+  const removeAttachment = (i: number) => {
+    setAttachments((a) => a.filter((_, idx) => idx !== i));
+    setFileBytes((n) => Math.max(0, n - (attachments[i]?.dataBase64.length * 3 / 4 || 0)));
+  };
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -52,6 +94,7 @@ function DraftForm({ seed }: { seed: ComposeState }) {
       html: htmlMode ? body : undefined,
       accountId: accountId || seed.accountId,
       replyToId: seed.replyToId,
+      attachments,
     });
     setBusy(false);
     if (ok) { localStorage.removeItem(draftKey); retireDraft(seed.id); }
@@ -121,8 +164,29 @@ function DraftForm({ seed }: { seed: ComposeState }) {
               onClick={() => setPreview((v) => !v)}
             >{preview ? "Edit source" : "Preview"}</button>
           )}
+          <button
+            class="btn btn-ghost btn-sm" type="button"
+            title="Attach files (they upload with the message, not before)"
+            onClick={() => fileInput.current?.click()}
+          >Attach</button>
+          <input
+            ref={fileInput} type="file" multiple hidden
+            onChange={(e) => { const el = e.target as HTMLInputElement; addFiles(el.files); el.value = ""; }}
+          />
           {htmlMode && !preview && <span class="compose-modes-note">plain-text readers get an automatic fallback</span>}
         </div>
+        {attachments.length > 0 && (
+          <div class="compose-files">
+            {attachments.map((a, i) => (
+              <span class="compose-file" key={i}>
+                <span class="compose-file-name">{a.filename}</span>
+                <span class="compose-file-size">{formatBytes(Math.round(a.dataBase64.length * 3 / 4))}</span>
+                <button class="btn-icon" type="button" aria-label={"Remove " + a.filename} onClick={() => removeAttachment(i)}>×</button>
+              </span>
+            ))}
+            <span class="compose-files-total">{formatBytes(fileBytes)} attached</span>
+          </div>
+        )}
         {htmlMode && preview ? (
           /* sandbox with no allow-* tokens: styles render, scripts never run. */
           <iframe

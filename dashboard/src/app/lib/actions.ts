@@ -372,6 +372,13 @@ function markRowRead(threadId: string, account: string) {
 
 /* ---- send, with the existing server-side undo window ---- */
 
+export interface SendAttachment {
+  filename: string;
+  contentType: string;
+  /** Raw base64 of the file bytes, no data-url prefix. */
+  dataBase64: string;
+}
+
 export interface SendInput {
   to: string;
   cc?: string;
@@ -382,6 +389,7 @@ export interface SendInput {
   html?: string;
   accountId?: string;
   replyToId?: string;
+  attachments?: SendAttachment[];
 }
 
 export async function sendMail(input: SendInput): Promise<boolean> {
@@ -396,6 +404,11 @@ export async function sendMail(input: SendInput): Promise<boolean> {
         html: input.html || "",
         account_id: input.accountId || "",
         reply_to_message_id: input.replyToId || "",
+        attachments: (input.attachments || []).map((a) => ({
+          filename: a.filename,
+          content_type: a.contentType,
+          data_base64: a.dataBase64,
+        })),
       },
     });
     showToast(

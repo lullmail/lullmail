@@ -1053,6 +1053,17 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 }
 .compose-from:focus { outline: none; border-color: var(--accent); border-style: solid; }
 .compose-tool-i { font-style: italic; }
+.compose-files { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); padding: var(--sp-1) 0 0; }
+.compose-file {
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2) var(--sp-1) var(--sp-3);
+  border: 1px solid var(--line); border-radius: 999px;
+  font-size: var(--t-xs); max-width: 100%;
+}
+.compose-file-name { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-1); }
+.compose-file-size { color: var(--ink-3); white-space: nowrap; }
+.compose-file .btn-icon { min-width: 20px; min-height: 20px; font-size: 13px; color: var(--ink-3); }
+.compose-files-total { font-size: var(--t-xs); color: var(--ink-3); }
 
 .palette-input-row {
   display: flex; align-items: center; gap: var(--sp-2);

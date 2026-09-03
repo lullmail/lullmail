@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -230,5 +231,52 @@ func TestDomainOf(t *testing.T) {
 		if got := domainOf(in); got != want {
 			t.Errorf("domainOf(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestRenderMixedCarriesAttachments(t *testing.T) {
+	msg := &Outgoing{
+		From:    Address{Email: "bob@example.com"},
+		To:      []Address{{Email: "alice@example.com"}},
+		Subject: "with files",
+		Text:    "plain body",
+		HTML:    "<p>rich body</p>",
+		Attachments: []Attachment{
+			{Filename: "invoice.pdf", ContentType: "application/pdf", Data: []byte("PDFBYTES")},
+			{Filename: "evil\r\nBcc: victim@example.com", ContentType: "text/plain\r\nBcc: victim@example.com", Data: []byte("x")},
+			{Filename: "", Data: []byte("y")},
+		},
+	}
+	raw, err := msg.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(raw)
+	if !strings.Contains(s, "multipart/mixed") {
+		t.Fatalf("no multipart/mixed wrapper:\n%s", s)
+	}
+	// The body part keeps its alternative structure, plain before html.
+	plain := strings.Index(s, "text/plain")
+	html := strings.Index(s, "text/html")
+	if plain < 0 || html < 0 || plain > html {
+		t.Fatalf("body part lost plain-before-html ordering:\n%s", s)
+	}
+	if !strings.Contains(s, `filename="invoice.pdf"`) {
+		t.Fatalf("attachment filename missing:\n%s", s)
+	}
+	if !strings.Contains(s, base64.StdEncoding.EncodeToString([]byte("PDFBYTES"))) {
+		t.Fatalf("attachment data not base64-carried:\n%s", s)
+	}
+	// Header injection through filename or content type must not survive:
+	// no CRLF can remain anywhere it could start a header, and a hostile
+	// content type falls back to octet-stream rather than shipping mangled.
+	if strings.Contains(s, "\r\nBcc:") || strings.Contains(s, "\nBcc:") {
+		t.Fatalf("header injection survived sanitizing:\n%s", s)
+	}
+	if strings.Contains(s, "text/plainBcc") {
+		t.Fatalf("mangled content type shipped instead of falling back:\n%s", s)
+	}
+	if !strings.Contains(s, `filename="attachment"`) {
+		t.Fatalf("empty filename did not fall back:\n%s", s)
 	}
 }

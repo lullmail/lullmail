@@ -6,7 +6,9 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"html"
 	"net/http"
 	netmail "net/mail"
@@ -54,8 +56,12 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		Text      string `json:"text"`
 		HTML      string `json:"html"` // optional rich body; sent as multipart/alternative with Text
 		ReplyToID string `json:"reply_to_message_id"`
+
+		Attachments []sendAttachmentRequest `json:"attachments"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// Attachments ride inside the JSON body, so the read cap has to cover
+	// them: 30 MiB of request bounds base64 overhead plus several files.
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 30<<20)).Decode(&req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
@@ -76,6 +82,11 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 	bccAddrs, ok := outboundRecipients(req.Bcc)
 	if !ok {
 		writeProblem(w, http.StatusUnprocessableEntity, "Invalid Headers", "bcc must be a comma-separated address list")
+		return
+	}
+	attachments, problem := decodeAttachments(req.Attachments, 25<<20)
+	if problem != "" {
+		writeProblem(w, http.StatusUnprocessableEntity, "Attachment Rejected", problem)
 		return
 	}
 	if req.ReplyToID != "" && req.AccountID == "" {
@@ -137,6 +148,7 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		outgoing.HTML = req.HTML
 		outgoing.Cc = ccAddrs
 		outgoing.Bcc = bccAddrs
+		outgoing.Attachments = attachments
 		a.enqueue(w, deliver, outgoing)
 		return
 	}
@@ -147,15 +159,55 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	outgoing = &mail.Outgoing{
-		From:    from,
-		To:      toAddrs,
-		Cc:      ccAddrs,
-		Bcc:     bccAddrs,
-		Subject: req.Subject,
-		Text:    req.Text,
-		HTML:    req.HTML,
+		From:        from,
+		To:          toAddrs,
+		Cc:          ccAddrs,
+		Bcc:         bccAddrs,
+		Subject:     req.Subject,
+		Text:        req.Text,
+		HTML:        req.HTML,
+		Attachments: attachments,
 	}
 	a.enqueue(w, deliver, outgoing)
+}
+
+type sendAttachmentRequest struct {
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+	DataB64     string `json:"data_base64"`
+}
+
+// decodeAttachments turns JSON-carried base64 attachments into engine
+// attachments with hard caps: one file at most 15 MiB decoded, the set at
+// most totalMiB. The engine sanitizes header values; these caps exist so a
+// fat request cannot balloon server memory before composition.
+func decodeAttachments(reqs []sendAttachmentRequest, totalBytes int) ([]mail.Attachment, string) {
+	if len(reqs) == 0 {
+		return nil, ""
+	}
+	if len(reqs) > 20 {
+		return nil, "at most 20 attachments per message"
+	}
+	out := make([]mail.Attachment, 0, len(reqs))
+	var total int
+	for i, ra := range reqs {
+		if ra.DataB64 == "" {
+			return nil, fmt.Sprintf("attachment %d has no data", i+1)
+		}
+		data, err := base64.StdEncoding.DecodeString(ra.DataB64)
+		if err != nil {
+			return nil, fmt.Sprintf("attachment %d is not valid base64", i+1)
+		}
+		if len(data) > 15<<20 {
+			return nil, fmt.Sprintf("attachment %d exceeds 15 MiB", i+1)
+		}
+		total += len(data)
+		if total > totalBytes {
+			return nil, "attachments exceed the 25 MiB total"
+		}
+		out = append(out, mail.Attachment{Filename: ra.Filename, ContentType: ra.ContentType, Data: data})
+	}
+	return out, ""
 }
 
 func outboundRecipients(list string) ([]mail.Address, bool) {

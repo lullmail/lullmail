@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -106,5 +108,38 @@ func TestUndoSendOnlyCancelsPendingDelivery(t *testing.T) {
 			}
 			cancel()
 		})
+	}
+}
+
+func TestDecodeAttachments(t *testing.T) {
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+
+	if atts, problem := decodeAttachments(nil, 25<<20); atts != nil || problem != "" {
+		t.Fatalf("empty set = %v, %q; want nil, ok", atts, problem)
+	}
+	atts, problem := decodeAttachments([]sendAttachmentRequest{
+		{Filename: "a.txt", ContentType: "text/plain", DataB64: b64("hello")},
+		{Filename: "b.bin", DataB64: b64("xyz")},
+	}, 25<<20)
+	if problem != "" || len(atts) != 2 || string(atts[0].Data) != "hello" || atts[1].ContentType != "" {
+		t.Fatalf("valid set = %+v, %q", atts, problem)
+	}
+
+	for _, tc := range []struct {
+		name string
+		reqs []sendAttachmentRequest
+		want string
+	}{
+		{"bad base64", []sendAttachmentRequest{{Filename: "a", DataB64: "!!!"}}, "not valid base64"},
+		{"missing data", []sendAttachmentRequest{{Filename: "a"}}, "no data"},
+	} {
+		if _, problem := decodeAttachments(tc.reqs, 25<<20); problem == "" || !strings.Contains(problem, tc.want) {
+			t.Errorf("%s: problem = %q, want it to mention %q", tc.name, problem, tc.want)
+		}
+	}
+
+	big := base64.StdEncoding.EncodeToString(make([]byte, 15<<20+1))
+	if _, problem := decodeAttachments([]sendAttachmentRequest{{Filename: "big", DataB64: big}}, 25<<20); !strings.Contains(problem, "15 MiB") {
+		t.Errorf("oversized file: problem = %q", problem)
 	}
 }
