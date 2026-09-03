@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "neutron-ts dev",
-    "build": "neutron-ts build --preset static",
+    "build": "neutron-ts build --preset static && touch dist/.gitkeep",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "node e2e/auth.mjs"
