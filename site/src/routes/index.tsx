@@ -28,6 +28,7 @@ export default function Home() {
         <nav aria-label="Main navigation">
           <a href="#product">Product</a>
           <a href="#trust">Trust</a>
+          <a href="https://github.com/lullmail/lullmail">GitHub</a>
         </nav>
         <a class="preview-link" href="#availability"><i aria-hidden="true"></i>Private preview</a>
       </header>
@@ -175,6 +176,7 @@ export default function Home() {
             <p class="overline">Private preview</p>
             <h2 id="availability-title">Private for now.</h2>
             <p>The core product works. We are testing it with real accounts and finishing the public provider integrations before opening access more widely.</p>
+            <a class="arrow-link" href="https://github.com/lullmail/lullmail">Read the source on GitHub <span aria-hidden="true">&#8599;</span></a>
           </div>
           <div class="availability-meta">
             <span>IMAP + JMAP</span><span>One owner</span><span>MIT licensed</span><span>Self-hostable</span>
@@ -182,7 +184,7 @@ export default function Home() {
           <footer class="site-foot">
             <a class="brand" href="#top"><span class="brand-mark" aria-hidden="true"><i></i></span><span>Lull Mail</span></a>
             <p>lullmail.com · 2026</p>
-            <div><a href="#product">Product</a><a href="#trust">Trust</a><a href="#top">Back to top ↑</a></div>
+            <div><a href="#product">Product</a><a href="#trust">Trust</a><a href="https://github.com/lullmail/lullmail">GitHub</a><a href="#top">Back to top &#8593;</a></div>
           </footer>
         </section>
       </main>

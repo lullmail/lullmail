@@ -1,5 +1,5 @@
 app: lullmail
-domain: "lullmail.com, www.lullmail.com"
+domain: "lullmail.com"
 server: deploy-ovh
 type: static
 source: ./dist
