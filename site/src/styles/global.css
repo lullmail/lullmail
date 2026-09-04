@@ -167,6 +167,9 @@ button, a { font: inherit; }
 .site-foot > p { margin: 0; color: var(--ink-soft); font-size: 11px; }
 .site-foot > div { justify-self: end; display: flex; gap: 24px; font-size: 11px; }
 .site-foot > div a { text-decoration: none; }
+.site-foot-credit { grid-column: 1 / -1; margin: 0; color: var(--ink-soft); font-size: 11px; }
+.site-foot-credit a { text-decoration: none; color: var(--ink); }
+.site-foot-credit a:hover { text-decoration: underline; }
 
 @media (max-width: 980px) {
   .hero-copy { width: 88vw; }

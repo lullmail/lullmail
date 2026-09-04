@@ -191,6 +191,7 @@ export default function Home() {
             <a class="brand" href="#top"><span class="brand-mark" aria-hidden="true"><i></i></span><span>Lull Mail</span></a>
             <p>lullmail.com · 2026</p>
             <div><a href="#product">Product</a><a href="#trust">Trust</a><a href="https://github.com/lullmail/lullmail">GitHub</a><a href="#top">Back to top &#8593;</a></div>
+            <p class="site-foot-credit">Built with <a href="https://neutron.build" target="_blank" rel="noopener noreferrer">Neutron</a> · Deployed with <a href="https://teploy.com" target="_blank" rel="noopener noreferrer">Teploy</a></p>
           </footer>
         </section>
       </main>
