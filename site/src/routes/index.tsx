@@ -38,8 +38,8 @@ export function head() {
 function BrandMark() {
   return (
     <svg class="brand-mark" viewBox="9 17 46 32" width="31" height="21" aria-hidden="true">
-      <rect x="12" y="20" width="40" height="26" rx="3.5" fill="none" stroke="currentColor" stroke-width="4"/>
-      <path d="m14 23 18 13 18-13" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-linecap="round" stroke-width="4.5"/>
+      <rect x="12" y="20" width="40" height="26" rx="3.5" fill="none" stroke="currentColor" stroke-width="2"/>
+      <path d="m14 23 18 13 18-13" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-linecap="round" stroke-width="2"/>
     </svg>
   );
 }
@@ -54,11 +54,13 @@ export default function Home() {
           <BrandMark />
           <span>Lull Mail</span>
         </a>
-        <nav aria-label="Main navigation">
-          <a href="#product">Product</a>
-          <a href="#trust">Trust</a>
-        </nav>
-        <a class="head-cta" href="https://github.com/lullmail/lullmail" target="_blank" rel="noopener noreferrer">GitHub <span aria-hidden="true">&#8599;</span></a>
+        <div class="head-right">
+          <nav aria-label="Main navigation">
+            <a href="#product">Product</a>
+            <a href="#trust">Trust</a>
+          </nav>
+          <a class="head-cta" href="https://github.com/lullmail/lullmail" target="_blank" rel="noopener noreferrer">GitHub <span aria-hidden="true">&#8599;</span></a>
+        </div>
       </header>
 
       <main id="main">
