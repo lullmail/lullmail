@@ -13,12 +13,35 @@ export function head() {
       description,
       type: "website",
       url: "https://lullmail.com/",
-      image: "https://lullmail.com/og.png",
+      image: "https://lullmail.com/og.jpg",
+      imageAlt: "Lull Mail — a focused email client. Less time on email.",
+      siteName: "Lull Mail",
     },
     twitter: {
       card: "summary_large_image",
     },
+    jsonLd: {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      name: "Lull Mail",
+      url: "https://lullmail.com/",
+      description,
+      applicationCategory: "CommunicationApplication",
+      operatingSystem: "Self-hosted (Docker, teploy)",
+      license: "https://www.gnu.org/licenses/agpl-3.0.html",
+      isAccessibleForFree: true,
+      offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+    },
   };
+}
+
+function BrandMark() {
+  return (
+    <svg class="brand-mark" viewBox="0 0 64 64" width="26" height="26" aria-hidden="true">
+      <rect x="12" y="20" width="40" height="26" rx="3.5" fill="none" stroke="currentColor" stroke-width="4"/>
+      <path class="brand-flap" d="m14 23 18 13 18-13" fill="none" stroke-linejoin="round" stroke-linecap="round" stroke-width="4.5"/>
+    </svg>
+  );
 }
 
 export default function Home() {
@@ -28,15 +51,14 @@ export default function Home() {
 
       <header class="site-head" data-header>
         <a class="brand" href="#top" aria-label="Lull Mail home">
-          <span class="brand-mark" aria-hidden="true"><i></i></span>
+          <BrandMark />
           <span>Lull Mail</span>
         </a>
         <nav aria-label="Main navigation">
           <a href="#product">Product</a>
           <a href="#trust">Trust</a>
-          <a href="https://github.com/lullmail/lullmail">GitHub</a>
         </nav>
-        <a class="preview-link" href="#availability"><i aria-hidden="true"></i>Open source</a>
+        <a class="head-cta" href="https://github.com/lullmail/lullmail" target="_blank" rel="noopener noreferrer">GitHub <span aria-hidden="true">&#8599;</span></a>
       </header>
 
       <main id="main">
@@ -188,7 +210,7 @@ export default function Home() {
             <span>IMAP + JMAP</span><span>One owner</span><span>AGPL-3.0</span><span>Self-hostable</span>
           </div>
           <footer class="site-foot">
-            <a class="brand" href="#top"><span class="brand-mark" aria-hidden="true"><i></i></span><span>Lull Mail</span></a>
+            <a class="brand" href="#top"><BrandMark /><span>Lull Mail</span></a>
             <p>lullmail.com · 2026</p>
             <div><a href="#product">Product</a><a href="#trust">Trust</a><a href="https://github.com/lullmail/lullmail">GitHub</a><a href="#top">Back to top &#8593;</a></div>
             <p class="site-foot-credit">Built with <a href="https://neutron.build" target="_blank" rel="noopener noreferrer">Neutron</a> · Deployed with <a href="https://teploy.com" target="_blank" rel="noopener noreferrer">Teploy</a></p>
