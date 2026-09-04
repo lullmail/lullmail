@@ -28,7 +28,9 @@ RFC 4155) is a table-stakes feature, not a cancellation flow.
 - **Rich sending** — compose plain text or paste HTML: HTML goes out as
   multipart/alternative with an automatic plain-text fallback, a sandboxed
   preview shows the rendering, and IMAP/Gmail/Graph providers all carry the
-  rich part.
+  rich part. Attachments ride along as multipart/mixed (15 MiB per file,
+  25 MiB per message) and survive parked drafts; To/Cc/Bcc accept
+  comma-separated address lists and the From account is a dropdown.
 - **Leave cleanly** — download one original message as EML or a whole account
   as mailbox-by-mailbox mboxrd, with a manifest that discloses any local-mirror
   fallback instead of silently dropping data.
