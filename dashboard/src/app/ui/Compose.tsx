@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { accounts, closeCompose, compose, cycleDraft, draftIndex, draftStack, newDraft, retireDraft, showToast, updateDraft, type ComposeState } from "../lib/store";
 import { sendMail, type SendAttachment } from "../lib/actions";
+import { clearDraftAttachments, loadDraftAttachments, saveDraftAttachments } from "../lib/offline";
 
 const previewPolicy = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data: cid:; style-src \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'">';
 
@@ -70,13 +71,33 @@ function DraftForm({ seed }: { seed: ComposeState }) {
       const att = await fileToAttachment(f);
       if (att) { next.push(att); bytes += f.size; }
     }
-    if (next.length) { setAttachments((a) => [...a, ...next]); setFileBytes((n) => n + bytes); }
+    if (next.length) {
+      const merged = [...attachments, ...next];
+      setAttachments(merged);
+      setFileBytes((n) => n + bytes);
+      void saveDraftAttachments(seed.id, merged);
+    }
   };
 
   const removeAttachment = (i: number) => {
-    setAttachments((a) => a.filter((_, idx) => idx !== i));
-    setFileBytes((n) => Math.max(0, n - (attachments[i]?.dataBase64.length * 3 / 4 || 0)));
+    const next = attachments.filter((_, idx) => idx !== i);
+    setAttachments(next);
+    setFileBytes(next.reduce((n, a) => n + Math.round(a.dataBase64.length * 3 / 4), 0));
+    void saveDraftAttachments(seed.id, next);
   };
+
+  // Parked drafts keep their attachments: restore from IndexedDB on mount.
+  useEffect(() => {
+    let alive = true;
+    loadDraftAttachments<SendAttachment>(seed.id).then((files) => {
+      if (alive && files && files.length && attachments.length === 0) {
+        setAttachments(files);
+        setFileBytes(files.reduce((n, a) => n + Math.round(a.dataBase64.length * 3 / 4), 0));
+      }
+    }).catch(() => {});
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -97,7 +118,7 @@ function DraftForm({ seed }: { seed: ComposeState }) {
       attachments,
     });
     setBusy(false);
-    if (ok) { localStorage.removeItem(draftKey); retireDraft(seed.id); }
+    if (ok) { localStorage.removeItem(draftKey); void clearDraftAttachments(seed.id); retireDraft(seed.id); }
   };
 
   const accountList = accounts.value;
@@ -210,7 +231,7 @@ function DraftForm({ seed }: { seed: ComposeState }) {
       </div>
       <div class="compose-btns">
         <span class="hint"><span class="kbd">⌘↵</span> send · <span class="kbd">Esc</span> park · <span class="kbd">c</span> new draft · 5s to undo</span>
-        <button class="btn btn-ghost btn-sm" type="button" onClick={() => { localStorage.removeItem(draftKey); retireDraft(seed.id); }}>Discard</button>
+        <button class="btn btn-ghost btn-sm" type="button" onClick={() => { localStorage.removeItem(draftKey); void clearDraftAttachments(seed.id); retireDraft(seed.id); }}>Discard</button>
         <button class="btn btn-accent" type="button" disabled={!to.trim() || busy} onClick={send}>
           {busy ? "Sending…" : "Send"}
         </button>

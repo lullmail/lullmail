@@ -3,13 +3,15 @@
 // and account deletion can provably evict it.
 
 const DB = "lullmail-offline-v1";
-const VERSION = 1;
+const VERSION = 2;
 const CACHE = "responses";
 const QUEUE = "mutations";
+const ATTACHMENTS = "attachments";
 const OWNER = "es-offline-owner";
 
 interface Cached { key: string; owner: string; savedAt: number; value: unknown }
 interface Queued { id: string; owner: string; path: string; method: string; body?: unknown; queuedAt: number }
+interface DraftAttachmentRow { id: string; owner: string; files: unknown[] }
 
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -18,6 +20,7 @@ function openDB(): Promise<IDBDatabase> {
       const db = request.result;
       if (!db.objectStoreNames.contains(CACHE)) db.createObjectStore(CACHE, { keyPath: "key" });
       if (!db.objectStoreNames.contains(QUEUE)) db.createObjectStore(QUEUE, { keyPath: "id" });
+      if (!db.objectStoreNames.contains(ATTACHMENTS)) db.createObjectStore(ATTACHMENTS, { keyPath: "id" });
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
@@ -103,9 +106,32 @@ export async function clearOfflineData(): Promise<void> {
     await Promise.all([
       transaction(CACHE, "readwrite", (store) => store.clear()),
       transaction(QUEUE, "readwrite", (store) => store.clear()),
+      transaction(ATTACHMENTS, "readwrite", (store) => store.clear()),
     ]).catch(() => {});
   }
   localStorage.removeItem(OWNER);
+}
+
+/* ---- draft attachments: too big for localStorage, durable in IndexedDB ----
+   Attachments must survive parking a draft (the README promises resilient
+   local drafts), so they persist here keyed by draft id. Owner-checked on
+   load so a different account never inherits another's files. */
+
+export async function saveDraftAttachments(id: string, files: unknown[]): Promise<void> {
+  const owner = offlineOwner(); if (!owner || typeof indexedDB === "undefined") return;
+  await transaction(ATTACHMENTS, "readwrite", (store) => store.put({ id, owner, files } as DraftAttachmentRow));
+}
+
+export async function loadDraftAttachments<T>(id: string): Promise<T[] | undefined> {
+  if (typeof indexedDB === "undefined") return undefined;
+  const row = await transaction<DraftAttachmentRow | undefined>(ATTACHMENTS, "readonly", (store) => store.get(id));
+  if (!row || row.owner !== offlineOwner()) return undefined;
+  return row.files as T[];
+}
+
+export async function clearDraftAttachments(id: string): Promise<void> {
+  if (typeof indexedDB === "undefined") return;
+  await transaction(ATTACHMENTS, "readwrite", (store) => store.delete(id));
 }
 
 export function startOfflineData(): () => void {
