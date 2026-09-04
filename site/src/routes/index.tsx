@@ -37,9 +37,9 @@ export function head() {
 
 function BrandMark() {
   return (
-    <svg class="brand-mark" viewBox="0 0 64 64" width="26" height="26" aria-hidden="true">
+    <svg class="brand-mark" viewBox="9 17 46 32" width="31" height="21" aria-hidden="true">
       <rect x="12" y="20" width="40" height="26" rx="3.5" fill="none" stroke="currentColor" stroke-width="4"/>
-      <path class="brand-flap" d="m14 23 18 13 18-13" fill="none" stroke-linejoin="round" stroke-linecap="round" stroke-width="4.5"/>
+      <path d="m14 23 18 13 18-13" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-linecap="round" stroke-width="4.5"/>
     </svg>
   );
 }

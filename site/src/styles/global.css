@@ -28,7 +28,6 @@ button, a { font: inherit; }
 .site-head.on-paper { color: var(--ink); background: rgba(241,237,229,.88); border-bottom: 1px solid var(--line); backdrop-filter: blur(16px) saturate(1.1); }
 .brand { width: max-content; display: inline-flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 720; letter-spacing: -.025em; text-decoration: none; }
 .brand-mark { display: block; flex: none; }
-.brand-mark .brand-flap { stroke: var(--accent); }
 .site-head nav { display: flex; gap: 30px; font-size: 13px; font-weight: 630; }
 .site-head nav a { position: relative; padding: 6px 0; text-decoration: none; color: rgba(251,250,247,.72); transition: color .25s ease; }
 .site-head nav a::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1px; background: currentColor; transform: scaleX(0); transform-origin: left; transition: transform .3s ease; }
