@@ -281,3 +281,60 @@ func TestDecodeEmailsBuildsCanonicalEnvelopes(t *testing.T) {
 		t.Errorf("From = %+v", e.From)
 	}
 }
+
+func TestEscapeTemplateValueIsSafeInPathAndQuery(t *testing.T) {
+	// The template decides where a value lands, so it has to be safe in both
+	// positions. url.PathEscape is not: it leaves '&', '=' and '+' intact,
+	// and an attachment filename comes from whoever sent the mail.
+	for _, tc := range []struct{ in, want string }{
+		{"raw/id", "raw%2Fid"},
+		{"a&x=y.txt", "a%26x%3Dy.txt"},
+		{"q a+b.txt", "q%20a%2Bb.txt"},
+		{"plain-name_1.txt", "plain-name_1.txt"},
+	} {
+		if got := escapeTemplateValue(tc.in); got != tc.want {
+			t.Errorf("escapeTemplateValue(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestDownloadMapsStatusesToSharedErrors(t *testing.T) {
+	// Downloads are a second HTTP surface from the API. Its failures have to
+	// reach the engine as the same errors, or the recovery and backoff paths
+	// are skipped for arriving on the wrong socket.
+	for _, tc := range []struct {
+		name   string
+		status int
+		want   error
+	}{
+		{"unauthorized", http.StatusUnauthorized, mail.ErrReauthRequired},
+		{"forbidden", http.StatusForbidden, mail.ErrReauthRequired},
+		{"throttled", http.StatusTooManyRequests, mail.ErrRateLimited},
+		{"missing blob", http.StatusNotFound, mail.ErrNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := adapterFor(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					w.WriteHeader(tc.status)
+					return
+				}
+				_, _ = w.Write([]byte(`{"methodResponses":[["Email/get",{"list":[{"blobId":"b"}]},"0"]]}`))
+			})
+			_, err := a.Raw(context.Background(), mail.NativeMessageID(mail.ProviderJMAP, "m1"))
+			if !isErr(err, tc.want) {
+				t.Errorf("err = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestAttachmentUnknownPartIsNotFound(t *testing.T) {
+	a := adapterFor(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"methodResponses":[["Email/get",{"list":[{"attachments":[]}]},"0"]]}`))
+	})
+
+	_, err := a.Attachment(context.Background(), mail.NativeMessageID(mail.ProviderJMAP, "m1"), "nope")
+	if !isErr(err, mail.ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
