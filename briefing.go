@@ -284,9 +284,19 @@ func (a *App) handleMailboxList(w http.ResponseWriter, r *http.Request) {
 	out := []mbx{}
 	for rows.Next() {
 		var m mbx
-		if rows.Scan(&m.Name, &m.Role) == nil && m.Name != "" {
+		// Dropping a row here removes a folder from the rail with no sign it
+		// was ever there — the one failure a folder list must not have.
+		if err := rows.Scan(&m.Name, &m.Role); err != nil {
+			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
+			return
+		}
+		if m.Name != "" {
 			out = append(out, m)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
 	}
 	writeJSON(w, out)
 }
@@ -325,15 +335,24 @@ func (a *App) threadList(w http.ResponseWriter, r *http.Request, uid string, lim
 		var row rowOut
 		var fromJSON string
 		var received *time.Time
+		// Skipping a bad row here hides mail: the list still renders, just
+		// without the message. That is how the People roster returned an
+		// empty list for months on a type error nobody could see. Fail loudly
+		// instead — a 500 gets fixed, a missing message does not get noticed.
 		if err := rows.Scan(&row.Account, &row.ThreadID, &row.MessageID, &row.Subject, &fromJSON,
 			&received, &row.Read, &row.Preview, &row.Bucket); err != nil {
-			continue
+			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
+			return
 		}
 		row.From = firstSenderName(fromJSON)
 		if received != nil {
 			row.ReceivedAt = received.Format(time.RFC3339)
 		}
 		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
 	}
 	writeJSON(w, out)
 }
@@ -376,8 +395,12 @@ func (a *App) handlePeople(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var p person
 		var lastAt, lastSub *string
+		// This continue is what hid the timestamp type error: every row failed
+		// to scan, every row was skipped, and the roster answered "no people"
+		// with a 200. Surface it.
 		if err := rows.Scan(&p.Sender, &p.Route, &p.Allowed, &p.Total, &lastAt, &lastSub); err != nil {
-			continue
+			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
+			return
 		}
 		p.LastAt = lastAt
 		p.Subject = lastSub

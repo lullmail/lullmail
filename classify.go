@@ -55,7 +55,12 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		defer cr.Close()
 		for cr.Next() {
 			var addr sql.NullString
-			if cr.Scan(&addr) == nil && addr.Valid && addr.String != "" {
+			// A missed row here screens someone the owner already corresponds
+			// with — the exact mail the Screener is meant to let through.
+			if err := cr.Scan(&addr); err != nil {
+				return err
+			}
+			if addr.Valid && addr.String != "" {
 				correspondents[addr.String] = true
 			}
 		}

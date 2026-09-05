@@ -33,9 +33,18 @@ func (a *App) handleNotes(w http.ResponseWriter, r *http.Request) {
 	out := []stickyNote{}
 	for rows.Next() {
 		var n stickyNote
-		if rows.Scan(&n.ID, &n.X, &n.Y, &n.Text, &n.Color) == nil {
-			out = append(out, n)
+		// A dropped row here is a note that silently vanishes from the wall.
+		// Failing the request is the honest answer: the board is wrong either
+		// way, and only one of the two says so.
+		if err := rows.Scan(&n.ID, &n.X, &n.Y, &n.Text, &n.Color); err != nil {
+			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
+			return
 		}
+		out = append(out, n)
+	}
+	if err := rows.Err(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
 	}
 	writeJSON(w, out)
 }

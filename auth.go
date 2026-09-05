@@ -1171,9 +1171,20 @@ func (a *App) handleFullAccountDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	for rows.Next() {
 		var id string
-		if rows.Scan(&id) == nil {
-			mirrors = append(mirrors, mail.AccountID(id))
+		// A skipped row here is a mailbox that survives "delete everything".
+		// Refusing is the only safe answer: a failed delete can be retried, a
+		// silently partial one leaves mail on disk the owner believes is gone.
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			writeProblem(w, 500, "Delete Failed", err.Error())
+			return
 		}
+		mirrors = append(mirrors, mail.AccountID(id))
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		writeProblem(w, 500, "Delete Failed", err.Error())
+		return
 	}
 	rows.Close()
 	for _, mirror := range mirrors {
