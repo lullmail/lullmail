@@ -160,6 +160,9 @@ export const layout = signal<Layout>("document");
 
 export function resolveLayout() {
   layout.value = initialLayout();
+  try {
+    document.documentElement.setAttribute("data-layout", layout.value);
+  } catch { /* no document during prerender */ }
   accountFilter.value = initialAccountFilter();
   restoreDrafts();
   accent.value = initialAccent();
@@ -187,11 +190,10 @@ export function resolveLayout() {
 
 export function setLayout(next: Layout) {
   layout.value = next;
-  try {
-    localStorage.setItem("es-layout", next);
-  } catch {
-    /* private mode: the choice just won't survive a reload */
-  }
+  // The attribute is what the pre-paint script sets and what the loading
+  // shell's CSS reads, so it has to track the live choice — a stale one would
+  // frame the document layout as if it were classic.
+  setAttr("data-layout", next);
 }
 
 export function toggleLayout() {

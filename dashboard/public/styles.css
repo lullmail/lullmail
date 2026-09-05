@@ -1209,7 +1209,13 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 .settings-section h2 { margin: 0; font-family: var(--serif); font-size: var(--t-subject); letter-spacing: -0.01em; }
 .settings-section p { margin: 5px 0 0; color: var(--ink-2); max-width: 620px; }
 .settings-section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-5); margin-bottom: var(--sp-3); }
-.settings-section-head .btn { flex: none; }
+/* Whatever sits opposite the description keeps its width — a button or a
+   control. Without this a select is squeezed by a long paragraph beside it. */
+.settings-section-head .btn,
+.settings-section-head .retention-control { flex: none; }
+/* A section whose head is all there is has nothing to separate from, so the
+   head's bottom margin would only pad the section unevenly. */
+.settings-section-head:only-child { margin-bottom: 0; }
 .security-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); min-height: 58px; border-top: 1px solid var(--line); }
 .security-row > div { min-width: 0; display: flex; flex-direction: column; }
 .security-row strong { font-size: var(--t-base); }
@@ -1227,7 +1233,8 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
   .gate-wrap { padding: var(--sp-3); align-items: flex-start; }
   .gate { margin-top: 7vh; padding: 28px 20px; border-radius: 20px; }
   .settings-section-head { flex-direction: column; }
-  .settings-section-head .btn { align-self: flex-start; }
+  .settings-section-head .btn,
+  .settings-section-head .retention-control { align-self: flex-start; }
   .security-row { align-items: flex-start; padding: var(--sp-3) 0; }
   .inline-form { align-items: stretch; flex-direction: column; }
   .recovery-grid { grid-template-columns: 1fr; }
@@ -1346,6 +1353,27 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
   height: 100vh;
   overflow: hidden;
 }
+/* The loading shell, before the island has mounted and can render the real
+   three-column frame. data-layout is set pre-paint, so the prerendered
+   skeleton can already hold the classic geometry — an empty rail and a
+   bounded list column — instead of painting one full-width column that
+   snaps into three the moment JavaScript arrives. Gated on the same 1080px
+   the layout itself uses, so a narrow window is untouched. */
+@media (min-width: 1080px) {
+  :root[data-layout="classic"] .page:not(.classic) {
+    display: grid;
+    grid-template-rows: 54px auto minmax(0, 1fr);
+    grid-template-columns: 196px minmax(320px, var(--list-w, 42vw)) 7px minmax(0, 1fr);
+    height: 100vh;
+    overflow: hidden;
+  }
+  :root[data-layout="classic"] .page:not(.classic) > .topline { grid-column: 1 / -1; grid-row: 1; position: static; }
+  :root[data-layout="classic"] .page:not(.classic) > .column {
+    grid-row: 3; grid-column: 2; min-width: 0;
+    overflow-y: auto; border-right: 1px solid var(--line);
+  }
+}
+
 .page.classic .topline { grid-column: 1 / -1; grid-row: 1; position: static; }
 .page.classic .nudge { grid-column: 1 / -1; grid-row: 2; }
 /* Nav lives in the sidebar here, so the flanks stop competing for the centre. */

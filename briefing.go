@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -216,7 +217,7 @@ func (a *App) handleRecent(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
 		return
 	}
-	a.threadList(w, r, uid, `
+	a.threadList(w, r, uid, 40, `
 		SELECT DISTINCT ON (m.account_id, m.thread_id)
 		       m.account_id, m.thread_id, m.id, m.subject, m.from_addrs, m.received_at,
 		       COALESCE(h.read_at IS NOT NULL, false), m.preview, COALESCE(h.bucket,'')
@@ -225,8 +226,7 @@ func (a *App) handleRecent(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
 		WHERE true`+
 		accountClause(r)+`
-		ORDER BY m.account_id, m.thread_id, m.received_at DESC NULLS LAST
-		LIMIT 40`, uid)
+		ORDER BY m.account_id, m.thread_id, m.received_at DESC NULLS LAST`, uid)
 }
 
 // handleFolder: messages in a provider mailbox by name (Sent, Trash, ...)
@@ -242,7 +242,7 @@ func (a *App) handleFolder(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusUnprocessableEntity, "Missing Name", "name is required")
 		return
 	}
-	a.threadList(w, r, uid, `
+	a.threadList(w, r, uid, 100, `
 		SELECT DISTINCT ON (m.account_id, m.thread_id)
 		       m.account_id, m.thread_id, m.id, m.subject, m.from_addrs, m.received_at,
 		       COALESCE(h.read_at IS NOT NULL, false), m.preview, COALESCE(h.bucket,'')
@@ -253,8 +253,7 @@ func (a *App) handleFolder(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
 		WHERE lower(mb.name) = lower($2)`+
 		accountClause(r)+`
-		ORDER BY m.account_id, m.thread_id, m.received_at DESC NULLS LAST
-		LIMIT 100`, uid, name)
+		ORDER BY m.account_id, m.thread_id, m.received_at DESC NULLS LAST`, uid, name)
 }
 
 // handleMailboxList: distinct provider mailbox names — the real folders the
@@ -293,10 +292,17 @@ func (a *App) handleMailboxList(w http.ResponseWriter, r *http.Request) {
 }
 
 // threadList runs a latest-per-thread query and writes the shared row shape.
-func (a *App) threadList(w http.ResponseWriter, r *http.Request, uid, query string, args ...any) {
+//
+// The limit belongs to this wrapper, never to the inner query. DISTINCT ON can
+// only be ordered by its own key, so a LIMIT inside it takes an arbitrary slice
+// by thread id and the newest mail never survives to be sorted — the list then
+// looks like it is out of order when it is really missing rows. Cutting after
+// the date sort is what makes "latest first" true.
+func (a *App) threadList(w http.ResponseWriter, r *http.Request, uid string, limit int, query string, args ...any) {
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT * FROM (`+query+`) t
-		ORDER BY t.received_at DESC NULLS LAST`, args...)
+		ORDER BY t.received_at DESC NULLS LAST
+		LIMIT `+strconv.Itoa(limit), args...)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return

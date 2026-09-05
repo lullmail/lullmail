@@ -21,7 +21,9 @@ export function head() {
       { rel: "apple-touch-icon", href: "/icon-180.png" },
     ],
     // Resolve the theme before the first paint: stored choice wins, else the
-    // system preference. Anything later than this flashes.
+    // system preference. Anything later than this flashes. The layout choice
+    // rides along for the same reason — the loading shell has to be the right
+    // shape, or a classic user watches one column become three on every load.
     headScripts: [
       {
         id: "theme-init",
@@ -36,6 +38,7 @@ export function head() {
           "var y=localStorage.getItem('es-type');" +
           "if(y==='clean'){d.setAttribute('data-type','sans');}" +
           "['textsize','density','measure'].forEach(function(k){var v=localStorage.getItem('es-'+k);if(v){d.setAttribute('data-'+k,v);}});" +
+          "d.setAttribute('data-layout',localStorage.getItem('es-layout')==='classic'?'classic':'document');" +
           "var cx=localStorage.getItem('es-accent-custom');" +
           "if(a==='custom'&&/^#[0-9a-fA-F]{6}$/.test(cx||'')){" +
           "var n=parseInt(cx.slice(1),16),r=(n>>16)&255,g=(n>>8)&255,b=n&255;" +
