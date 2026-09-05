@@ -81,6 +81,10 @@ func (a *App) listAccountsJSON(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, acc)
 	}
+	if err := rows.Err(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
 	writeJSON(w, out)
 }
 
@@ -374,6 +378,9 @@ func (a *App) applyRetention(ctx context.Context, uid string) error {
 			return err
 		}
 		policies = append(policies, p)
+	}
+	if err := rows.Err(); err != nil {
+		return err
 	}
 	rows.Close()
 	for _, p := range policies {

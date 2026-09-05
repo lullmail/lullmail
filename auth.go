@@ -948,6 +948,10 @@ func (a *App) handleSecurity(w http.ResponseWriter, r *http.Request) {
 		}
 		passkeys = append(passkeys, map[string]any{"id": id, "name": name, "created_at": created, "last_used_at": last})
 	}
+	if err := rows.Err(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
 	var totp bool
 	_ = a.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM auth_totp WHERE user_id=$1 AND enabled_at IS NOT NULL)`, uid).Scan(&totp)
 	var recovery int
@@ -1123,6 +1127,10 @@ func (a *App) handleSessions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		out = append(out, map[string]any{"id": id, "created_at": created, "last_seen_at": seen, "expires_at": expires, "user_agent": ua, "current": id == current})
+	}
+	if err := rows.Err(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
 	}
 	writeJSON(w, out)
 }

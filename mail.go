@@ -260,6 +260,10 @@ func (a *App) ownedMirror(next http.Handler) http.Handler {
 					"id": id, "provider": provider, "email": email, "name": name, "needs_reauth": reauth,
 				})
 			}
+			if err := rows.Err(); err != nil {
+				writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+				return
+			}
 			writeJSON(w, map[string]any{"accounts": accounts})
 			return
 		}

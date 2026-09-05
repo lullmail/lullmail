@@ -161,6 +161,10 @@ func (a *App) handleAgentTokens(w http.ResponseWriter, r *http.Request) {
 			}
 			tokens = append(tokens, entry)
 		}
+		if err := rows.Err(); err != nil {
+			writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+			return
+		}
 		writeJSON(w, tokens)
 	case http.MethodPost:
 		var req struct {

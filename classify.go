@@ -118,6 +118,9 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 			historical: received.Valid && connected.Valid && received.Time.Before(connected.Time),
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	if len(batch) == 0 {
 		return nil
 	}
@@ -363,6 +366,10 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, row)
 	}
+	if err := rows.Err(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
 	writeJSON(w, out)
 }
 
@@ -411,6 +418,10 @@ func (a *App) handleScreener(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
 	}
 	writeJSON(w, out)
 }
@@ -661,6 +672,10 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, row)
 	}
+	if err := rows.Err(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
 	writeJSON(w, out)
 }
 
@@ -752,6 +767,10 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 			refs = append(refs, ref{len(out), row.ID, row.Account})
 		}
 		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
 	}
 	if len(out) == 0 {
 		writeProblem(w, http.StatusNotFound, "Not Found", "no such thread")

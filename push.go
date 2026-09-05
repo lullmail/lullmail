@@ -99,6 +99,12 @@ func (a *App) sendPushForUser(ctx context.Context, uid string) {
 			subs = append(subs, saved{endpointHash(sub.Endpoint), sub})
 		}
 	}
+	// Nothing here can fail the request — this runs after the response. A
+	// truncated list means some devices silently miss the notification, so
+	// say so in the log rather than letting it look like nobody subscribed.
+	if err := rows.Err(); err != nil {
+		a.log.Error("push: subscription list truncated", "err", err, "user", uid)
+	}
 	rows.Close()
 	if len(subs) == 0 {
 		return

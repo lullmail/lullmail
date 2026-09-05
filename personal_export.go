@@ -43,6 +43,10 @@ func (a *App) handlePersonalExport(w http.ResponseWriter, r *http.Request) {
 		}
 		notes = append(notes, n)
 	}
+	if err := rows.Err(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
 	rows.Close()
 
 	type cardExport struct {
@@ -67,6 +71,10 @@ func (a *App) handlePersonalExport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cards = append(cards, c)
+	}
+	if err := rows.Err(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
 	}
 	rows.Close()
 

@@ -258,6 +258,9 @@ func (a *App) exportPlan(ctx context.Context, account nmail.AccountID) ([]export
 		}
 		boxes = append(boxes, box)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
 	if err := rows.Close(); err != nil {
 		return nil, nil, err
 	}
@@ -293,6 +296,9 @@ func (a *App) exportPlan(ctx context.Context, account nmail.AccountID) ([]export
 				continue
 			}
 			plan.messages = append(plan.messages, exportMessage{id: id, envelope: envelope})
+		}
+		if err := ids.Err(); err != nil {
+			return nil, nil, err
 		}
 		if err := ids.Close(); err != nil {
 			return nil, nil, err

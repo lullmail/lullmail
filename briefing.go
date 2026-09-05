@@ -406,6 +406,10 @@ func (a *App) handlePeople(w http.ResponseWriter, r *http.Request) {
 		p.Subject = lastSub
 		out = append(out, p)
 	}
+	if err := rows.Err(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
 	writeJSON(w, out)
 }
 
