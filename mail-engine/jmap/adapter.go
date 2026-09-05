@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -622,6 +621,27 @@ func (a *Adapter) Attachment(ctx context.Context, id mail.MessageID, partID stri
 	return nil, fmt.Errorf("jmap: %w: attachment %s", mail.ErrNotFound, partID)
 }
 
+// escapeTemplateValue percent-encodes everything outside RFC 3986's unreserved
+// set.
+//
+// The template alone decides whether a placeholder lands in the path or the
+// query, so a value has to be safe in both. url.PathEscape is not: it leaves
+// '&', '=' and '+' intact, and an attachment filename is chosen by whoever
+// sent the mail — "a&x=y.txt" dropped into a query position would append a
+// parameter to someone else's URL.
+func escapeTemplateValue(s string) string {
+	const unreserved = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; strings.IndexByte(unreserved, c) >= 0 {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "%%%02X", s[i])
+		}
+	}
+	return b.String()
+}
+
 // download expands the level-1 URI template advertised by the JMAP session
 // and returns the authenticated immutable blob stream.
 func (a *Adapter) download(ctx context.Context, blobID, name, mediaType string) (io.ReadCloser, error) {
@@ -636,7 +656,7 @@ func (a *Adapter) download(ctx context.Context, blobID, name, mediaType string) 
 	}
 	endpoint := a.downloadURL
 	for key, value := range values {
-		endpoint = strings.ReplaceAll(endpoint, "{"+key+"}", url.PathEscape(value))
+		endpoint = strings.ReplaceAll(endpoint, "{"+key+"}", escapeTemplateValue(value))
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
