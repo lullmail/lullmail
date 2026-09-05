@@ -319,6 +319,8 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 
 	api.HandleFunc("GET /screener", a.handleScreener)
 	api.HandleFunc("GET /counts", a.handleCounts)
+	api.HandleFunc("GET /prefs", a.handlePrefs)
+	api.HandleFunc("POST /prefs", a.handlePrefs)
 	api.HandleFunc("GET /search", a.handleSearch)
 	api.HandleFunc("GET /briefing", a.handleBriefing)
 	api.HandleFunc("GET /board", a.handleBoard)

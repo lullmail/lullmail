@@ -3,7 +3,7 @@ import {
   accent, accentCustom, density, measure, resetSelection, setAccent, setAccentCustom, setDensity, setList, setMeasure,
   layout, setTextSize, setTheme, theme, textSize, toggleLayout, typeFlavor, setTypeFlavor, type Accent, type Theme,
 } from "../lib/store";
-import { PageHead } from "../ui/bits";
+import { PageHead, SettingsTabs } from "../ui/bits";
 
 // Appearance is applied the moment it is picked — no save button, no "Apply".
 // The whole product reads CSS variables, so a choice here re-skins everything
@@ -96,12 +96,7 @@ export function AppearanceView() {
   return (
     <>
       <PageHead kicker="Settings" title="Appearance" sub="Applied the moment you pick. Your mail, your colors." />
-      <div class="settings-tabs">
-        <a href="/settings">Settings</a>
-        <a href="/settings/accounts">Mailboxes</a>
-        <a href="/settings/appearance" class="active">Appearance</a>
-        <a href="/settings/security">Security</a>
-      </div>
+      <SettingsTabs here="/settings/appearance" />
 
       <section class="settings-section">
         <div class="settings-section-head">

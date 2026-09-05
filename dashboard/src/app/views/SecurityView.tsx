@@ -3,7 +3,7 @@ import { api, authApi, authed, refreshAuth } from "../lib/api";
 import { createPasskey } from "../lib/passkeys";
 import { fmtDate } from "../lib/fmt";
 import { resetSelection, setList, showToast } from "../lib/store";
-import { Empty, ListSkeleton, LoadError, PageHead } from "../ui/bits";
+import { Empty, ListSkeleton, LoadError, PageHead, SettingsTabs } from "../ui/bits";
 import { navigate } from "../lib/router";
 import { clearOfflineData } from "../lib/offline";
 
@@ -146,7 +146,7 @@ export function SecurityView() {
   return (
     <>
       <PageHead kicker="Settings" title="Security" sub={security.email + " · passkeys are primary; recovery stays in your hands."} />
-      <div class="settings-tabs"><a href="/settings">Settings</a><a href="/settings/accounts">Mailboxes</a><a href="/settings/appearance">Appearance</a><a class="active" href="/settings/security">Security</a></div>
+      <SettingsTabs here="/settings/security" />
       {loadError && <LoadError title="Some security details may be stale." error={loadError} retry={load} />}
       {mutationError && <div class="settings-callout" role="alert">{mutationError} <button class="btn btn-ghost btn-sm" type="button" onClick={() => setMutationError(null)}>Dismiss</button></div>}
 

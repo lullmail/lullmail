@@ -8,7 +8,7 @@ import { signal } from "@preact/signals";
 import type { ListBucket } from "./types";
 import { query } from "./store";
 
-export type PageKind = "today" | "board" | "notes" | "calendar" | "bucket" | "screener" | "people" | "accounts" | "security" | "appearance" | "settings-home" | "search";
+export type PageKind = "today" | "board" | "notes" | "calendar" | "bucket" | "screener" | "people" | "accounts" | "security" | "appearance" | "settings-mail" | "settings-home" | "search" | "folder";
 
 export interface Route {
   kind: PageKind;
@@ -16,6 +16,8 @@ export interface Route {
   /** Sidebar highlight key, matching the bucket names the API already uses. */
   nav: string;
   title: string;
+  /** Provider mailbox name, for the /folder/<name> routes only. */
+  folder?: string;
 }
 
 const ROUTES: Record<string, Route> = {
@@ -34,7 +36,21 @@ const ROUTES: Record<string, Route> = {
   "/settings/security": { kind: "security", nav: "security", title: "Security" },
   "/settings": { kind: "settings-home", nav: "settings", title: "Settings" },
   "/settings/appearance": { kind: "appearance", nav: "appearance", title: "Appearance" },
+  "/settings/mail": { kind: "settings-mail", nav: "settings-mail", title: "Mail" },
 };
+
+// Real server folders are one route shape rather than a table entry: the set
+// is whatever the provider reports, so it cannot be known at build time.
+const FOLDER_PREFIX = "/folder/";
+
+/** "sent" -> "Sent", "[gmail]/all mail" -> "[Gmail]/All Mail". */
+export function folderLabel(name: string): string {
+  return name.replace(/[\p{L}\p{N}]+/gu, (w) => w[0].toUpperCase() + w.slice(1));
+}
+
+export function folderPath(name: string): string {
+  return FOLDER_PREFIX + encodeURIComponent(name);
+}
 
 function normalise(p: string): string {
   if (p.length > 1 && p.endsWith("/")) p = p.slice(0, -1);
@@ -42,7 +58,19 @@ function normalise(p: string): string {
 }
 
 export function routeFor(pathname: string): Route {
-  return ROUTES[normalise(pathname)] || ROUTES["/"];
+  const p = normalise(pathname);
+  if (p.startsWith(FOLDER_PREFIX)) {
+    let folder = "";
+    try {
+      folder = decodeURIComponent(p.slice(FOLDER_PREFIX.length));
+    } catch {
+      folder = p.slice(FOLDER_PREFIX.length); // a hand-mangled URL is not a crash
+    }
+    if (folder) {
+      return { kind: "folder", nav: "folder:" + folder.toLowerCase(), title: folderLabel(folder), folder };
+    }
+  }
+  return ROUTES[p] || ROUTES["/"];
 }
 
 // Empty means "not resolved yet". Preact's hydration pass deliberately does not
@@ -76,7 +104,9 @@ export function startRouter() {
     const href = a.getAttribute("href");
     if (!href || !href.startsWith("/")) return;
     if (a.hasAttribute("download") || a.getAttribute("target") === "_blank") return;
-    if (!ROUTES[normalise(href)]) return; // attachments and other real files
+    // Attachments and other real files still navigate the browser; folder
+    // routes are client routes even though they are not in the table.
+    if (!ROUTES[normalise(href)] && !normalise(href).startsWith(FOLDER_PREFIX)) return;
     ev.preventDefault();
     navigate(href);
   });

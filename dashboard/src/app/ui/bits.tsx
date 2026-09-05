@@ -26,6 +26,26 @@ export function PageHead({ kicker, title, sub }: { kicker?: string; title: strin
   );
 }
 
+// The settings tab strip. One list, so a new page appears on every settings
+// screen at once instead of in whichever four files were remembered.
+const SETTINGS_PAGES: [string, string][] = [
+  ["/settings", "Settings"],
+  ["/settings/accounts", "Mailboxes"],
+  ["/settings/mail", "Mail"],
+  ["/settings/appearance", "Appearance"],
+  ["/settings/security", "Security"],
+];
+
+export function SettingsTabs({ here }: { here: string }) {
+  return (
+    <div class="settings-tabs">
+      {SETTINGS_PAGES.map(([href, label]) => (
+        <a key={href} class={href === here ? "active" : undefined} href={href}>{label}</a>
+      ))}
+    </div>
+  );
+}
+
 export function SectionHead({ title, count }: { title: string; count?: number }) {
   return (
     <div class="section-head">

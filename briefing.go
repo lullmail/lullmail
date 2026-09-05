@@ -87,8 +87,8 @@ func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, 
 	{
 		r2, err := a.db.QueryContext(ctx, `
 			SELECT m.account_id, m.thread_id,
-			       bool_or(lower(m.from_addrs::json->0->>'email') = ANY ($2)),
-			       bool_or(lower(m.from_addrs::json->0->>'email') <> ALL ($2))
+			       COALESCE(bool_or(lower(m.from_addrs::json->0->>'email') = ANY ($2)), false),
+			       COALESCE(bool_or(lower(m.from_addrs::json->0->>'email') <> ALL ($2)), false)
 			FROM mail_messages m
 			JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 			GROUP BY m.account_id, m.thread_id`, uid, addrList(myAddr))
@@ -257,8 +257,9 @@ func (a *App) handleFolder(w http.ResponseWriter, r *http.Request) {
 		LIMIT 100`, uid, name)
 }
 
-// handleMailboxList: distinct provider mailbox names for the palette's
-// Lists section. INBOX is skipped — buckets already cover it.
+// handleMailboxList: distinct provider mailbox names — the real folders the
+// account reports. INBOX is included: the sidebar lists folders as the server
+// has them, and the palette filters it out for its own Lists section.
 func (a *App) handleMailboxList(w http.ResponseWriter, r *http.Request) {
 	uid, err := a.userID(r.Context())
 	if err != nil {
@@ -284,7 +285,7 @@ func (a *App) handleMailboxList(w http.ResponseWriter, r *http.Request) {
 	out := []mbx{}
 	for rows.Next() {
 		var m mbx
-		if rows.Scan(&m.Name, &m.Role) == nil && m.Name != "inbox" {
+		if rows.Scan(&m.Name, &m.Role) == nil && m.Name != "" {
 			out = append(out, m)
 		}
 	}
@@ -341,7 +342,7 @@ func (a *App) handlePeople(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT s.sender_key, s.route, s.allowed,
 		       count(h.message_id) AS total,
-		       max(m.received_at) AS last_at,
+		       max(m.received_at)::text AS last_at,
 		       max(m.subject) AS last_subject
 		FROM hey_senders s
 		LEFT JOIN mail_messages m ON lower(m.from_addrs::json->0->>'email') = s.sender_key
@@ -350,7 +351,7 @@ func (a *App) handlePeople(w http.ResponseWriter, r *http.Request) {
 		WHERE s.user_id = $1`+
 		accountClause(r)+`
 		GROUP BY s.sender_key, s.route, s.allowed
-		ORDER BY last_at DESC NULLS LAST`, uid)
+		ORDER BY max(m.received_at) DESC NULLS LAST`, uid)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return

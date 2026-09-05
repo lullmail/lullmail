@@ -99,7 +99,8 @@ export function Palette() {
       });
     }
 
-    const folders = mailboxes.filter((m) => !needle || m.name.includes(needle));
+    // Inbox has its own nav entry; the palette lists the other folders.
+    const folders = mailboxes.filter((m) => m.name !== "inbox" && (!needle || m.name.includes(needle)));
     if (folders.length) {
       out.push({
         title: "Provider folders",

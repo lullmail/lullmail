@@ -7,7 +7,7 @@
 import { api, ApiError, clearMemoryCache } from "./api";
 import type { BoardCard, Bucket, Counts, ListBucket, Message, Row, StickyNote } from "./types";
 import {
-  accountCount, accountFilter, accountQS, accounts, closeReader, counts, list, openCompose, reader, rememberListScroll, resetSelection, setAccountFilter, showError, showToast,
+  accountCount, accountFilter, accountQS, accounts, closeReader, counts, list, type Mailbox, mailboxes, openCompose, reader, rememberListScroll, resetSelection, screeningEnabled, setAccountFilter, showError, showToast,
 } from "./store";
 
 /** The one place bucket names are written. Storage values are unchanged. */
@@ -32,6 +32,24 @@ export function setReloader(fn: () => void) {
 export function reload() {
   clearMemoryCache();
   reloader();
+}
+
+/** The Screener switch and the server's folder list — both drive the sidebar. */
+export async function refreshPrefs() {
+  try {
+    const p = await api<{ screening_enabled: boolean }>("/prefs", { fresh: true });
+    screeningEnabled.value = p.screening_enabled;
+  } catch {
+    /* the nav falls back to showing the Screener, which is the safe default */
+  }
+}
+
+export async function refreshFolders() {
+  try {
+    mailboxes.value = await api<Mailbox[]>(accountQS("/mailboxes"), { fresh: true });
+  } catch {
+    /* a folder list that will not load leaves the rail on buckets alone */
+  }
 }
 
 export async function refreshCounts() {

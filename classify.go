@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,6 +24,10 @@ import (
 // only mail arriving after connection screens. Senders the owner has already
 // emailed skip the Screener entirely; replying to someone is a decision.
 func (a *App) classifyUser(ctx context.Context, uid string) error {
+	screening, err := a.screeningEnabled(ctx, uid)
+	if err != nil {
+		return err
+	}
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT m.account_id, m.id, COALESCE(m.from_addrs, ''), m.received_at, ea.created_at
 		FROM mail_messages m
@@ -123,7 +128,7 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		decided := tx.QueryRowContext(ctx,
 			`SELECT route, allowed FROM hey_senders WHERE user_id = $1 AND sender_key = $2`,
 			uid, p.sender).Scan(&route, &allowed)
-		bucket := classifySender(decided == nil, allowed, route, correspondents[p.sender], p.historical)
+		bucket := classifySender(decided == nil, allowed, route, correspondents[p.sender], p.historical, screening)
 		// Broken envelopes (no parsable From) can never be decided or shown;
 		// they file to Receipts instead of inflating the Screener forever.
 		if p.sender == "" {
@@ -160,6 +165,16 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		       OR lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = '')`, uid); err != nil {
 		return err
 	}
+	// Screening off drains the waiting room: anything already parked moves to
+	// the Imbox. Undecided senders only — a blocked sender's mail is in
+	// 'dropped', not 'screener', so nothing the owner rejected comes back.
+	if !screening {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE hey_messages SET bucket = 'imbox'
+			WHERE user_id = $1 AND bucket = 'screener'`, uid); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
@@ -168,7 +183,12 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 // is a decision); then the history rule — mail that predates the mailbox's
 // connection is reference, not a decision queue, so it files to Receipts.
 // Only mail arriving after connection screens.
-func classifySender(decided, allowed bool, route string, correspondent, historical bool) string {
+//
+// With screening off, the one thing that changes is the last step: an unknown
+// sender's new mail lands in the Imbox instead of waiting in the Screener.
+// Decisions already made are still honoured, so blocking a sender keeps
+// working and turning screening back on loses nothing.
+func classifySender(decided, allowed bool, route string, correspondent, historical, screening bool) string {
 	switch {
 	case decided:
 		if allowed {
@@ -181,6 +201,8 @@ func classifySender(decided, allowed bool, route string, correspondent, historic
 		return "imbox"
 	case historical:
 		return "paper_trail"
+	case !screening:
+		return "imbox"
 	default:
 		return "screener"
 	}
@@ -990,4 +1012,68 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// screeningEnabled reads the owner's Screener preference. A missing row is
+// treated as screening on: the column defaults to true, and failing open to
+// the stricter behaviour is the safer default for a gate.
+func (a *App) screeningEnabled(ctx context.Context, uid string) (bool, error) {
+	var on bool
+	err := a.db.QueryRowContext(ctx,
+		`SELECT screening_enabled FROM users WHERE id = $1`, uid).Scan(&on)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	return on, err
+}
+
+// handlePrefs reads and writes the owner's product preferences. Only the
+// Screener switch lives here today; appearance stays client-side.
+func (a *App) handlePrefs(w http.ResponseWriter, r *http.Request) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	if r.Method == http.MethodGet {
+		on, err := a.screeningEnabled(r.Context(), uid)
+		if err != nil {
+			writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"screening_enabled": on})
+		return
+	}
+
+	var req struct {
+		ScreeningEnabled *bool `json:"screening_enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
+		return
+	}
+	if req.ScreeningEnabled == nil {
+		writeProblem(w, http.StatusUnprocessableEntity, "Missing Field", "screening_enabled is required")
+		return
+	}
+	if _, err := a.db.ExecContext(r.Context(),
+		`UPDATE users SET screening_enabled = $2 WHERE id = $1`, uid, *req.ScreeningEnabled); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Update Failed", err.Error())
+		return
+	}
+	// Switching off empties the waiting room now rather than on the next
+	// sync — the point of the switch is to stop mail sitting behind a gate.
+	// Blocked senders are in 'dropped', so nothing rejected is resurrected.
+	moved := int64(0)
+	if !*req.ScreeningEnabled {
+		res, err := a.db.ExecContext(r.Context(), `
+			UPDATE hey_messages SET bucket = 'imbox'
+			WHERE user_id = $1 AND bucket = 'screener'`, uid)
+		if err != nil {
+			writeProblem(w, http.StatusInternalServerError, "Update Failed", err.Error())
+			return
+		}
+		moved, _ = res.RowsAffected()
+	}
+	writeJSON(w, map[string]any{"screening_enabled": *req.ScreeningEnabled, "released": moved})
 }

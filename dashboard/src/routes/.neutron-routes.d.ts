@@ -13,6 +13,7 @@ declare module "@neutron-build/core" {
     | "/settings"
     | "/settings/accounts"
     | "/settings/appearance"
+    | "/settings/mail"
     | "/settings/security"
     | "/snoozed"
     | "/today"

@@ -1,6 +1,6 @@
 import { useEffect } from "preact/hooks";
 import { resetSelection, setList } from "../lib/store";
-import { PageHead } from "../ui/bits";
+import { PageHead, SettingsTabs } from "../ui/bits";
 import { navigate } from "../lib/router";
 
 // One front door for every knob: the ⋯ menu's single Settings entry lands
@@ -8,6 +8,7 @@ import { navigate } from "../lib/router";
 
 const PAGES: { href: string; title: string; sub: string }[] = [
   { href: "/settings/accounts", title: "Mailboxes", sub: "Connect, sync, backfill, retention, and export." },
+  { href: "/settings/mail", title: "Mail", sub: "Whether unknown senders are screened before they reach you." },
   { href: "/settings/appearance", title: "Appearance", sub: "Thirteen themes, seven accents, two subject voices." },
   { href: "/settings/security", title: "Security", sub: "Passkeys, recovery, sessions, agent tokens." },
 ];
@@ -20,13 +21,8 @@ export function SettingsHomeView() {
 
   return (
     <>
-      <PageHead kicker="Settings" title="Settings" sub="Everything adjustable, three doors." />
-      <div class="settings-tabs">
-        <a class="active" href="/settings">Settings</a>
-        <a href="/settings/accounts">Mailboxes</a>
-        <a href="/settings/appearance">Appearance</a>
-        <a href="/settings/security">Security</a>
-      </div>
+      <PageHead kicker="Settings" title="Settings" sub="Everything adjustable, four doors." />
+      <SettingsTabs here="/settings" />
       {PAGES.map((p) => (
         <section class="settings-section" key={p.href}>
           <div class="settings-section-head">

@@ -11,6 +11,10 @@ CREATE TABLE IF NOT EXISTS users (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE users ADD COLUMN IF NOT EXISTS webauthn_handle bytea;
+-- Screening is opt-out. With it off, an unknown sender's mail files straight
+-- to the Imbox instead of parking in the Screener, so nothing waits on an
+-- approval step. Sender decisions already made are still honoured.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS screening_enabled boolean NOT NULL DEFAULT true;
 
 -- Authentication material is server-side. Browser cookies contain only a
 -- random session or ceremony token; their hashes are what reach Postgres.

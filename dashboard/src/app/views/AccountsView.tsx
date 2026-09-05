@@ -5,7 +5,7 @@ import { setList, showError, showToast, syncNote } from "../lib/store";
 import { refreshAccounts, refreshCounts } from "../lib/actions";
 import type { Account } from "../lib/types";
 import { countOf, fmtDate } from "../lib/fmt";
-import { Empty, ListSkeleton, PageHead } from "../ui/bits";
+import { Empty, ListSkeleton, PageHead, SettingsTabs } from "../ui/bits";
 import { installApp, installKind } from "../lib/pwa";
 
 function AccountCard({ account, onChange }: { account: Account; onChange: () => void }) {
@@ -296,7 +296,7 @@ export function AccountsView() {
         title="Accounts"
         sub="Mailboxes this app mirrors. Credentials are encrypted at rest."
       />
-      <div class="settings-tabs"><a href="/settings">Settings</a><a class="active" href="/settings/accounts">Mailboxes</a><a href="/settings/appearance">Appearance</a><a href="/settings/security">Security</a></div>
+      <SettingsTabs here="/settings/accounts" />
       {loading && !data && <ListSkeleton rows={2} />}
       {error && <Empty title="That didn't load." sub={error} />}
       {data?.map((a) => <AccountCard account={a} onChange={reload} key={a.id} />)}

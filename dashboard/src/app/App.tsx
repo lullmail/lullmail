@@ -4,7 +4,7 @@ import { api, authed, authReady, authStatus, refreshAuth } from "./lib/api";
 import { signal } from "@preact/signals";
 import { path, routeFor, startRouter } from "./lib/router";
 import { installKeys } from "./lib/keys";
-import { refreshAccounts, refreshCounts, reload } from "./lib/actions";
+import { refreshAccounts, refreshCounts, refreshFolders, refreshPrefs, reload } from "./lib/actions";
 import { accountCount, accountFilter, attentionTotal, compose, composeOpen, isDarkTheme, layout, palette, query, reader, resolveLayout, setSplitWidth, shortcuts, splitWidth, theme } from "./lib/store";
 import { Topline } from "./Topline";
 import { Sidebar } from "./Sidebar";
@@ -36,6 +36,8 @@ const PeopleView = lazy(() => import("./views/PeopleView").then((m) => ({ defaul
 const AccountsView = lazy(() => import("./views/AccountsView").then((m) => ({ default: m.AccountsView })));
 const SecurityView = lazy(() => import("./views/SecurityView").then((m) => ({ default: m.SecurityView })));
 const AppearanceView = lazy(() => import("./views/AppearanceView").then((m) => ({ default: m.AppearanceView })));
+const MailView = lazy(() => import("./views/MailView").then((m) => ({ default: m.MailView })));
+const FolderView = lazy(() => import("./views/FolderView").then((m) => ({ default: m.FolderView })));
 const SettingsHomeView = lazy(() => import("./views/SettingsHomeView").then((m) => ({ default: m.SettingsHomeView })));
 
 /** Classic needs three columns' worth of room; below that the preference is
@@ -72,6 +74,8 @@ function CurrentView() {
     case "accounts": return <AccountsView />;
     case "security": return <SecurityView />;
     case "appearance": return <AppearanceView />;
+    case "settings-mail": return <MailView />;
+    case "folder": return <FolderView folder={route.folder || "inbox"} />;
     case "settings-home": return <SettingsHomeView />;
     default: return <BucketView bucket={route.bucket || "imbox"} />;
   }
@@ -253,6 +257,8 @@ export default function App() {
     if (!mounted || !authed.value) return;
     refreshCounts();
     refreshAccounts();
+    refreshPrefs();
+    refreshFolders();
   }, [mounted, authed.value]);
 
   // Server-pushed sync hints ride alongside the poll: immediate re-reads
@@ -268,7 +274,7 @@ export default function App() {
   const firstLens = useRef(true);
   useEffect(() => {
     if (firstLens.current) { firstLens.current = false; return; }
-    if (mounted && authed.value) refreshCounts();
+    if (mounted && authed.value) { refreshCounts(); refreshFolders(); }
   }, [accountFilter.value]);
 
   if (!mounted || !authReady.value) {

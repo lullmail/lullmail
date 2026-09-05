@@ -293,6 +293,14 @@ export const showHints = computed(() => !hintsOff.value && keyUses.value < 8);
 
 export const counts = signal<Counts>({});
 
+/** The owner's Screener preference. Off hides the Screener nav entry, which
+ *  would otherwise sit there permanently empty. Undefined until /prefs lands. */
+export const screeningEnabled = signal<boolean | undefined>(undefined);
+
+/** Real provider mailboxes, lowercase as the API reports them. */
+export interface Mailbox { name: string; role?: string | null }
+export const mailboxes = signal<Mailbox[]>([]);
+
 /** Unread that actually competes for attention — snoozed mail is chosen, not owed. */
 export const attentionTotal = computed(() => {
   const c = counts.value;

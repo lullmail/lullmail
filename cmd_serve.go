@@ -74,7 +74,10 @@ func serve() {
 				http.ServeFileFS(w, r, dist, name)
 				return
 			}
-			if strings.Contains(name, ".") {
+			// A dot normally means a real file. Folder routes are the
+			// exception: IMAP servers use '.' as a hierarchy separator, so
+			// /folder/Archive.2024 is a client route, not a missing asset.
+			if strings.Contains(name, ".") && !strings.HasPrefix(name, "folder/") {
 				http.NotFound(w, r)
 				return
 			}
