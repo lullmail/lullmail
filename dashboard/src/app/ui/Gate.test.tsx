@@ -38,3 +38,20 @@ describe("first-run setup", () => {
     expect(host.querySelector("#setup-name")).not.toBeNull();
   });
 });
+
+describe("unreachable server", () => {
+  it("names a connection problem instead of echoing the browser's fetch error", async () => {
+    const { describeAuthError } = await import("./Gate");
+    expect(describeAuthError(new TypeError("Failed to fetch"), "Sign-in failed")).toContain("Can't reach Lull Mail");
+    expect(describeAuthError(new DOMException("cancelled", "NotAllowedError"), "x")).toContain("dismissed");
+    expect(describeAuthError(new Error("bad code"), "x")).toBe("bad code");
+  });
+
+  it("offers a retry rather than a passkey prompt", async () => {
+    const { Unreachable } = await import("./Gate");
+    render(<Unreachable />, host);
+    expect(host.textContent).toContain("Can't reach your mailbox");
+    expect(host.textContent).not.toContain("Continue with a passkey");
+    expect(host.querySelector("button")!.textContent).toContain("Try again");
+  });
+});

@@ -1,8 +1,58 @@
-import { useState } from "preact/hooks";
-import { authApi, authStatus, refreshAuth, type AuthStatus } from "../lib/api";
+import { useEffect, useState } from "preact/hooks";
+import { ApiError, authApi, authStatus, refreshAuth, type AuthStatus } from "../lib/api";
 import { createPasskey, getPasskey } from "../lib/passkeys";
 
 type Mode = "passkey" | "recovery" | "totp";
+
+/** Turn a thrown value into a sentence a person can act on. A failed fetch
+ *  is a connection problem, not an authentication one, and the browser's
+ *  own "Failed to fetch" says neither. */
+export function describeAuthError(e: unknown, fallback: string): string {
+  if (e instanceof ApiError) return e.status >= 500 ? "Lull Mail is not responding right now. Try again in a moment." : e.message;
+  if (e instanceof TypeError) return "Can't reach Lull Mail. Check your connection, then try again.";
+  if (e instanceof DOMException) {
+    if (e.name === "NotAllowedError") return "The passkey prompt was dismissed. Try again when you're ready.";
+    if (e.name === "InvalidStateError") return "This passkey is already registered here.";
+    if (e.name === "SecurityError") return "Passkeys only work at the address this install is pinned to.";
+  }
+  return e instanceof Error && e.message ? e.message : fallback;
+}
+
+/** Shown instead of the gate when the server cannot be reached and no
+ *  earlier session exists on this device. Retries on its own. */
+export function Unreachable() {
+  const [busy, setBusy] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+
+  const retry = async () => {
+    setBusy(true);
+    try { await refreshAuth(); } catch { /* still unreachable; the effect reschedules */ }
+    finally { setBusy(false); setAttempt((n) => n + 1); }
+  };
+
+  useEffect(() => {
+    const delay = Math.min(30_000, 3_000 * 2 ** Math.min(attempt, 4));
+    const timer = setTimeout(retry, delay);
+    const onOnline = () => { clearTimeout(timer); retry(); };
+    window.addEventListener("online", onOnline);
+    return () => { clearTimeout(timer); window.removeEventListener("online", onOnline); };
+  }, [attempt]);
+
+  return (
+    <div class="gate-wrap">
+      <section class="gate" aria-labelledby="gate-title">
+        <GateFan />
+        <div class="gate-brand">Lull Mail</div>
+        <h1 id="gate-title">Can't reach your mailbox</h1>
+        <p class="gate-sub">The server isn't answering. You're still signed in; this page will reconnect when it comes back.</p>
+        <button class="btn btn-accent gate-primary" type="button" disabled={busy} onClick={retry}>
+          {busy ? "Connecting…" : "Try again"}
+        </button>
+        <p class="gate-trust">If you reach Lull Mail through a tunnel or VPN, check that it is still up.</p>
+      </section>
+    </div>
+  );
+}
 
 function GateFan() {
   return (
@@ -45,7 +95,7 @@ export function Gate() {
       const credential = await getPasskey(options);
       await authApi("/auth/login/finish", { body: credential });
       await refreshAuth();
-    } catch (e) { setError(e instanceof Error ? e.message : "Sign-in failed"); }
+    } catch (e) { setError(describeAuthError(e, "Sign-in failed")); }
     finally { setBusy(false); }
   };
 
@@ -54,7 +104,7 @@ export function Gate() {
     try {
       await authApi(mode === "totp" ? "/auth/totp" : "/auth/recovery", { body: { email, code } });
       await refreshAuth();
-    } catch (e) { setError(e instanceof Error ? e.message : "Sign-in failed"); }
+    } catch (e) { setError(describeAuthError(e, "Sign-in failed")); }
     finally { setBusy(false); }
   };
 
@@ -127,7 +177,7 @@ function SetupWizard({ status }: { status: AuthStatus }) {
       setRecoveryCodes(result.recovery_codes);
       setError("");
       setStep(3);
-    } catch (e) { setError(e instanceof Error ? e.message : "Setup failed"); }
+    } catch (e) { setError(describeAuthError(e, "Setup failed")); }
     finally { setBusy(false); }
   };
 

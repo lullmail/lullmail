@@ -1,10 +1,13 @@
 // The one place that talks to the server. Product calls use the HttpOnly
 // session cookie; JavaScript never sees a long-lived authentication secret.
 import { signal } from "@preact/signals";
-import { cacheResponse, cachedResponse, canQueue, clearResponseCache, prepareOfflineOwner, queueMutation } from "./offline";
+import { cacheResponse, cachedResponse, canQueue, clearResponseCache, offlineOwner, prepareOfflineOwner, queueMutation } from "./offline";
 
 export const authed = signal(false);
 export const authReady = signal(false);
+/** The server could not be reached (network failure or a 5xx from the proxy).
+ *  Distinct from signed-out: an unreachable server must never show the gate. */
+export const unreachable = signal(false);
 
 export interface AuthStatus {
   configured: boolean;
@@ -115,11 +118,25 @@ export function authApi<T>(path: string, opts: Opts = {}, setupToken = ""): Prom
 export async function refreshAuth(): Promise<AuthStatus> {
   try {
     const status = await authApi<AuthStatus>("/auth/status");
+    unreachable.value = false;
     authStatus.value = status;
     authed.value = status.authenticated;
     if (!status.authenticated) memoryResponses.clear();
     if (status.authenticated && status.email) await prepareOfflineOwner(status.email);
     return status;
+  } catch (error) {
+    if (error instanceof ApiError && error.status < 500) throw error;
+    // Network failure or proxy 5xx: nothing is known about the session, so
+    // nothing changes. A previous owner on this device keeps the offline
+    // mailbox open; a fresh device waits for the server rather than being
+    // told to sign in to something it cannot reach.
+    unreachable.value = true;
+    const owner = offlineOwner();
+    if (owner && !authStatus.value) {
+      authStatus.value = { configured: true, authenticated: true, email: owner, bootstrap_available: false, passkey_supported: true };
+      authed.value = true;
+    }
+    throw error;
   } finally {
     authReady.value = true;
   }

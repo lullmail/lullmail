@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { lazy, Suspense } from "preact/compat";
-import { api, authed, authReady, authStatus, refreshAuth } from "./lib/api";
+import { api, authed, authReady, authStatus, refreshAuth, unreachable } from "./lib/api";
 import { signal } from "@preact/signals";
 import { path, routeFor, startRouter } from "./lib/router";
 import { installKeys } from "./lib/keys";
@@ -14,7 +14,7 @@ import { Palette } from "./ui/Palette";
 import { Shortcuts } from "./ui/Shortcuts";
 import { Toast } from "./ui/Toast";
 import { KeyboardSnoozePicker } from "./ui/SnoozeMenu";
-import { Gate } from "./ui/Gate";
+import { Gate, Unreachable } from "./ui/Gate";
 import { ListSkeleton, RouteSkeleton } from "./ui/bits";
 import { TodayView } from "./views/TodayView";
 import { BucketView } from "./views/BucketView";
@@ -240,6 +240,7 @@ export default function App() {
     refreshAuth().catch(() => {});
     const refreshVisible = () => {
       if (!authed.value || document.visibilityState === "hidden") return;
+      if (unreachable.value) refreshAuth().catch(() => {});
       refreshCounts();
       reload();
     };
@@ -289,7 +290,7 @@ export default function App() {
   if (!authed.value) {
     return (
       <div class="page">
-        <Gate />
+        {unreachable.value ? <Unreachable /> : <Gate />}
       </div>
     );
   }
