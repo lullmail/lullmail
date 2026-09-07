@@ -11,8 +11,8 @@
     "test:e2e": "node e2e/auth.mjs"
   },
   "dependencies": {
-    "@neutron-build/cli": "latest",
-    "@neutron-build/core": "latest",
+    "@neutron-build/cli": "^0.2.2",
+    "@neutron-build/core": "^0.2.1",
     "@neutron-build/mail": "latest",
     "@preact/signals": "^2.11.1",
     "preact": "^10.25.4",
