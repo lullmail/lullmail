@@ -8,8 +8,8 @@ Never create or commit session, handoff, or local-only context as tracked files:
 - No `SESSION_NOTES.md`, `*_NOTES.md`, `HANDOFF*.md`, `CONTINUATION_PROMPT.md`, `*_NEXT_SESSION.md`
 - No `.claude/`, `.opencode/` local configs
 - No secrets — `.env`, API keys, tokens, VAPID keys
-- `SPEC.md`, `TASKS.md`, `NEUTRON_BUGS.md` are local-only working docs: gitignored as a
-  safety net, but do not create tracked variants of them. Keep scratchpads in session
+- `STATUS.md` (and `_archive/`) is the one local-only working doc: gitignored as a
+  safety net, but do not create tracked variants of it. Keep scratchpads in session
   memory or outside the repo.
 
 ## Deployment notes

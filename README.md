@@ -158,15 +158,14 @@ provider ──sync──> mail_* mirror ──classify──> buckets ──der
 
 ## Status
 
-Release-candidate. The complete local product path is implemented:
-auth/recovery, IMAP/JMAP, provider-OAuth plumbing and refresh,
-sync/triage/read/send, responsive PWA/offline behavior, privacy controls,
-push, standards exports, retention, mailbox disconnect, and full-account
-deletion. What remains is operator work, not missing code: Google/Microsoft
-public consent approval for a distributed OAuth client (self-hosters can
-bring their own client IDs today — see Environment), and a real-provider
-credential smoke test. Campaign-sending infrastructure is deliberately out
-of scope for this mailbox.
+Release-candidate, in daily production use over IMAP. Every feature above is
+implemented and tested locally against a real IMAP/SMTP server. Two things
+are operator work rather than code: the Gmail and Outlook connectors have
+not been exercised against real Google/Microsoft accounts (self-hosters can
+bring their own client IDs today; a distributed client needs Google's
+restricted-scope verification and CASA), and there is no hosted offering
+yet. Campaign-sending infrastructure is deliberately out of scope for this
+mailbox.
 
 ## License
 
