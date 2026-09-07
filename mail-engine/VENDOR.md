@@ -5,7 +5,7 @@ Upstream: `~/Documents/Code Projects/Neutron/mail` (module
 a `replace` directive — the module has no published version, and deploy builds
 run on servers with no sibling Neutron checkout (see NEUTRON_BUGS.md N4).
 
-Synced: 2026-09-05, after backflowing this tree's work to Neutron 3dfb20e6.
+Synced: 2026-09-06, from Neutron 53d6e065 (engine Locate / MailboxSelector for IMAP body reads).
 
 ## Re-vendoring safely
 

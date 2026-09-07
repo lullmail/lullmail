@@ -778,13 +778,9 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// On-demand body fetch for messages the sync never fetched. Bounded to
-	// keep one huge thread from turning into a mailbox download.
-	//
-	// Upstream gap (NEUTRON_BUGS N6): imap Adapter.Body assumes a mailbox
-	// is already selected — true mid-sync, false on a fresh dial, so their
-	// own HTTP body endpoint fails the same way on GreenMail-class
-	// servers. Workaround: resolve the message's mailbox and run a
-	// cursor-only Sync (a SELECT plus usually-empty delta) before Body.
+	// keep one huge thread from turning into a mailbox download. The engine
+	// selects the message's mailbox first on IMAP (mail.MailboxSelector), so
+	// a freshly dialed adapter works here.
 	if len(refs) > 0 {
 		adapters := map[string]mail.Adapter{}
 		releases := map[string]func(){}
@@ -794,13 +790,6 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 		for _, rf := range refs {
-			var boxID string
-			a.db.QueryRowContext(r.Context(),
-				`SELECT mailbox_id FROM mail_message_mailboxes WHERE account_id = $1 AND message_id = $2 LIMIT 1`,
-				rf.acct, rf.id).Scan(&boxID)
-			if boxID == "" {
-				continue
-			}
 			ad, ok := adapters[rf.acct]
 			if !ok {
 				cred, err := a.Token(r.Context(), mail.AccountID(rf.acct))
@@ -817,12 +806,6 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 				}
 				adapters[rf.acct] = ad
 				releases[rf.acct] = release
-			}
-			if cur, err := a.store.Cursor(r.Context(), mail.AccountID(rf.acct), mail.MailboxID(boxID)); err == nil {
-				if _, err := ad.Sync(r.Context(), mail.MailboxID(boxID), cur); err != nil {
-					a.log.Error("body fetch: select", "err", err)
-					continue
-				}
 			}
 			b, err := a.eng.Body(r.Context(), mail.AccountID(rf.acct), mail.MessageID(rf.id), ad)
 			if err != nil {
@@ -853,8 +836,9 @@ type attachment struct {
 	Size     int64  `json:"size"`
 }
 
-// handleAttachment streams one attachment's decoded content. Same
-// select-before-fetch workaround as the body path (NEUTRON_BUGS N6).
+// handleAttachment streams one attachment's decoded content. Attachment is
+// an adapter call, not an engine one, so the mailbox select the engine does
+// for Body is requested explicitly via Locate.
 func (a *App) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	uid, err := a.userID(r.Context())
 	if err != nil {
@@ -893,19 +877,9 @@ func (a *App) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
-	var boxID string
-	a.db.QueryRowContext(r.Context(),
-		`SELECT mailbox_id FROM mail_message_mailboxes WHERE account_id = $1 AND message_id = $2 LIMIT 1`,
-		acct, msgID).Scan(&boxID)
-	if boxID == "" {
-		writeProblem(w, http.StatusNotFound, "Not Found", "message has no mailbox")
+	if err := a.eng.Locate(r.Context(), mail.AccountID(acct), mail.MessageID(msgID), ad); err != nil {
+		writeProblem(w, http.StatusBadGateway, "Select Failed", err.Error())
 		return
-	}
-	if cur, err := a.store.Cursor(r.Context(), mail.AccountID(acct), mail.MailboxID(boxID)); err == nil {
-		if _, err := ad.Sync(r.Context(), mail.MailboxID(boxID), cur); err != nil {
-			writeProblem(w, http.StatusBadGateway, "Select Failed", err.Error())
-			return
-		}
 	}
 	rc, err := ad.Attachment(r.Context(), mail.MessageID(msgID), partID)
 	if err != nil {

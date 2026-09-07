@@ -1,16 +1,11 @@
 import { defineConfig } from "vite";
 import preact from "@preact/preset-vite";
 
-// NEUTRON_BUGS N7: with `--preset static` and islands present, the CLI takes the
-// "build a client bundle" branch (appRouteCount > 0 || hasIslands) but nothing
-// supplies a Rollup entry — neutronPlugin only provides one for app routes — so
-// Vite falls back to index.html and the build dies with UNRESOLVED_ENTRY.
-// Naming the islands entry ourselves is the entry that pass should have had.
-// The CLI's own islands pass sets the same input, so this is not a second build
-// of anything new.
-//
-// The CLI injects its own fully-configured neutronPlugin for both passes; adding
-// a second unconfigured instance here is not needed.
+// NEUTRON_BUGS N7: with `--preset static` and islands present, published CLI
+// releases up to 0.2.2 take the app-bundle branch without a Rollup entry and
+// die with UNRESOLVED_ENTRY. Fixed upstream on 2026-09-06 (islands-only sites
+// now take the CSS-extraction build); this entry is harmless there and can go
+// once a CLI newer than 0.2.2 is published and picked up here.
 export default defineConfig({
   plugins: [preact()],
   build: {
