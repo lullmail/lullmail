@@ -1160,14 +1160,15 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 .gate-brand::after { content: "."; color: var(--accent); }
 .gate h1 { margin: var(--sp-3) 0 0; font-family: var(--serif); font-size: 22px; letter-spacing: -0.015em; }
 .gate-sub { color: var(--ink-2); font-size: var(--t-md); margin: 7px auto var(--sp-5); max-width: 330px; }
+.gate form { display: flex; flex-direction: column; gap: var(--sp-3); }
 .gate input {
   width: 100%; border: 1.5px solid var(--line-strong); border-radius: var(--r-md);
   padding: 11px var(--sp-4); font-size: var(--t-md); text-align: center;
   background: var(--panel); color: var(--ink); outline: none;
 }
-.gate input + input { margin-top: var(--sp-2); }
 .gate input:focus { border-color: var(--accent); }
 .gate .btn { width: 100%; justify-content: center; margin-top: var(--sp-3); }
+.gate form .btn { margin-top: 0; }
 .gate-primary { min-height: 44px; }
 .gate-link { margin-top: var(--sp-4); color: var(--ink-2); font-size: var(--t-sm); text-decoration: underline; text-underline-offset: 3px; }
 .gate-error { margin-top: var(--sp-3); padding: 9px 12px; border-radius: var(--r-md); color: var(--danger); background: var(--danger-soft); font-size: var(--t-sm); }
