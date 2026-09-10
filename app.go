@@ -225,12 +225,13 @@ func (a *App) accountResolver() mail.Resolver {
 // SMTPFor resolves an account to its outbound sender: same host as IMAP,
 // port 587 STARTTLS, unless the account overrides it.
 func (a *App) SMTPFor(ctx context.Context, acct mail.AccountID) (*mail.Sender, mail.Address, bool) {
-	var address, username, host, ciphertext, smtpHost string
+	var address, username, host, ciphertext, smtpHost, displayName string
 	var smtpPort int
 	err := a.db.QueryRowContext(ctx,
-		`SELECT address, username, host, cred_ciphertext, smtp_host, smtp_port
-		 FROM email_accounts WHERE mirror_account_id = $1`, string(acct),
-	).Scan(&address, &username, &host, &ciphertext, &smtpHost, &smtpPort)
+		`SELECT ea.address, ea.username, ea.host, ea.cred_ciphertext, ea.smtp_host, ea.smtp_port, u.display_name
+		 FROM email_accounts ea JOIN users u ON u.id = ea.user_id
+		 WHERE ea.mirror_account_id = $1`, string(acct),
+	).Scan(&address, &username, &host, &ciphertext, &smtpHost, &smtpPort, &displayName)
 	if err != nil {
 		return nil, mail.Address{}, false
 	}
@@ -244,7 +245,10 @@ func (a *App) SMTPFor(ctx context.Context, acct mail.AccountID) (*mail.Sender, m
 	if smtpPort == 0 {
 		smtpPort = 587
 	}
-	from := mail.Address{Email: address, Name: username}
+	// The display name is the owner's, never the login: an IMAP username is
+	// a credential, and with Username now distinct from address it can be
+	// anything the server handed out.
+	from := mail.Address{Email: address, Name: displayName}
 	return mail.NewSender(mail.SMTPConfig{
 		Host:     smtpHost,
 		Port:     smtpPort,

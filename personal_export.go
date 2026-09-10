@@ -4,7 +4,10 @@ import (
 	"archive/zip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -78,11 +81,18 @@ func (a *App) handlePersonalExport(w http.ResponseWriter, r *http.Request) {
 	}
 	rows.Close()
 
-	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", `attachment; filename="lullmail-personal-data.zip"`)
-	w.Header().Set("Cache-Control", "no-store")
-	zw := zip.NewWriter(w)
-	defer zw.Close()
+	// The archive is built in a temp file and only streamed once complete:
+	// a failure mid-build must be a clean 5xx, not a truncated zip that
+	// arrives with real headers and looks downloadable.
+	tmp, err := os.CreateTemp("", "lullmail-personal-*.zip")
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Export Failed", err.Error())
+		return
+	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+
+	zw := zip.NewWriter(tmp)
 	write := func(name string, data []byte) error {
 		file, err := zw.Create(name)
 		if err != nil {
@@ -118,8 +128,29 @@ func (a *App) handlePersonalExport(w http.ResponseWriter, r *http.Request) {
 	manifest, _ := json.MarshalIndent(map[string]any{"format": "lullmail-personal-export", "version": 1, "exported_at": time.Now().UTC(), "notes": len(notes), "board_cards": len(cards)}, "", "  ")
 	for name, data := range map[string][]byte{"notes.md": []byte(notesMD.String()), "notes-layout.json": notesJSON, "board.md": []byte(cardsMD.String()), "board.json": cardsJSON, "export-manifest.json": manifest} {
 		if err := write(name, data); err != nil {
-			a.log.Error("personal export stream failed", "err", err)
+			a.log.Error("personal export build failed", "err", err)
 			return
 		}
+	}
+	if err := zw.Close(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Export Failed", err.Error())
+		return
+	}
+
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Export Failed", err.Error())
+		return
+	}
+	stat, err := tmp.Stat()
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Export Failed", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Length", strconv.FormatInt(stat.Size(), 10))
+	w.Header().Set("Content-Disposition", `attachment; filename="lullmail-personal-data.zip"`)
+	w.Header().Set("Cache-Control", "no-store")
+	if _, err := io.Copy(w, tmp); err != nil {
+		a.log.Error("personal export stream failed", "err", err)
 	}
 }

@@ -18,7 +18,9 @@ import (
 	"net/http"
 	stdmail "net/mail"
 	"net/textproto"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -96,12 +98,19 @@ func (a *App) handleAccountExport(w http.ResponseWriter, r *http.Request) {
 	defer release()
 
 	filename := safeExportName(address) + "-mail-export.zip"
-	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
 
-	zw := zip.NewWriter(w)
+	// The archive is built in a temp file and streamed only once complete:
+	// provider reads fail mid-build, and a failure must surface as a clean
+	// 5xx rather than a truncated zip that already left with 200 headers.
+	tmp, err := os.CreateTemp("", "lullmail-export-*.zip")
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Export Failed", err.Error())
+		return
+	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+
+	zw := zip.NewWriter(tmp)
 	manifest := exportManifest{
 		Version:     1,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
@@ -155,7 +164,29 @@ func (a *App) handleAccountExport(w http.ResponseWriter, r *http.Request) {
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(manifest)
 	}
-	_ = zw.Close()
+	if err := zw.Close(); err != nil {
+		a.log.Error("mail export build failed", "err", err)
+		writeProblem(w, http.StatusInternalServerError, "Export Failed", err.Error())
+		return
+	}
+
+	stat, err := tmp.Stat()
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Export Failed", err.Error())
+		return
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Export Failed", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
+	w.Header().Set("Content-Length", strconv.FormatInt(stat.Size(), 10))
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if _, err := io.Copy(w, tmp); err != nil {
+		a.log.Error("mail export stream failed", "err", err)
+	}
 }
 
 // handleMessageEML downloads one original message. account is the mirror id
