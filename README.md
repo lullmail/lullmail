@@ -62,8 +62,9 @@ docker compose logs app      # one-time setup token, valid 24h
 ```
 
 Open `http://localhost:8080` and finish setup in the browser: paste the
-token, enter your address, create a passkey, save the recovery codes. The
-token stops authenticating the moment the first passkey exists.
+token, pick a name and password (or create a passkey instead), save the
+recovery codes. The token stops authenticating the moment the first
+credential exists. You can sign in with that name or the account email.
 
 Deploying with [teploy](https://teploy.com) instead of raw Docker? A
 template `teploy.yml` is committed — point `server:` at a host from your

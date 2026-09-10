@@ -201,13 +201,14 @@ func (a *App) authenticateRequest(r *http.Request) (string, string, error) {
 	}
 
 	// LULL_TOKEN is an installation/bootstrap secret, not a permanent
-	// parallel login. It stops opening product data after the first passkey,
-	// and a generated token additionally expires 24h after it was minted.
-	var credentials int
-	if err := a.db.QueryRowContext(r.Context(), `SELECT count(*) FROM auth_credentials`).Scan(&credentials); err != nil {
+	// parallel login. It stops opening product data after the first
+	// credential (passkey or password), and a generated token additionally
+	// expires 24h after it was minted.
+	configured, err := a.ownerConfigured(r.Context())
+	if err != nil {
 		return "", "", err
 	}
-	if credentials == 0 && a.setupTokenValid() {
+	if !configured && a.setupTokenValid() {
 		got := r.Header.Get("Authorization")
 		if constantTimeBearer(got, a.cfg.APIToken) {
 			uid, err := a.firstUserID(r.Context())
@@ -268,6 +269,7 @@ func (a *App) mountAuth(mux *http.ServeMux) {
 	mux.HandleFunc("GET /auth/status", a.handleAuthStatus)
 	mux.HandleFunc("POST /auth/bootstrap/begin", a.handleBootstrapBegin)
 	mux.HandleFunc("POST /auth/bootstrap/finish", a.handleBootstrapFinish)
+	mux.HandleFunc("POST /auth/bootstrap/password", a.handleBootstrapPassword)
 	mux.HandleFunc("POST /auth/login/begin", a.handleLoginBegin)
 	mux.HandleFunc("POST /auth/login/finish", a.handleLoginFinish)
 	mux.HandleFunc("POST /auth/password", a.handlePasswordLogin)
@@ -309,8 +311,8 @@ func isCGNAT(ip net.IP) bool {
 }
 
 func (a *App) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
-	var count int
-	if err := a.db.QueryRowContext(r.Context(), `SELECT count(*) FROM auth_credentials`).Scan(&count); err != nil {
+	configured, err := a.ownerConfigured(r.Context())
+	if err != nil {
 		writeProblem(w, 500, "Status Failed", err.Error())
 		return
 	}
@@ -323,8 +325,8 @@ func (a *App) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		via = a.sessionLoginMethod(r.Context(), session)
 	}
 	status := map[string]any{
-		"configured": count > 0, "authenticated": authenticated, "email": email,
-		"bootstrap_available": count == 0 && a.setupTokenValid(),
+		"configured": configured, "authenticated": authenticated, "email": email,
+		"bootstrap_available": !configured && a.setupTokenValid(),
 		"passkey_supported":   true,
 		// Warn-only exposure signal for the dashboard (D10). Classified here,
 		// once per boot, against the pinned origin — never enforced.
@@ -333,7 +335,7 @@ func (a *App) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	if via != "" {
 		status["via"] = via
 	}
-	if count == 0 && a.cfg.RPID == "" {
+	if !configured && a.cfg.RPID == "" {
 		// First-run setup with no pinned origin: show the wizard where it
 		// thinks it is, so a wrong proxy header is visible before a passkey
 		// gets bound to it.
@@ -349,14 +351,26 @@ func (a *App) bootstrapAuthorized(r *http.Request) bool {
 	return constantTimeBearer(r.Header.Get("Authorization"), a.cfg.APIToken)
 }
 
+// ownerConfigured is true once any sign-in credential exists — a passkey,
+// a password, or enabled TOTP. First-run setup and the bootstrap token
+// both key off this, not passkeys alone, so a password-only install is
+// a finished install.
+func (a *App) ownerConfigured(ctx context.Context) (bool, error) {
+	var ok bool
+	err := a.db.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM auth_credentials)
+		    OR EXISTS(SELECT 1 FROM auth_passwords)
+		    OR EXISTS(SELECT 1 FROM auth_totp WHERE enabled_at IS NOT NULL)`).Scan(&ok)
+	return ok, err
+}
+
 func (a *App) handleBootstrapBegin(w http.ResponseWriter, r *http.Request) {
 	if !a.bootstrapAuthorized(r) {
 		writeProblem(w, 401, "Unauthorized", "the one-time setup token is required")
 		return
 	}
-	var count int
-	if err := a.db.QueryRowContext(r.Context(), `SELECT count(*) FROM auth_credentials`).Scan(&count); err != nil || count != 0 {
-		writeProblem(w, 409, "Already Configured", "a passkey already protects this installation")
+	if configured, err := a.ownerConfigured(r.Context()); err != nil || configured {
+		writeProblem(w, 409, "Already Configured", "this installation already has a sign-in method")
 		return
 	}
 	// No origin pinned yet (PUBLIC_URL unset, fresh install): adopt the one
@@ -432,6 +446,100 @@ func (a *App) handleBootstrapFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rawSession, err := a.persistSession(r.Context(), tx, r, uid, loginMethodBootstrap)
+	if err != nil {
+		writeProblem(w, 500, "Session Failed", err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeProblem(w, 500, "Setup Failed", err.Error())
+		return
+	}
+	a.setCookie(w, sessionCookie, rawSession, sessionLifetime)
+	if a.cfg.DataDir != "" && !a.tokenFromEnv {
+		deleteSetupToken(a.cfg.DataDir)
+	}
+	a.setupTokenCreated = time.Time{}
+	writeJSON(w, map[string]any{"ok": true, "recovery_codes": codes})
+}
+
+// handleBootstrapPassword is first-run setup without WebAuthn: name +
+// password, recovery codes, session. The setup token still gates it. A
+// passkey can be added later from Security; it is no longer required to
+// finish installing.
+func (a *App) handleBootstrapPassword(w http.ResponseWriter, r *http.Request) {
+	if !a.bootstrapAuthorized(r) {
+		writeProblem(w, 401, "Unauthorized", "the one-time setup token is required")
+		return
+	}
+	if configured, err := a.ownerConfigured(r.Context()); err != nil || configured {
+		writeProblem(w, 409, "Already Configured", "this installation already has a sign-in method")
+		return
+	}
+	if a.cfg.RPID == "" {
+		if !a.setOriginForSetup(detectOrigin(r)) {
+			writeProblem(w, 422, "Origin Unavailable", "the browser origin could not be detected — set PUBLIC_URL on the server")
+			return
+		}
+	}
+	var req struct {
+		Name     string `json:"name"`
+		Password string `json:"password"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req) != nil {
+		writeProblem(w, 400, "Bad Request", "enter your name and a password")
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		writeProblem(w, 422, "Name Missing", "enter your name so Lull Mail knows whose mail this is")
+		return
+	}
+	if !validPasswordLength(req.Password) {
+		writeProblem(w, 422, "Password Too Short", "use at least 8 characters")
+		return
+	}
+	a.cfg.UserEmail = ownerEmailFromName(name)
+	if err := a.ensureUser(r.Context(), name); err != nil {
+		writeProblem(w, 500, "Setup Failed", err.Error())
+		return
+	}
+	uid, err := a.firstUserID(r.Context())
+	if err != nil {
+		writeProblem(w, 500, "Setup Failed", err.Error())
+		return
+	}
+	hash, err := hashPassword(req.Password)
+	if err != nil {
+		writeProblem(w, 500, "Setup Failed", err.Error())
+		return
+	}
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeProblem(w, 500, "Setup Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+		writeProblem(w, 500, "Setup Failed", err.Error())
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `INSERT INTO auth_passwords (user_id,hash,updated_at) VALUES ($1,$2,now())`, uid, hash); err != nil {
+		writeProblem(w, 500, "Setup Failed", err.Error())
+		return
+	}
+	if !a.cfg.PublicURLSet && a.cfg.RPID != "" {
+		if _, err := tx.ExecContext(r.Context(), `INSERT INTO app_settings (key,value) VALUES ('public_url',$1)
+			ON CONFLICT (key) DO UPDATE SET value=excluded.value`, a.cfg.PublicURL); err != nil {
+			writeProblem(w, 500, "Setup Failed", "could not persist the site origin: "+err.Error())
+			return
+		}
+	}
+	codes, err := a.replaceRecoveryCodesTx(r.Context(), tx, uid)
+	if err != nil {
+		writeProblem(w, 500, "Recovery Setup Failed", err.Error())
+		return
+	}
+	rawSession, err := a.persistSession(r.Context(), tx, r, uid, loginMethodPassword)
 	if err != nil {
 		writeProblem(w, 500, "Session Failed", err.Error())
 		return
@@ -558,7 +666,11 @@ func (a *App) handleLoginBegin(w http.ResponseWriter, r *http.Request) {
 	var count int
 	_ = a.db.QueryRowContext(r.Context(), `SELECT count(*) FROM auth_credentials`).Scan(&count)
 	if count == 0 {
-		writeProblem(w, 409, "Setup Required", "create the first passkey with the setup token")
+		if configured, _ := a.ownerConfigured(r.Context()); configured {
+			writeProblem(w, 409, "No Passkey", "this account has no passkey — sign in with a password")
+		} else {
+			writeProblem(w, 409, "Setup Required", "create the first passkey with the setup token")
+		}
 		return
 	}
 	assertion, session, err := a.webAuthn().BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
@@ -906,8 +1018,10 @@ func (a *App) recoveryDigest(code string) string {
 
 func (a *App) recoveryUser(ctx context.Context, email string) (string, error) {
 	var uid string
-	if strings.TrimSpace(email) != "" {
-		return uid, a.db.QueryRowContext(ctx, `SELECT id FROM users WHERE lower(email)=lower($1)`, strings.TrimSpace(email)).Scan(&uid)
+	if ident := strings.TrimSpace(email); ident != "" {
+		return uid, a.db.QueryRowContext(ctx, `
+			SELECT id FROM users WHERE lower(email)=lower($1) OR lower(display_name)=lower($1)
+			ORDER BY created_at LIMIT 1`, ident).Scan(&uid)
 	}
 	return uid, a.db.QueryRowContext(ctx, `SELECT id FROM users ORDER BY created_at LIMIT 1`).Scan(&uid)
 }

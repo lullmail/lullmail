@@ -14,19 +14,13 @@ const errors = [];
 page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
 page.on("pageerror", (error) => errors.push(error.message));
 
-const cdp = await context.newCDPSession(page);
-await cdp.send("WebAuthn.enable");
-const { authenticatorId: primaryAuthenticator } = await cdp.send("WebAuthn.addVirtualAuthenticator", { options: {
-  protocol: "ctap2", transport: "internal", hasResidentKey: true,
-  hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true,
-} });
-
 await page.goto(baseURL, { waitUntil: "networkidle" });
 await page.getByRole("button", { name: "Get started" }).click();
 await page.getByPlaceholder("Setup code").fill(setupToken);
 await page.getByRole("button", { name: "Continue" }).click();
 await page.getByPlaceholder("Your name").fill("Owner");
-await page.getByRole("button", { name: "Create my passkey" }).click();
+await page.getByPlaceholder("Password", { exact: true }).fill("staple horse correct battery");
+await page.getByRole("button", { name: "Create account" }).click();
 await page.getByRole("heading", { name: "Save your recovery codes" }).waitFor();
 const recoveryCode = await page.locator(".recovery-grid code").first().innerText();
 await page.screenshot({ path: output + "/recovery.png", fullPage: true });
@@ -35,17 +29,12 @@ await page.getByRole("button", { name: "Connect a mailbox" }).waitFor();
 
 await page.goto(baseURL + "/settings/security", { waitUntil: "networkidle" });
 await page.getByRole("heading", { name: "Security" }).waitFor();
-await page.screenshot({ path: output + "/security-desktop.png", fullPage: true });
-
-// Password enrolled from a signed-in (passkey) session, per the D10 contract.
-await page.getByPlaceholder("Password", { exact: true }).fill("staple horse correct battery");
-await page.getByRole("button", { name: "Set password" }).click();
 await page.getByRole("button", { name: "Change password" }).waitFor();
+await page.screenshot({ path: output + "/security-desktop.png", fullPage: true });
 
 await page.getByRole("button", { name: "Sign out here" }).click();
 await page.getByRole("heading", { name: "Welcome back" }).waitFor();
-// The gate's default face is email + password now.
-await page.getByLabel("Account email").fill("owner@owner.local");
+await page.getByLabel("Email or name").fill("Owner");
 await page.getByLabel("Password").fill("staple horse correct battery");
 await page.locator("form:has(#gate-password) button[type=submit]").click();
 await page.getByRole("button", { name: "Connect a mailbox" }).waitFor();
@@ -69,4 +58,4 @@ await page.getByRole("heading", { name: "Set up your mailbox" }).waitFor();
 
 if (errors.length) throw new Error("Browser errors:\n" + errors.join("\n"));
 await browser.close();
-console.log(JSON.stringify({ passkeySetup: true, passwordEnroll: true, passwordLogin: true, recoveryLogin: true, fullDeletion: true, screenshots: output }));
+console.log(JSON.stringify({ passwordSetup: true, passwordLogin: true, recoveryLogin: true, fullDeletion: true, screenshots: output }));

@@ -130,8 +130,8 @@ export function Gate() {
         <h1 id="gate-title">Welcome back</h1>
         <p class="gate-sub">Sign in with your password, or use a passkey.</p>
         <form onSubmit={signInPassword}>
-          <label class="sr-only" for="gate-email">Account email</label>
-          <input id="gate-email" type="email" placeholder="Email" autocomplete="email username" value={email}
+          <label class="sr-only" for="gate-email">Email or name</label>
+          <input id="gate-email" type="text" placeholder="Email or name" autocomplete="username" value={email}
             onInput={(e) => setEmail((e.target as HTMLInputElement).value)} />
           <label class="sr-only" for="gate-password">Password</label>
           <input id="gate-password" type="password" placeholder="Password" autocomplete="current-password" value={password}
@@ -181,6 +181,7 @@ function SetupWizard({ status }: { status: AuthStatus }) {
   const [step, setStep] = useState(0);
   const [token, setToken] = useState("");
   const [name, setName] = useState("");
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
@@ -194,8 +195,22 @@ function SetupWizard({ status }: { status: AuthStatus }) {
     goTo(2);
   };
 
-  const setUp = async (ev: Event) => {
+  const setUpPassword = async (ev: Event) => {
     ev.preventDefault();
+    if (!name.trim()) { setError("Enter your name to continue."); return; }
+    if (password.length < 8) { setError("Use at least 8 characters for the password."); return; }
+    setBusy(true); setError("");
+    try {
+      const result = await authApi<{ recovery_codes: string[] }>("/auth/bootstrap/password", { body: { name: name.trim(), password } }, token.trim());
+      setPassword("");
+      setRecoveryCodes(result.recovery_codes);
+      setError("");
+      setStep(3);
+    } catch (e) { setError(describeAuthError(e, "Setup failed")); }
+    finally { setBusy(false); }
+  };
+
+  const setUpPasskey = async () => {
     if (!name.trim()) { setError("Enter your name to continue."); return; }
     setBusy(true); setError("");
     try {
@@ -253,7 +268,7 @@ function SetupWizard({ status }: { status: AuthStatus }) {
           {step === 0 && (
             <>
               <h1 id="setup-title">Set up your mailbox</h1>
-              <p class="gate-sub">Create your account and passkey. It takes about a minute.</p>
+              <p class="gate-sub">Create your account. A password is enough; a passkey is optional.</p>
               {status.detected_origin && (
                 <p class="gate-origin">You'll sign in at <b>{status.detected_origin}</b>.<br />Passkeys created here only work at this address.</p>
               )}
@@ -277,26 +292,32 @@ function SetupWizard({ status }: { status: AuthStatus }) {
             </form>
           )}
           {step === 2 && (
-            <form onSubmit={setUp}>
+            <form onSubmit={setUpPassword}>
               <h1 id="setup-title">Who's this mailbox for?</h1>
-              <p class="gate-sub">It's just you. Enter your name, then create your passkey. Your actual mailboxes (Gmail, Outlook, or IMAP) get connected inside the app right after.</p>
+              <p class="gate-sub">It's just you. Pick a name and a password. Your actual mailboxes (Gmail, Outlook, or IMAP) get connected inside the app right after.</p>
               <label class="sr-only" for="setup-name">Your name</label>
-              <input id="setup-name" type="text" placeholder="Your name" autocomplete="name" value={name}
+              <input id="setup-name" type="text" placeholder="Your name" autocomplete="username" value={name}
                 onInput={(e) => setName((e.target as HTMLInputElement).value)} />
-              <p class="gate-hint">You'll use this passkey whenever you sign in. Recovery codes are available if you lose access to it.</p>
+              <label class="sr-only" for="setup-password">Password</label>
+              <input id="setup-password" type="password" placeholder="Password" autocomplete="new-password" value={password}
+                onInput={(e) => setPassword((e.target as HTMLInputElement).value)} />
+              <p class="gate-hint">You'll sign in with this name or the account email. A passkey can be added now or later in Security.</p>
               <div class="gate-nav">
                 <button class="btn btn-outline" type="button" disabled={busy} onClick={() => goTo(1)}>Back</button>
-                <button class="btn btn-accent" type="submit" disabled={busy || !status.bootstrap_available}>
-                  {busy ? "Creating your passkey…" : "Create my passkey"}
+                <button class="btn btn-accent" type="submit" disabled={busy || !status.bootstrap_available || password.length < 8}>
+                  {busy ? "Creating your account…" : "Create account"}
                 </button>
               </div>
+              <button class="gate-link" type="button" disabled={busy || !status.bootstrap_available} onClick={setUpPasskey}>
+                {busy ? "Waiting for your device…" : "Create a passkey instead"}
+              </button>
               {error && <div class="gate-error" role="alert">{error}</div>}
             </form>
           )}
           {step === 3 && (
             <>
               <h1 id="setup-title">Save your recovery codes</h1>
-              <p class="gate-sub">Keep these somewhere safe. Each code can sign you in once if your passkey isn't available.</p>
+              <p class="gate-sub">Keep these somewhere safe. Each code can sign you in once if your password isn't available.</p>
               <div class="recovery-grid">{recoveryCodes.map((item) => <code key={item}>{item}</code>)}</div>
               <div class="gate-code-actions">
                 <button class="btn btn-outline" type="button" onClick={downloadCodes}>Download</button>
@@ -306,7 +327,7 @@ function SetupWizard({ status }: { status: AuthStatus }) {
             </>
           )}
         </div>
-        <p class="gate-trust">Recovery codes work once. A password can be added later in Security.</p>
+        <p class="gate-trust">Recovery codes work once. A passkey can be added later in Security.</p>
       </section>
     </div>
   );

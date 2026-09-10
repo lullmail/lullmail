@@ -36,6 +36,9 @@ describe("first-run setup", () => {
 
     expect(host.textContent).toContain("Who's this mailbox for?");
     expect(host.querySelector("#setup-name")).not.toBeNull();
+    expect(host.querySelector("#setup-password")).not.toBeNull();
+    expect(host.textContent).toContain("Create account");
+    expect(host.textContent).toContain("Create a passkey instead");
   });
 });
 
