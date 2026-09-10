@@ -24,7 +24,7 @@ RFC 4155) is a table-stakes feature, not a cancellation flow.
 - **Calendar** — year/month/week over the mail that comes back to you.
 - **Notes** — a spatial canvas of stickies. Thoughts, not tasks.
 - Keyboard-first (j/k, verbs, `g` jumps, one command palette), undo on every
-  action, light/sepia/dark, no telemetry.
+  action, light/sepia/dark plus more palettes, no telemetry.
 - **Rich sending** — compose plain text or paste HTML: HTML goes out as
   multipart/alternative with an automatic plain-text fallback, a sandboxed
   preview shows the rendering, and IMAP/Gmail/Graph providers all carry the
@@ -38,8 +38,9 @@ RFC 4155) is a table-stakes feature, not a cancellation flow.
   organizes: 30 days, 90 days (default), 1 year, 3 years, or "All history."
   Changing the window grows or shrinks the organized views only; the local
   mirror obeys the separate retention setting, and provider mail is never
-  touched. Message bodies and attachments stay lazy — history organizes
-  metadata and fetches content when a thread is opened.
+  touched. Message bodies are prefetched during sync by default (so the
+  first open of any thread is local); set `PREFETCH_BODIES=0` to fetch
+  bodies only when a thread is opened.
 - Installable PWA with an explicit iOS path, account-bound offline reading,
   resilient local drafts, a conservative replay queue for reversible filing
   actions, and optional private web-push alerts.
@@ -110,6 +111,7 @@ recovery codes are opt-in additions, not requirements.
 | `LULL_USER_EMAIL` | no | Owner address used as the internal ident. Setup collects a name (login accepts that name or this address); leave unset to derive `name@owner.local`. |
 | `PUBLIC_URL` | no | Browser origin, e.g. `https://mail.example.com`. Auto-detected from the first setup visit and pinned in the database; the env var forces an origin. WebAuthn and mutation-origin checks reject a different origin. |
 | `DATA_DIR` | no | Where the generated key and setup token live (default `./data`). Mount it as a volume or restarts regenerate them. |
+| `PREFETCH_BODIES` | no | `1` (default) fetches message bodies during sync so first open is local; `0` fetches a body only when its thread is opened. |
 | `WEBAUTHN_RP_ID` | no | Relying-party domain; derived from the effective origin. |
 | `PORT` / `ADDR` | no | Defaults to `:8080`. |
 

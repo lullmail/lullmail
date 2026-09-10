@@ -14,6 +14,9 @@ app: lullmail
 type: container
 server: changeme
 
+# Pull the published multi-arch image instead of building on the host; set
+# build_local: true (and drop image:) to build from source instead.
+image: ghcr.io/lullmail/lullmail:latest
 build_local: false
 platform: linux/amd64
 

@@ -167,7 +167,7 @@ export default function Home() {
               <div class="proof-copy">
                 <span class="proof-index">03</span>
                 <h3>Come back to it later.</h3>
-                <p>Set a thread aside until tomorrow, next week, or a date you choose. It leaves your Inbox and comes back when you are ready for it.</p>
+                <p>Set a thread aside until tomorrow, next week, or a month out. It leaves your Inbox and comes back when you are ready for it.</p>
                 <small>Out of sight without being forgotten.</small>
               </div>
 
@@ -176,7 +176,7 @@ export default function Home() {
                 <div class="return-days"><span>WED<br /><b>26</b></span><span>THU<br /><b>27</b></span><span class="return-day">FRI<br /><b>28</b></span><span>SAT<br /><b>29</b></span><span>SUN<br /><b>30</b></span></div>
                 <div class="return-line"><i></i><b></b></div>
                 <div class="return-card">
-                  <small>Back Friday at 9:00</small>
+                  <small>Back Friday</small>
                   <strong>Final draft review</strong>
                   <span>From Nadia Flores</span>
                 </div>

@@ -21,6 +21,6 @@ go.work
 # dashboard/dist/* (not the dir) so the negation below can actually apply.
 !dashboard/dist/.gitkeep
 
-# A server run without LULL_DATA_DIR writes its generated secret.key here.
+# A server run without DATA_DIR writes its generated secret.key here.
 # Never committable.
 data/

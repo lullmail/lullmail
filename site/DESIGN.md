@@ -21,7 +21,8 @@ The page has four parts only:
 1. **Hero** — one title and one turbulence-to-order scene.
 2. **Product** — three proofs: Screener, Today, and timed return.
 3. **Trust** — four precise operational guarantees.
-4. **Availability** — an honest private-preview status and utility footer.
+4. **Availability** — the open-source, run-it-yourself framing ("free and
+   open source; a hosted offering may come later") and utility footer.
 
 Anything that does not strengthen one of those four parts is removed.
 
