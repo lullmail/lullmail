@@ -33,3 +33,12 @@ func TestClassifySender(t *testing.T) {
 		}
 	}
 }
+
+func TestLikeContainsEscapesWildcards(t *testing.T) {
+	if got := likeContains("100%"); got != `%100\%%` {
+		t.Fatalf("likeContains(100%%) = %q", got)
+	}
+	if got := likeContains("a_b"); got != `%a\_b%` {
+		t.Fatalf("likeContains(a_b) = %q", got)
+	}
+}

@@ -107,7 +107,7 @@ recovery codes are opt-in additions, not requirements.
 | `DATABASE_URL` | yes | Postgres, e.g. `postgres://user:pass@host:5432/lullmail` |
 | `SECRET_KEY` | no | Seals mail credentials, OAuth/passkey records, TOTP, and push subscriptions with AES-256-GCM. Generated on first boot into `DATA_DIR/secret.key` when unset; changing it invalidates sealed data. |
 | `LULL_TOKEN` | no | One-time installation token for first-run setup (password or passkey). Generated (24h expiry, printed to logs) when unset. Rejected after the first credential exists; restart regenerates only while the install is unconfigured. |
-| `LULL_USER_EMAIL` | no | Owner address; normally entered on the setup page instead. |
+| `LULL_USER_EMAIL` | no | Owner address used as the internal ident. Setup collects a name (login accepts that name or this address); leave unset to derive `name@owner.local`. |
 | `PUBLIC_URL` | no | Browser origin, e.g. `https://mail.example.com`. Auto-detected from the first setup visit and pinned in the database; the env var forces an origin. WebAuthn and mutation-origin checks reject a different origin. |
 | `DATA_DIR` | no | Where the generated key and setup token live (default `./data`). Mount it as a volume or restarts regenerate them. |
 | `WEBAUTHN_RP_ID` | no | Relying-party domain; derived from the effective origin. |

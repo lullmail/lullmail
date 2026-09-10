@@ -39,7 +39,9 @@ var agentAllowed = map[string]bool{
 	"/search":          true,
 	"/briefing":        true,
 	"/board":           true,
+	"/board/":          true, // pin, unpin, cards
 	"/notes":           true,
+	"/notes/":          true, // item update/delete
 	"/people":          true,
 	"/recent":          true,
 	"/folder":          true,
@@ -60,6 +62,15 @@ var agentAllowed = map[string]bool{
 // scope. Exact entries match whole segments; trailing-slash entries are
 // prefixes.
 func agentAllowedPath(path string) bool {
+	if strings.Contains(path, "..") {
+		return false
+	}
+	// Mailbox zip export is the product-layer equivalent of /mail/: a
+	// leaked token must not dump the archive. /personal/export stays
+	// allowed (notes/board JSON, not the mail mirror).
+	if strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/export") {
+		return false
+	}
 	for prefix := range agentAllowed {
 		if strings.HasSuffix(prefix, "/") {
 			if strings.HasPrefix(path, prefix) {

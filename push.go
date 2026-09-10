@@ -131,11 +131,7 @@ func (a *App) sendPushForUser(ctx context.Context, uid string) {
 		}
 	}
 	if sent {
-		// One collapsed notification represents everything currently waiting;
-		// otherwise a first sync would emit one old-message alert every tick.
 		_, _ = a.db.ExecContext(ctx, `INSERT INTO push_deliveries(user_id,account_id,message_id,delivered_at)
-			SELECT h.user_id,h.account_id,h.message_id,$2 FROM hey_messages h
-			WHERE h.user_id=$1 AND h.bucket='imbox' AND h.read_at IS NULL
-			ON CONFLICT DO NOTHING`, uid, time.Now())
+			VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`, uid, accountID, messageID, time.Now())
 	}
 }

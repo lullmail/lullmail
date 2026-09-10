@@ -368,9 +368,10 @@ func (a *App) handlePeople(w http.ResponseWriter, r *http.Request) {
 		SELECT s.sender_key, s.route, s.allowed,
 		       count(h.message_id) AS total,
 		       max(m.received_at)::text AS last_at,
-		       max(m.subject) AS last_subject
+		       (array_agg(m.subject ORDER BY m.received_at DESC NULLS LAST))[1] AS last_subject
 		FROM hey_senders s
 		LEFT JOIN mail_messages m ON lower(m.from_addrs::json->0->>'email') = s.sender_key
+		  AND m.account_id IN (SELECT mirror_account_id FROM email_accounts WHERE user_id = s.user_id)
 		LEFT JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = s.user_id
 		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = s.user_id
 		WHERE s.user_id = $1`+

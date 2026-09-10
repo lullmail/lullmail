@@ -5,6 +5,7 @@ package main
 // undo for that is re-creating it where it stood.
 
 import (
+	"math"
 	"net/http"
 )
 
@@ -50,7 +51,12 @@ func (a *App) handleNotes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleNoteCreate(w http.ResponseWriter, r *http.Request) {
-	var req stickyNote
+	var req struct {
+		X     float64 `json:"x"`
+		Y     float64 `json:"y"`
+		Text  string  `json:"text"`
+		Color int     `json:"color"`
+	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
 		return
@@ -68,7 +74,7 @@ func (a *App) handleNoteCreate(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO sticky_notes (user_id, x, y, text, color)
 		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id::text, x, y, text, color`,
-		uid, req.X, req.Y, req.Text, req.Color).Scan(&n.ID, &n.X, &n.Y, &n.Text, &n.Color)
+		uid, int(math.Round(req.X)), int(math.Round(req.Y)), req.Text, req.Color).Scan(&n.ID, &n.X, &n.Y, &n.Text, &n.Color)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Create Failed", err.Error())
 		return
@@ -81,10 +87,10 @@ func (a *App) handleNoteCreate(w http.ResponseWriter, r *http.Request) {
 // a pointer.
 func (a *App) handleNoteUpdate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		X     *int    `json:"x"`
-		Y     *int    `json:"y"`
-		Text  *string `json:"text"`
-		Color *int    `json:"color"`
+		X     *float64 `json:"x"`
+		Y     *float64 `json:"y"`
+		Text  *string  `json:"text"`
+		Color *int     `json:"color"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
@@ -99,13 +105,20 @@ func (a *App) handleNoteUpdate(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusUnprocessableEntity, "Bad Color", "color must be 0-4")
 		return
 	}
+	var x, y any
+	if req.X != nil {
+		x = int(math.Round(*req.X))
+	}
+	if req.Y != nil {
+		y = int(math.Round(*req.Y))
+	}
 	res, err := a.db.ExecContext(r.Context(), `
 		UPDATE sticky_notes SET
 		  x = COALESCE($3, x), y = COALESCE($4, y),
 		  text = COALESCE($5, text), color = COALESCE($6, color),
 		  updated_at = now()
 		WHERE user_id = $1 AND id = $2`,
-		uid, r.PathValue("id"), req.X, req.Y, req.Text, req.Color)
+		uid, r.PathValue("id"), x, y, req.Text, req.Color)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Update Failed", err.Error())
 		return

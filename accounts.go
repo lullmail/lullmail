@@ -137,7 +137,7 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 		backfill = *req.BackfillDays
 	}
 
-	cred := storedCredential(mail.Provider(req.Provider), req.Address, req.Password, req.Host, req.Port)
+	cred := storedCredential(mail.Provider(req.Provider), req.Address, req.Username, req.Password, req.Host, req.Port)
 
 	// Validate before storing: dial and list mailboxes. A typo'd host must
 	// not become a credential row that fails on every scheduler tick.
@@ -163,6 +163,17 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 	uid, err := a.userID(r.Context())
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	var exists bool
+	if err := a.db.QueryRowContext(r.Context(),
+		`SELECT EXISTS(SELECT 1 FROM email_accounts WHERE user_id=$1 AND lower(address)=lower($2))`,
+		uid, req.Address).Scan(&exists); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	if exists {
+		writeProblem(w, http.StatusConflict, "Already Connected", "that address is already connected")
 		return
 	}
 	ciphertext, err := sealSecret(a.cfg, req.Password)
@@ -202,13 +213,15 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mirrorCreated = true
-	_, err = tx.ExecContext(r.Context(), `
+	var accID string
+	err = tx.QueryRowContext(r.Context(), `
 		INSERT INTO email_accounts
 		  (user_id, mirror_account_id, provider, address, label, username, host, port,
 		   smtp_host, smtp_port, cred_ciphertext, backfill_days)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		RETURNING id::text`,
 		uid, string(mirrorID), req.Provider, req.Address, req.Label, req.Username,
-		req.Host, req.Port, req.SMTPHost, req.SMTPPort, ciphertext, backfill)
+		req.Host, req.Port, req.SMTPHost, req.SMTPPort, ciphertext, backfill).Scan(&accID)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Insert Failed", err.Error())
 		return
@@ -226,7 +239,7 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 		_ = a.syncAccount(ctx, mail.AccountID(mirrorID))
 	}()
 
-	writeJSON(w, map[string]any{"id": mirrorID, "mailboxes": len(boxes), "with_roles": roleCount})
+	writeJSON(w, map[string]any{"id": accID, "mailboxes": len(boxes), "with_roles": roleCount})
 }
 
 func (a *App) handleAccountItem(w http.ResponseWriter, r *http.Request) {

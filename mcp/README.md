@@ -21,7 +21,7 @@ never its internals, and the main build never compiles it.
     "lullmail": {
       "command": "/usr/local/bin/lullmail-mcp",
       "env": {
-        "LULL_URL": "https://lullmail.com",
+        "LULL_URL": "http://localhost:18081",
         "LULL_AGENT_TOKEN": "lull_..."
       }
     }
@@ -49,9 +49,10 @@ an automatic plain fallback) · `undo_send` · `screener_list` ·
 `board_add_card` / `board_card_done` · `notes_list` / `note_create` /
 `note_update` / `note_delete` · `classify_now`
 
-Not exposed, on purpose: sign-in, passkeys, sessions, TOTP, agent-token
-management, full-account deletion, OAuth browser flows. Agent tokens are
-fenced to mail + work surfaces at the router (`agent.go` in the server).
+Not exposed, on purpose: sign-in, passwords, passkeys, sessions, TOTP,
+agent-token management, mailbox zip export, full-account deletion, OAuth
+browser flows. Agent tokens are fenced to mail + work surfaces at the
+router (`agent.go` in the server).
 
 ## The bulk-import pattern
 
@@ -66,5 +67,5 @@ the whole loop through these tools:
 3. `sync_account`, then `screener_decide` for known senders.
 
 Tokens are scoped: they can manage mailboxes and mail, never sign-in,
-passkeys, sessions, or other tokens. Revoke in Security settings to kill one
-instantly.
+passwords, passkeys, sessions, or other tokens. Revoke in Security settings
+to kill one instantly.

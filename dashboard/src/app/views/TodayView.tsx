@@ -23,7 +23,7 @@ function InlineReply({ thread, onDone }: { thread: BriefThread; onDone: () => vo
     if (!text.trim() || sending) return;
     setSending(true);
     const ok = await sendMail({
-      to: who.email, subject: thread.subject || "", text, replyToId: thread.message_id,
+      to: who.email, subject: thread.subject || "", text, replyToId: thread.message_id, accountId: thread.account,
     });
     setSending(false);
     if (ok) onDone();

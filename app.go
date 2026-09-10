@@ -167,11 +167,14 @@ func (a *App) Token(ctx context.Context, acct mail.AccountID) (mail.Credential, 
 	if err != nil {
 		return mail.Credential{}, fmt.Errorf("stored credential could not be unsealed (was SECRET_KEY changed? reconnect the account): %w", err)
 	}
-	return storedCredential(mail.Provider(provider), address, password, host, port), nil
+	return storedCredential(mail.Provider(provider), address, username, password, host, port), nil
 }
 
-func storedCredential(provider mail.Provider, address, secret, host string, port int) mail.Credential {
-	cred := mail.Credential{Provider: provider, Email: address, Host: host, Port: port}
+func storedCredential(provider mail.Provider, address, username, secret, host string, port int) mail.Credential {
+	if username == "" {
+		username = address
+	}
+	cred := mail.Credential{Provider: provider, Email: address, Username: username, Host: host, Port: port}
 	if provider == mail.ProviderJMAP {
 		cred.AccessToken = secret
 	} else {

@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/neutron-build/neutron/mail"
@@ -20,10 +21,14 @@ func newResolver() mail.Resolver {
 	stock := dialer.New()
 	return func(ctx context.Context, acct mail.AccountID, cred mail.Credential) (mail.Adapter, func(), error) {
 		if cred.Provider == mail.ProviderIMAP && isLoopbackHost(cred.Host) {
+			user := strings.TrimSpace(cred.Username)
+			if user == "" {
+				user = cred.Email
+			}
 			conn, err := imap.Dial(ctx, imap.Config{
 				Host:      cred.Host,
 				Port:      cred.Port,
-				Username:  cred.Email,
+				Username:  user,
 				Password:  cred.Password,
 				Timeout:   30 * time.Second,
 				Plaintext: true,

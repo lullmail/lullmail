@@ -177,7 +177,7 @@ export function SecurityView() {
 
       <section class="settings-section">
         <div class="settings-section-head"><div><h2>Password</h2>
-          <p>{security.password_set ? "Password sign-in is on. Hashed with argon2id on your server." : "Optional password sign-in, hashed with argon2id on your server."}</p></div>
+          <p>{security.password_set ? "Password sign-in is on. Hashed with argon2id on your server." : "Set a password to sign in without a passkey. Hashed with argon2id on your server."}</p></div>
           {security.password_set && <button class="btn btn-quiet-danger btn-sm" type="button" disabled={!!busy || !otherFactors || !pwCurrent} onClick={removePassword} title={!otherFactors ? "Add a passkey or authenticator first" : !pwCurrent ? "Enter the current password" : ""}>Remove</button>}</div>
         <form class="totp-setup" onSubmit={(e) => { e.preventDefault(); savePassword(); }}>
           {security.password_set && (

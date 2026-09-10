@@ -167,6 +167,7 @@ CREATE TABLE IF NOT EXISTS email_accounts (
 ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS retention_days integer NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS email_accounts_user ON email_accounts (user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS email_accounts_user_address ON email_accounts (user_id, lower(address));
 
 -- Board cards (branch experiment): pinned threads and manual notes laid over
 -- the briefing's derived columns. A pin never moves mail — it is a marker on

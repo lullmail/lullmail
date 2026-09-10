@@ -149,6 +149,12 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		outgoing.Cc = ccAddrs
 		outgoing.Bcc = bccAddrs
 		outgoing.Attachments = attachments
+		if len(toAddrs) > 0 {
+			outgoing.To = toAddrs
+		}
+		if strings.TrimSpace(req.Subject) != "" {
+			outgoing.Subject = req.Subject
+		}
 		a.enqueue(w, deliver, outgoing)
 		return
 	}

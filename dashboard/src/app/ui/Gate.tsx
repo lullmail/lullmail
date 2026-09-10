@@ -129,7 +129,7 @@ export function Gate() {
         <div class="gate-brand">Lull Mail</div>
         <h1 id="gate-title">Welcome back</h1>
         <p class="gate-sub">Sign in with your password. Passkeys and recovery codes are under other ways.</p>
-        {(!others || mode === "passkey") && (
+        {!others && (
           <form onSubmit={signInPassword}>
             <label class="sr-only" for="gate-email">Email or name</label>
             <input id="gate-email" type="text" placeholder="Email or name" autocomplete="username" value={email}

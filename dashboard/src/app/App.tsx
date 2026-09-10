@@ -63,7 +63,8 @@ function CurrentView() {
   const route = routeFor(path.value);
   // Nothing connected yet: six empty buckets read as "no mail", which is the
   // wrong answer. Settings still opens so they can actually connect one.
-  if (accountCount.value === 0 && route.kind !== "accounts" && route.kind !== "security") return <Welcome />;
+  if (accountCount.value === 0 && route.kind !== "accounts" && route.kind !== "security" &&
+      route.kind !== "appearance" && route.kind !== "settings-mail" && route.kind !== "settings-home") return <Welcome />;
   switch (route.kind) {
     case "today": return <TodayView />;
     case "board": return <BoardView />;
@@ -104,7 +105,7 @@ function PasskeyNudge() {
     <div class="nudge" role="status">
       <span>
         You signed in with a recovery code.{" "}
-        <a href="/settings/security">Add a passkey on this device</a> so next time is one touch.
+        <a href="/settings/security">Add a password or a passkey</a> so next time is not a one-use code.
       </span>
       <button type="button" onClick={() => {
         passkeyNudgeDismissed.value = true;

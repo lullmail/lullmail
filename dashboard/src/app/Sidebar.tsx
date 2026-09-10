@@ -66,7 +66,7 @@ export function Sidebar() {
           <Item
             key={f.name}
             href={folderPath(f.name)}
-            nav={"folder:" + f.name}
+            nav={"folder:" + f.name.toLowerCase()}
             label={folderLabel(f.name)}
             here={here}
           />

@@ -88,6 +88,9 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		WHERE lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = lower(ea.address)`); err != nil {
 		a.log.Error("correspondent extraction (cc) failed", "err", err)
 	}
+	if err := collect(`SELECT DISTINCT lower(address) FROM email_accounts WHERE user_id = $1`); err != nil {
+		a.log.Error("correspondent extraction (own addresses) failed", "err", err)
+	}
 	if err := collect(`
 		SELECT DISTINCT lower(COALESCE(other.from_addrs, '[]')::json->0->>'email')
 		FROM mail_messages mine
@@ -196,6 +199,13 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 // sender's new mail lands in the Imbox instead of waiting in the Screener.
 // Decisions already made are still honoured, so blocking a sender keeps
 // working and turning screening back on loses nothing.
+func likeContains(q string) string {
+	q = strings.ReplaceAll(q, `\`, `\\`)
+	q = strings.ReplaceAll(q, `%`, `\%`)
+	q = strings.ReplaceAll(q, `_`, `\_`)
+	return "%" + q + "%"
+}
+
 func classifySender(decided, allowed bool, route string, correspondent, historical, screening bool) string {
 	switch {
 	case decided:
@@ -317,7 +327,7 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
 		return
 	}
-	like := "%" + q + "%"
+	like := likeContains(q)
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT m.account_id, m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at,
 		       h.read_at IS NOT NULL AS is_read, m.has_attachment, COALESCE(m.preview,''),
@@ -327,7 +337,7 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
-		WHERE (m.subject ILIKE $2 OR m.from_addrs ILIKE $2 OR m.to_addrs ILIKE $2 OR m.preview ILIKE $2)`+
+		WHERE (m.subject ILIKE $2 ESCAPE '\' OR m.from_addrs ILIKE $2 ESCAPE '\' OR m.to_addrs ILIKE $2 ESCAPE '\' OR m.preview ILIKE $2 ESCAPE '\')`+
 		accountClause(r)+
 		` ORDER BY m.received_at DESC NULLS LAST
 		LIMIT 60`, uid, like)
@@ -384,7 +394,7 @@ func (a *App) handleScreener(w http.ResponseWriter, r *http.Request) {
 		SELECT COALESCE(lower(m.from_addrs::json->0->>'email'), '') AS sender,
 		       count(*) AS waiting,
 		       COALESCE(max(m.received_at)::text, '') AS newest,
-		       COALESCE(max(m.subject), '') AS sample_subject
+		       COALESCE((array_agg(m.subject ORDER BY m.received_at DESC NULLS LAST))[1], '') AS sample_subject
 		FROM hey_messages h
 		JOIN mail_messages m ON m.account_id = h.account_id AND m.id = h.message_id
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = h.user_id

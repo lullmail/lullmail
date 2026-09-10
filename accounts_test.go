@@ -8,7 +8,7 @@ import (
 )
 
 func TestStoredCredentialMapsJMAPSecretToAccessToken(t *testing.T) {
-	cred := storedCredential(mail.ProviderJMAP, "owner@example.com", "api-token", "api.example.com", 443)
+	cred := storedCredential(mail.ProviderJMAP, "owner@example.com", "", "api-token", "api.example.com", 443)
 	if cred.AccessToken != "api-token" {
 		t.Fatalf("AccessToken = %q, want API token", cred.AccessToken)
 	}
@@ -16,9 +16,16 @@ func TestStoredCredentialMapsJMAPSecretToAccessToken(t *testing.T) {
 		t.Fatalf("Password = %q, want empty for JMAP", cred.Password)
 	}
 
-	imap := storedCredential(mail.ProviderIMAP, "owner@example.com", "app-password", "imap.example.com", 993)
+	imap := storedCredential(mail.ProviderIMAP, "owner@example.com", "", "app-password", "imap.example.com", 993)
 	if imap.Password != "app-password" || imap.AccessToken != "" {
 		t.Fatalf("IMAP credential mapped incorrectly: %+v", imap)
+	}
+	if imap.Username != "owner@example.com" {
+		t.Fatalf("empty username should fall back to address, got %q", imap.Username)
+	}
+	named := storedCredential(mail.ProviderIMAP, "owner@example.com", "imap-user", "app-password", "imap.example.com", 993)
+	if named.Username != "imap-user" || named.Email != "owner@example.com" {
+		t.Fatalf("username/email split lost: %+v", named)
 	}
 }
 

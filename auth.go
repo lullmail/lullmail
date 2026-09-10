@@ -1440,7 +1440,7 @@ func (a *App) handlePasswordSet(w http.ResponseWriter, r *http.Request) {
 		}
 		if !ok {
 			a.recordPasswordFailure(lockKey)
-			writeProblem(w, 401, "Current Password Incorrect", "enter the current password to replace it")
+			writeProblem(w, 403, "Current Password Incorrect", "enter the current password to replace it")
 			return
 		}
 	case errors.Is(err, sql.ErrNoRows):
@@ -1505,7 +1505,7 @@ func (a *App) handlePasswordDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
-		writeProblem(w, 401, "Current Password Incorrect", "enter the current password to remove it")
+		writeProblem(w, 403, "Current Password Incorrect", "enter the current password to remove it")
 		return
 	}
 	factors, err := loadLoginFactors(r.Context(), tx, uid)
