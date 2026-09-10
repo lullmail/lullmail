@@ -18,9 +18,13 @@ export interface AuthStatus {
   /** First-run only: where the server believes the browser is, shown so a
    *  wrong proxy header is visible before a passkey is bound to it. */
   detected_origin?: string;
-  /** How this session was created: "passkey" | "recovery" | "totp" |
-   *  "bootstrap". Recovery/TOTP sessions get an add-a-passkey nudge. */
+  /** How this session was created: "passkey" | "password" | "recovery" |
+   *  "totp" | "bootstrap". Only recovery sessions get the add-a-passkey
+   *  nudge — password and TOTP are chosen sign-in methods, not fallbacks. */
   via?: string;
+  /** True when the pinned origin is reachable from the public internet
+   *  (not loopback, LAN, or a Tailnet). Warn-only; nothing is enforced. */
+  exposed?: boolean;
 }
 export const authStatus = signal<AuthStatus | null>(null);
 

@@ -39,6 +39,27 @@ describe("first-run setup", () => {
   });
 });
 
+describe("signed-out gate", () => {
+  it("shows the password form first; passkeys are behind Other ways to sign in", () => {
+    authStatus.value = {
+      configured: true,
+      authenticated: false,
+      email: "",
+      bootstrap_available: false,
+      passkey_supported: true,
+    };
+    render(<Gate />, host);
+
+    expect(host.querySelector<HTMLInputElement>("#gate-email")).not.toBeNull();
+    expect(host.querySelector<HTMLInputElement>("#gate-password")).not.toBeNull();
+    expect(host.textContent).not.toContain("Continue with a passkey");
+
+    act(() => host.querySelector<HTMLButtonElement>(".gate-link")!.click());
+    expect(host.textContent).toContain("Continue with a passkey");
+    expect(host.textContent).toContain("Use a recovery code");
+  });
+});
+
 describe("unreachable server", () => {
   it("names a connection problem instead of echoing the browser's fetch error", async () => {
     const { describeAuthError } = await import("./Gate");

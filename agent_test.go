@@ -19,10 +19,10 @@ func TestAgentScopeFence(t *testing.T) {
 		}
 	}
 	blocked := []string{
-		"/auth/status", "/security", "/security/passkeys/begin",
+		"/auth/status", "/auth/password", "/security", "/security/passkeys/begin",
 		"/security/agent-tokens", "/security/sessions", "/security/totp",
-		"/account", "/push", "/oauth/gmail/start", "/board/../security",
-		"/mail/v1/accounts", "/mail/v1/accounts/a/search",
+		"/security/password", "/account", "/push", "/oauth/gmail/start",
+		"/board/../security", "/mail/v1/accounts", "/mail/v1/accounts/a/search",
 	}
 	for _, path := range blocked {
 		if agentAllowedPath(path) {

@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,6 +45,7 @@ const (
 // nudge fallback sessions toward adding a passkey on the current device.
 const (
 	loginMethodPasskey   = "passkey"
+	loginMethodPassword  = "password"
 	loginMethodRecovery  = "recovery"
 	loginMethodTOTP      = "totp"
 	loginMethodBootstrap = "bootstrap"
@@ -54,7 +56,7 @@ const (
 // fallback logins, so unknown values read as passkey.
 func normalizeLoginMethod(method string) string {
 	switch method {
-	case loginMethodRecovery, loginMethodTOTP, loginMethodBootstrap:
+	case loginMethodPassword, loginMethodRecovery, loginMethodTOTP, loginMethodBootstrap:
 		return method
 	default:
 		return loginMethodPasskey
@@ -268,9 +270,42 @@ func (a *App) mountAuth(mux *http.ServeMux) {
 	mux.HandleFunc("POST /auth/bootstrap/finish", a.handleBootstrapFinish)
 	mux.HandleFunc("POST /auth/login/begin", a.handleLoginBegin)
 	mux.HandleFunc("POST /auth/login/finish", a.handleLoginFinish)
+	mux.HandleFunc("POST /auth/password", a.handlePasswordLogin)
 	mux.HandleFunc("POST /auth/recovery", a.handleRecoveryLogin)
 	mux.HandleFunc("POST /auth/totp", a.handleTOTPLogin)
 	mux.HandleFunc("POST /auth/logout", a.handleLogout)
+}
+
+// publicExposure reports whether the pinned browser origin is reachable from
+// outside private space. Loopback, LAN (RFC 1918), and a Tailnet (CGNAT
+// 100.64/10 addresses or *.ts.net names) read as private; everything else —
+// public DNS names included — reads as exposed. The dashboard turns this into
+// a warning; nothing anywhere enforces on it.
+func publicExposure(publicURL string) bool {
+	if publicURL == "" {
+		return false
+	}
+	u, err := url.Parse(publicURL)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" || strings.HasSuffix(host, ".ts.net") {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return true // a name that is not loopback or Tailnet: assume public
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || isCGNAT(ip) {
+		return false
+	}
+	return true
+}
+
+func isCGNAT(ip net.IP) bool {
+	b := ip.To4()
+	return b != nil && b[0] == 100 && b[1] >= 64 && b[1] <= 127
 }
 
 func (a *App) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
@@ -291,6 +326,9 @@ func (a *App) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		"configured": count > 0, "authenticated": authenticated, "email": email,
 		"bootstrap_available": count == 0 && a.setupTokenValid(),
 		"passkey_supported":   true,
+		// Warn-only exposure signal for the dashboard (D10). Classified here,
+		// once per boot, against the pinned origin — never enforced.
+		"exposed": publicExposure(a.cfg.PublicURL),
 	}
 	if via != "" {
 		status["via"] = via
@@ -574,6 +612,70 @@ func (a *App) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
 	a.clearAuthAttempts(r)
 	a.clearCookie(w, ceremonyCookie)
 	writeJSON(w, map[string]any{"ok": true, "email": user.Email})
+}
+
+// handlePasswordLogin is the default face of sign-in: email + password for a
+// session. Every failure that is not a lockout answers with the SAME 401
+// problem — unknown email, no password set, wrong password — so the endpoint
+// cannot be used to enumerate accounts. Five failures lock the account for
+// fifteen minutes (password.go), answered as 429 with Retry-After.
+func (a *App) handlePasswordLogin(w http.ResponseWriter, r *http.Request) {
+	if !a.allowAuthAttempt(r) {
+		writeProblem(w, 429, "Too Many Attempts", "wait five minutes before trying again")
+		return
+	}
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req) != nil ||
+		strings.TrimSpace(req.Email) == "" || req.Password == "" {
+		writeProblem(w, 400, "Bad Request", "enter your email and password")
+		return
+	}
+	rejected := func() {
+		writeProblem(w, 401, "Sign In Failed", "invalid email or password")
+	}
+	uid, err := a.recoveryUser(r.Context(), req.Email)
+	if err != nil {
+		rejected()
+		return
+	}
+	if remaining := a.passwordLockRemaining(uid); remaining > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(remaining.Seconds())+1))
+		writeProblem(w, 429, "Too Many Attempts",
+			"too many failed attempts — try again in "+(time.Duration(int64(remaining.Seconds())+1)*time.Second).String())
+		return
+	}
+	var encoded string
+	err = a.db.QueryRowContext(r.Context(), `SELECT hash FROM auth_passwords WHERE user_id=$1`, uid).Scan(&encoded)
+	if err == sql.ErrNoRows {
+		// An account without a password is indistinguishable from a wrong
+		// password on purpose; it learns nothing about what is set.
+		rejected()
+		return
+	}
+	if err != nil {
+		writeProblem(w, 500, "Sign In Failed", err.Error())
+		return
+	}
+	ok, err := verifyPassword(encoded, req.Password)
+	if err != nil {
+		writeProblem(w, 500, "Sign In Failed", err.Error())
+		return
+	}
+	if !ok {
+		a.recordPasswordFailure(uid)
+		rejected()
+		return
+	}
+	a.clearPasswordFailures(uid)
+	if err := a.createSession(w, r, uid, loginMethodPassword); err != nil {
+		writeProblem(w, 500, "Session Failed", err.Error())
+		return
+	}
+	a.clearAuthAttempts(r)
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (a *App) storeCeremony(w http.ResponseWriter, ctx context.Context, uid, kind string, session *webauthn.SessionData) error {
@@ -954,11 +1056,13 @@ func (a *App) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	}
 	var totp bool
 	_ = a.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM auth_totp WHERE user_id=$1 AND enabled_at IS NOT NULL)`, uid).Scan(&totp)
+	var passwordSet bool
+	_ = a.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM auth_passwords WHERE user_id=$1)`, uid).Scan(&passwordSet)
 	var recovery int
 	_ = a.db.QueryRowContext(r.Context(), `SELECT count(*) FROM auth_recovery_codes WHERE user_id=$1 AND used_at IS NULL`, uid).Scan(&recovery)
 	var email string
 	_ = a.db.QueryRowContext(r.Context(), `SELECT email FROM users WHERE id=$1`, uid).Scan(&email)
-	writeJSON(w, map[string]any{"email": email, "passkeys": passkeys, "totp_enabled": totp, "recovery_codes_remaining": recovery})
+	writeJSON(w, map[string]any{"email": email, "passkeys": passkeys, "totp_enabled": totp, "password_set": passwordSet, "recovery_codes_remaining": recovery})
 }
 
 // Auth-material mutations lock the owner row first. PostgreSQL holds this
@@ -1089,6 +1193,126 @@ func (a *App) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "TOTP Failed", err.Error())
 		return
 	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handlePasswordSet is the session-gated enrollment/change surface, mirroring
+// handleTOTPBegin's shape. `current` is required whenever a password already
+// exists — a stolen session must not be able to silently replace the
+// credential it is riding on. Agent tokens never get here: the router fence
+// (agent.go) scopes them away from /security before this handler runs.
+func (a *App) handlePasswordSet(w http.ResponseWriter, r *http.Request) {
+	uid, _ := a.userID(r.Context())
+	var req struct {
+		Current string `json:"current"`
+		New     string `json:"new"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req) != nil {
+		writeProblem(w, 400, "Bad Request", "enter the new password")
+		return
+	}
+	if !validPasswordLength(req.New) {
+		writeProblem(w, 422, "Password Too Short", "use at least 8 characters")
+		return
+	}
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeProblem(w, 500, "Password Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+		writeProblem(w, 500, "Password Failed", err.Error())
+		return
+	}
+	var encoded string
+	err = tx.QueryRowContext(r.Context(), `SELECT hash FROM auth_passwords WHERE user_id=$1`, uid).Scan(&encoded)
+	switch {
+	case err == nil:
+		ok, verr := verifyPassword(encoded, req.Current)
+		if verr != nil {
+			writeProblem(w, 500, "Password Failed", verr.Error())
+			return
+		}
+		if !ok {
+			writeProblem(w, 401, "Current Password Incorrect", "enter the current password to replace it")
+			return
+		}
+	case errors.Is(err, sql.ErrNoRows):
+		// First enrollment: no current password to prove.
+	default:
+		writeProblem(w, 500, "Password Failed", err.Error())
+		return
+	}
+	hash, err := hashPassword(req.New)
+	if err != nil {
+		writeProblem(w, 500, "Password Failed", err.Error())
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `INSERT INTO auth_passwords (user_id,hash,updated_at)
+		VALUES ($1,$2,now()) ON CONFLICT (user_id) DO UPDATE SET hash=excluded.hash, updated_at=now()`, uid, hash); err != nil {
+		writeProblem(w, 500, "Password Failed", err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeProblem(w, 500, "Password Failed", err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handlePasswordDelete removes the password — unless it is the last way in.
+// Recovery codes never count: they are one-use escape hatches, not a
+// credential an owner can sign in with tomorrow.
+func (a *App) handlePasswordDelete(w http.ResponseWriter, r *http.Request) {
+	uid, _ := a.userID(r.Context())
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeProblem(w, 500, "Password Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+		writeProblem(w, 500, "Password Failed", err.Error())
+		return
+	}
+	var dummy string
+	err = tx.QueryRowContext(r.Context(), `SELECT hash FROM auth_passwords WHERE user_id=$1`, uid).Scan(&dummy)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeProblem(w, 404, "No Password", "no password is set on this account")
+		return
+	}
+	if err != nil {
+		writeProblem(w, 500, "Password Failed", err.Error())
+		return
+	}
+	var passkeys int
+	if err := tx.QueryRowContext(r.Context(), `SELECT count(*) FROM auth_credentials WHERE user_id=$1`, uid).Scan(&passkeys); err != nil {
+		writeProblem(w, 500, "Password Failed", err.Error())
+		return
+	}
+	var totp bool
+	if err := tx.QueryRowContext(r.Context(),
+		`SELECT EXISTS(SELECT 1 FROM auth_totp WHERE user_id=$1 AND enabled_at IS NOT NULL)`, uid).Scan(&totp); err != nil {
+		writeProblem(w, 500, "Password Failed", err.Error())
+		return
+	}
+	if passkeys == 0 && !totp {
+		writeProblem(w, 409, "Last Credential",
+			"add a passkey or an authenticator before removing the password")
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM auth_passwords WHERE user_id=$1`, uid); err != nil {
+		writeProblem(w, 500, "Password Failed", err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeProblem(w, 500, "Password Failed", err.Error())
+		return
+	}
+	// Removing a credential is the owner saying "something may be
+	// compromised" — same call handlePasskeyDelete makes.
+	a.revokeOtherSessions(r, uid)
 	writeJSON(w, map[string]any{"ok": true})
 }
 

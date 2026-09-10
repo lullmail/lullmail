@@ -35,10 +35,18 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
   last_seen_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL,
   user_agent text NOT NULL DEFAULT '',
-  login_method text CHECK (login_method IN ('passkey','recovery','totp','bootstrap'))
+  login_method text CHECK (login_method IN ('passkey','recovery','totp','bootstrap','password'))
 );
 ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS login_method text
-  CHECK (login_method IN ('passkey','recovery','totp','bootstrap'));
+  CHECK (login_method IN ('passkey','recovery','totp','bootstrap','password'));
+-- 'password' joined the method set after the first release, so the CHECK is
+-- re-converged on every boot: existing rows all satisfy the new set, and the
+-- drop/re-add is what upgrades an old constraint in place. The auto-generated
+-- column-constraint name is stable (<table>_<column>_check), which is what
+-- makes DROP IF EXISTS reliable here.
+ALTER TABLE auth_sessions DROP CONSTRAINT IF EXISTS auth_sessions_login_method_check;
+ALTER TABLE auth_sessions ADD CONSTRAINT auth_sessions_login_method_check
+  CHECK (login_method IN ('passkey','recovery','totp','bootstrap','password'));
 CREATE INDEX IF NOT EXISTS auth_sessions_user ON auth_sessions (user_id, expires_at);
 
 CREATE TABLE IF NOT EXISTS auth_challenges (
@@ -61,6 +69,16 @@ CREATE TABLE IF NOT EXISTS auth_totp (
   user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   secret_ciphertext text NOT NULL,
   enabled_at timestamptz
+);
+
+-- Password credentials, mirroring auth_totp: one row per user, material
+-- server-side, argon2id PHC string in `hash`. Plain hash, not sealed with
+-- SECRET_KEY: argon2 output needs no confidentiality, and keeping it
+-- unsealed means verify never depends on the sealing key surviving.
+CREATE TABLE IF NOT EXISTS auth_passwords (
+  user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  hash text NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS push_subscriptions (

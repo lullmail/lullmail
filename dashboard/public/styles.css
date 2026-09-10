@@ -1199,6 +1199,9 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 .nudge a { color: var(--ink); font-weight: 640; text-underline-offset: 3px; }
 .nudge button { color: var(--ink-3); font-size: var(--t-xs); text-decoration: underline; text-underline-offset: 3px; }
 .nudge button:hover { color: var(--ink); }
+/* Public-origin warning: same quiet line, warmer ground. Warn only. The
+   translucent amber reads on light and dark grounds alike. */
+.nudge-warn { color: var(--ink); background: rgba(191, 138, 22, 0.16); }
 
 /* ---- settings: compact, explicit, and usable on touch ---- */
 .settings-tabs { display: flex; gap: var(--sp-5); border-bottom: 1px solid var(--line); margin: calc(var(--sp-3) * -1) 0 var(--sp-6); }

@@ -91,6 +91,7 @@ func connectApp(cfg *Config) *App {
 		events:        newSyncEvents(),
 		sendq:         newSendQueue(),
 		authAttempts:  map[string]authAttempt{},
+		pwFails:       map[string]passwordFails{},
 		accountStates: map[mail.AccountID]*accountLifecycle{},
 		tokenFromEnv:  cfg.APIToken != "",
 	}
@@ -310,6 +311,8 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	api.HandleFunc("POST /security/totp/begin", a.handleTOTPBegin)
 	api.HandleFunc("POST /security/totp/confirm", a.handleTOTPConfirm)
 	api.HandleFunc("DELETE /security/totp", a.handleTOTPDelete)
+	api.HandleFunc("POST /security/password", a.handlePasswordSet)
+	api.HandleFunc("DELETE /security/password", a.handlePasswordDelete)
 	api.HandleFunc("GET /security/sessions", a.handleSessions)
 	api.HandleFunc("DELETE /security/sessions/{id}", a.handleSessions)
 	a.mountAgentTokens(api)

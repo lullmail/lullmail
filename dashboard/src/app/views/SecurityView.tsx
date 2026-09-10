@@ -8,7 +8,7 @@ import { navigate } from "../lib/router";
 import { clearOfflineData } from "../lib/offline";
 
 interface Passkey { id: string; name: string; created_at: string; last_used_at: string | null }
-interface Security { email: string; passkeys: Passkey[]; totp_enabled: boolean; recovery_codes_remaining: number }
+interface Security { email: string; passkeys: Passkey[]; totp_enabled: boolean; password_set: boolean; recovery_codes_remaining: number }
 interface Session { id: string; created_at: string; last_seen_at: string; expires_at: string; user_agent: string; current: boolean }
 interface PushState { configured: boolean; subscribed: boolean; public_key: string }
 interface AgentToken { id: string; name: string; created_at: string; last_used_at: string | null }
@@ -27,6 +27,8 @@ export function SecurityView() {
   const [codes, setCodes] = useState<string[] | null>(null);
   const [totp, setTotp] = useState<{ secret: string; uri: string } | null>(null);
   const [totpCode, setTotpCode] = useState("");
+  const [pwCurrent, setPwCurrent] = useState("");
+  const [pwNew, setPwNew] = useState("");
   const [confirm, setConfirm] = useState("");
   const [deleting, setDeleting] = useState(false);
   const [push, setPush] = useState<PushState | null>(null);
@@ -89,6 +91,24 @@ export function SecurityView() {
     finally { setBusy(""); }
   };
 
+  const savePassword = async () => {
+    setBusy("password");
+    try {
+      await api("/security/password", { body: security?.password_set ? { current: pwCurrent, new: pwNew } : { new: pwNew } });
+      setPwCurrent(""); setPwNew("");
+      showToast(security?.password_set ? "Password changed" : "Password set"); await load();
+    } catch (e) { report(e, "Could not save password"); }
+    finally { setBusy(""); }
+  };
+
+  const removePassword = async () => {
+    if (!window.confirm("Remove password sign-in? Your other sign-in methods keep working.")) return;
+    setBusy("password");
+    try { await api("/security/password", { method: "DELETE" }); showToast("Password removed"); await load(); }
+    catch (e) { report(e, "Could not remove password"); }
+    finally { setBusy(""); }
+  };
+
   const logout = async () => {
     await authApi("/auth/logout", { method: "POST" }).catch(() => {});
     authed.value = false; await refreshAuth(); navigate("/today");
@@ -145,7 +165,7 @@ export function SecurityView() {
 
   return (
     <>
-      <PageHead kicker="Settings" title="Security" sub={security.email + " · passkeys are primary; recovery stays in your hands."} />
+      <PageHead kicker="Settings" title="Security" sub={security.email + " · password sign-in with passkeys, authenticator, and recovery alongside."} />
       <SettingsTabs here="/settings/security" />
       {loadError && <LoadError title="Some security details may be stale." error={loadError} retry={load} />}
       {mutationError && <div class="settings-callout" role="alert">{mutationError} <button class="btn btn-ghost btn-sm" type="button" onClick={() => setMutationError(null)}>Dismiss</button></div>}
@@ -174,6 +194,29 @@ export function SecurityView() {
           {security.totp_enabled ? <button class="btn btn-quiet-danger btn-sm" type="button" onClick={async () => { try { await api("/security/totp", { method: "DELETE" }); await load(); } catch (e) { report(e, "Could not disable authenticator"); } }}>Disable</button>
             : <button class="btn btn-outline btn-sm" type="button" disabled={!!busy} onClick={beginTOTP}>Set up</button>}</div>
         {totp && <div class="totp-setup"><p>Enter this key in your authenticator app, then verify one code.</p><code>{totp.secret}</code><div class="inline-form"><input value={totpCode} inputMode="numeric" autocomplete="one-time-code" placeholder="6-digit code" onInput={(e) => setTotpCode((e.target as HTMLInputElement).value)} /><button class="btn btn-primary btn-sm" type="button" disabled={totpCode.length < 6 || !!busy} onClick={confirmTOTP}>Verify</button></div></div>}
+      </section>
+
+      <section class="settings-section">
+        <div class="settings-section-head"><div><h2>Password</h2>
+          <p>{security.password_set ? "Password sign-in is on. Hashed with argon2id on your server." : "Optional password sign-in, hashed with argon2id on your server."}</p></div>
+          {security.password_set && <button class="btn btn-quiet-danger btn-sm" type="button" disabled={!!busy} onClick={removePassword}>Remove</button>}</div>
+        <div class="totp-setup">
+          {security.password_set && (
+            <>
+              <p>Enter the current password, then the new one.</p>
+              <label class="sr-only" for="pw-current">Current password</label>
+              <input id="pw-current" type="password" placeholder="Current password" autocomplete="current-password" value={pwCurrent}
+                onInput={(e) => setPwCurrent((e.target as HTMLInputElement).value)} />
+            </>
+          )}
+          <label class="sr-only" for="pw-new">New password</label>
+          <input id="pw-new" type="password" placeholder={security.password_set ? "New password" : "Password"} autocomplete="new-password" value={pwNew}
+            onInput={(e) => setPwNew((e.target as HTMLInputElement).value)} />
+          <div class="inline-form">
+            <button class="btn btn-primary btn-sm" type="button" disabled={busy === "password" || pwNew.length < 8 || (security.password_set && !pwCurrent)}
+              onClick={savePassword}>{busy === "password" ? "Saving…" : security.password_set ? "Change password" : "Set password"}</button>
+          </div>
+        </div>
       </section>
 
       <section class="settings-section">

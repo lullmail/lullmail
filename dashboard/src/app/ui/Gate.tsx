@@ -82,11 +82,23 @@ function GateFan() {
 
 export function Gate() {
   const status = authStatus.value;
+  const [others, setOthers] = useState(false);
   const [mode, setMode] = useState<Mode>("passkey");
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  const signInPassword = async (ev: Event) => {
+    ev.preventDefault(); setBusy(true); setError("");
+    try {
+      await authApi("/auth/password", { body: { email: email.trim(), password } });
+      setPassword("");
+      await refreshAuth();
+    } catch (e) { setError(describeAuthError(e, "Sign-in failed")); }
+    finally { setBusy(false); }
+  };
 
   const signIn = async () => {
     setBusy(true); setError("");
@@ -116,13 +128,29 @@ export function Gate() {
         <GateFan />
         <div class="gate-brand">Lull Mail</div>
         <h1 id="gate-title">Welcome back</h1>
-        <p class="gate-sub">Use a passkey to open your mailbox.</p>
-        {mode === "passkey" ? (
+        <p class="gate-sub">Sign in with your password, or use a passkey.</p>
+        <form onSubmit={signInPassword}>
+          <label class="sr-only" for="gate-email">Account email</label>
+          <input id="gate-email" type="email" placeholder="Email" autocomplete="email username" value={email}
+            onInput={(e) => setEmail((e.target as HTMLInputElement).value)} />
+          <label class="sr-only" for="gate-password">Password</label>
+          <input id="gate-password" type="password" placeholder="Password" autocomplete="current-password" value={password}
+            onInput={(e) => setPassword((e.target as HTMLInputElement).value)} />
+          <button class="btn btn-accent gate-primary" type="submit" disabled={busy || !email.trim() || !password}>
+            {busy ? "Checking…" : "Sign in"}
+          </button>
+        </form>
+        {!others ? (
+          <button class="gate-link" type="button" onClick={() => setOthers(true)}>Other ways to sign in</button>
+        ) : mode === "passkey" ? (
           <>
-            <button class="btn btn-accent gate-primary" type="button" disabled={busy} onClick={signIn}>
+            <button class="btn btn-outline" type="button" disabled={busy} onClick={signIn}>
               {busy ? "Waiting for your device…" : "Continue with a passkey"}
             </button>
-            <button class="gate-link" type="button" onClick={() => setMode("recovery")}>Can't use your passkey?</button>
+            <div class="gate-switch">
+              <button type="button" onClick={() => setMode("recovery")}>Use a recovery code</button>
+              <button type="button" onClick={() => setMode("totp")}>Use an authenticator code</button>
+            </div>
           </>
         ) : (
           <form onSubmit={fallback}>
@@ -143,7 +171,7 @@ export function Gate() {
           </form>
         )}
         {error && <div class="gate-error" role="alert">{error}</div>}
-        <p class="gate-trust">No password to remember. Recovery codes work once.</p>
+        <p class="gate-trust">Passwords are hashed with argon2id on your server. Recovery codes work once.</p>
       </section>
     </div>
   );
@@ -278,7 +306,7 @@ function SetupWizard({ status }: { status: AuthStatus }) {
             </>
           )}
         </div>
-        <p class="gate-trust">No password to remember. Recovery codes work once.</p>
+        <p class="gate-trust">Recovery codes work once. A password can be added later in Security.</p>
       </section>
     </div>
   );

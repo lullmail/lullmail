@@ -32,6 +32,7 @@ type App struct {
 	tokenFromEnv      bool
 	authMu            sync.Mutex
 	authAttempts      map[string]authAttempt
+	pwFails           map[string]passwordFails
 	accountOwnerMu    sync.RWMutex
 	accountStatesMu   sync.Mutex
 	accountStates     map[mail.AccountID]*accountLifecycle

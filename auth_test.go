@@ -100,7 +100,7 @@ func TestPersistSessionReturnsTokenOnlyAfterInsert(t *testing.T) {
 }
 
 func TestLoginMethodConstantsAndSchemaSync(t *testing.T) {
-	for _, m := range []string{loginMethodPasskey, loginMethodRecovery, loginMethodTOTP, loginMethodBootstrap} {
+	for _, m := range []string{loginMethodPasskey, loginMethodPassword, loginMethodRecovery, loginMethodTOTP, loginMethodBootstrap} {
 		if got := normalizeLoginMethod(m); got != m {
 			t.Fatalf("normalizeLoginMethod(%q) = %q", m, got)
 		}
@@ -112,8 +112,19 @@ func TestLoginMethodConstantsAndSchemaSync(t *testing.T) {
 		}
 	}
 	want := "login_method text CHECK (login_method IN ('" +
-		strings.Join([]string{loginMethodPasskey, loginMethodRecovery, loginMethodTOTP, loginMethodBootstrap}, "','") + "'))"
+		strings.Join([]string{loginMethodPasskey, loginMethodRecovery, loginMethodTOTP, loginMethodBootstrap, loginMethodPassword}, "','") + "'))"
 	if !strings.Contains(schemaSQL, want) {
 		t.Fatalf("schema.sql login_method CHECK out of sync with loginMethod* constants; want %q", want)
+	}
+	// Old installs carry the first-release constraint. The drop/re-add pair is
+	// what upgrades it in place; pin that both halves name the same stable
+	// auto-generated constraint and re-add the current method set.
+	drop := "ALTER TABLE auth_sessions DROP CONSTRAINT IF EXISTS auth_sessions_login_method_check"
+	if !strings.Contains(schemaSQL, drop) {
+		t.Fatal("schema.sql is missing the login_method constraint drop for upgrading old installs")
+	}
+	add := "ALTER TABLE auth_sessions ADD CONSTRAINT auth_sessions_login_method_check"
+	if !strings.Contains(schemaSQL, add) {
+		t.Fatal("schema.sql is missing the login_method constraint re-add")
 	}
 }

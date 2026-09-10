@@ -43,10 +43,11 @@ RFC 4155) is a table-stakes feature, not a cancellation flow.
 - Installable PWA with an explicit iOS path, account-bound offline reading,
   resilient local drafts, a conservative replay queue for reversible filing
   actions, and optional private web-push alerts.
-- Recovery-first security: discoverable passkeys with required user
-  verification, multiple-key management, printable one-use recovery codes,
-  optional TOTP, HttpOnly server sessions, revocation, rate limiting, and
-  provable self-serve deletion.
+- Recovery-first security: password sign-in (argon2id, hashed on your
+  server), discoverable passkeys with required user verification,
+  multiple-key management, printable one-use recovery codes, optional TOTP,
+  HttpOnly server sessions, revocation, rate limiting, and provable
+  self-serve deletion.
 
 Standalone and single-owner by design: one owner per install, no multi-user
 tenancy, no campaign-sending infrastructure.
@@ -74,6 +75,29 @@ your first visit and pinned — so behind a reverse proxy, reach the app
 through the final public URL when you run setup. Set the env vars below only
 to override any of this; env always wins. Migrations run automatically at
 boot (`lullmail migrate` runs them by hand).
+
+## Security
+
+Sign-in is password-primary; passkeys, an authenticator (TOTP), and one-use
+recovery codes are opt-in additions, not requirements.
+
+- **Passwords** are hashed with argon2id (m=64 MiB, t=3, p=4, 16-byte salt,
+  PHC-encoded) on your server. Parameters travel inside the stored hash, so
+  future tightening verifies old hashes without a migration. Changing a
+  password requires the current one; removing it is refused while it is the
+  only way in.
+- **Rate limits.** Five failed password attempts lock the account for 15
+  minutes (answered with `Retry-After`); a per-host limiter throttles every
+  auth route. Wrong email and wrong password are indistinguishable in the
+  response, so accounts cannot be enumerated.
+- **Exposure guidance, not enforcement.** The install classifies its pinned
+  origin at boot: loopback, LAN, and Tailnet addresses read as private;
+  anything else shows a passive warning suggesting an authenticator or a
+  strong password. Nothing is ever blocked based on it.
+- **Agent tokens** (`lull_…` Bearer) reach accounts and mail but never the
+  auth or security surface — that boundary is enforced in the router.
+- Removing a credential signs out every other session; deleting the account
+  is explicit, typed-confirmation, and removes every stored secret.
 
 ## Environment
 

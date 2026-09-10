@@ -88,26 +88,50 @@ function columnClass(): string {
   return kind === "board" || kind === "notes" ? "column workspace-column" : "column";
 }
 
-/** A recovery-code or TOTP sign-in means this device has no passkey. One
+/** A recovery-code sign-in means this device has no passkey. One
     quiet line points at the Security page before the user forgets. Dismissal
-    lasts the browser session — a new session can reasonably re-nudge. */
+    lasts the browser session — a new session can reasonably re-nudge.
+    Password and TOTP sign-ins do not nudge: they are chosen methods, not
+    fallbacks (D10). */
 const passkeyNudgeDismissed = signal(
   typeof sessionStorage !== "undefined" && sessionStorage.getItem("es-nudge-off") === "1"
 );
 
 function PasskeyNudge() {
   const via = authStatus.value?.via;
-  if (passkeyNudgeDismissed.value || (via !== "recovery" && via !== "totp")) return null;
-  const method = via === "totp" ? "an authenticator code" : "a recovery code";
+  if (passkeyNudgeDismissed.value || via !== "recovery") return null;
   return (
     <div class="nudge" role="status">
       <span>
-        You signed in with {method}.{" "}
+        You signed in with a recovery code.{" "}
         <a href="/settings/security">Add a passkey on this device</a> so next time is one touch.
       </span>
       <button type="button" onClick={() => {
         passkeyNudgeDismissed.value = true;
         try { sessionStorage.setItem("es-nudge-off", "1"); } catch { /* private mode */ }
+      }}>Dismiss</button>
+    </div>
+  );
+}
+
+/** Passive warning when the install is pinned to a public origin. Classified
+    once by the server at startup (loopback, LAN, and Tailnet read as private).
+    Warn only — never enforce; the server keeps working either way. */
+const exposureDismissed = signal(
+  typeof sessionStorage !== "undefined" && sessionStorage.getItem("es-exposure-off") === "1"
+);
+
+function ExposureBanner() {
+  if (!authStatus.value?.exposed || exposureDismissed.value) return null;
+  return (
+    <div class="nudge nudge-warn" role="status">
+      <span>
+        This Lull Mail is reachable from the public internet.{" "}
+        <a href="/settings/security">Enable an authenticator or keep a strong password</a> in Security.
+      </span>
+      <button type="button" onClick={() => {
+        exposureDismissed.value = true;
+        try { sessionStorage.setItem("es-exposure-off", "1"); } catch { /* private mode */ }
       }}>Dismiss</button>
     </div>
   );
@@ -303,6 +327,7 @@ export default function App() {
       >
         <Topline classic={classic} />
         <PasskeyNudge />
+        <ExposureBanner />
         <Sidebar />
         <div class="list-pane"><div class="column"><Suspense fallback={<RouteSkeleton />}><CurrentView /></Suspense></div></div>
         <PaneSplit />
