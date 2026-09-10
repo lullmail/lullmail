@@ -245,6 +245,8 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleAccountItem(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	switch r.Method {
+	case http.MethodGet:
+		a.getAccountJSON(w, r, id)
 	case http.MethodDelete:
 		a.deleteAccount(w, r, id)
 	case http.MethodPost:
@@ -266,8 +268,47 @@ func (a *App) handleAccountItem(w http.ResponseWriter, r *http.Request) {
 		}
 		writeProblem(w, http.StatusBadRequest, "Unknown Op", "use ?op=sync, ?op=retention, ?op=backfill, or ?op=sync_enabled")
 	default:
-		writeProblem(w, http.StatusMethodNotAllowed, "Method Not Allowed", "use DELETE or POST ?op=sync")
+		writeProblem(w, http.StatusMethodNotAllowed, "Method Not Allowed", "use GET, DELETE, or POST with an ?op=")
 	}
+}
+
+// getAccountJSON returns one account in the same shape as the list, so a
+// caller refreshing a single connection reads what the list would show.
+func (a *App) getAccountJSON(w http.ResponseWriter, r *http.Request, id string) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	var acc accountJSON
+	var lastSync, lastErr string
+	err = a.db.QueryRowContext(r.Context(), `
+		SELECT ea.id, ea.provider, ea.address, ea.label, ea.backfill_days, ea.retention_days, ea.sync_enabled,
+		       COALESCE(ea.last_sync_at::text,''), COALESCE(ea.last_error,''),
+		       (SELECT count(*) FROM mail_messages m WHERE m.account_id = ea.mirror_account_id),
+		       (SELECT count(*) FROM hey_messages h
+		         JOIN mail_messages m ON m.account_id = h.account_id AND m.id = h.message_id
+		          AND m.account_id = ea.mirror_account_id
+		         WHERE h.user_id = ea.user_id AND h.bucket = 'screener')
+		FROM email_accounts ea
+		WHERE ea.user_id = $1 AND ea.id::text = $2`, uid, id).
+		Scan(&acc.ID, &acc.Provider, &acc.Address, &acc.Label, &acc.BackfillDays, &acc.RetentionDays, &acc.SyncEnabled,
+			&lastSync, &lastErr, &acc.MessageCount, &acc.ScreenerCount)
+	if err == sql.ErrNoRows {
+		writeProblem(w, http.StatusNotFound, "Not Found", "no such account")
+		return
+	}
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	if lastSync != "" {
+		acc.LastSyncAt = &lastSync
+	}
+	if lastErr != "" {
+		acc.LastError = &lastErr
+	}
+	writeJSON(w, acc)
 }
 
 // updateSyncEnabled flips the background-sync pause. Manual ?op=sync stays
@@ -393,6 +434,7 @@ func (a *App) applyRetention(ctx context.Context, uid string) error {
 		policies = append(policies, p)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return err
 	}
 	rows.Close()

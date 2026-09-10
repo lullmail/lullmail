@@ -47,6 +47,7 @@ func (a *App) handlePersonalExport(w http.ResponseWriter, r *http.Request) {
 		notes = append(notes, n)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return
 	}
@@ -76,6 +77,7 @@ func (a *App) handlePersonalExport(w http.ResponseWriter, r *http.Request) {
 		cards = append(cards, c)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return
 	}

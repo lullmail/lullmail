@@ -290,6 +290,7 @@ func (a *App) exportPlan(ctx context.Context, account nmail.AccountID) ([]export
 		boxes = append(boxes, box)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return nil, nil, err
 	}
 	if err := rows.Close(); err != nil {

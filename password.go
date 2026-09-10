@@ -3,7 +3,7 @@ package main
 // Password credentials: argon2id, PHC-encoded, with parameters carried in the
 // stored string so a future parameter change verifies old hashes without a
 // migration. Failed sign-ins lock the account (not the host) — five failures
-// in a row lock it for fifteen minutes, per the D10 contract in STATUS.md.
+// in a row lock it for fifteen minutes.
 
 import (
 	"crypto/subtle"

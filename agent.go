@@ -8,7 +8,6 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -131,8 +130,7 @@ func (a *App) requireAgent(next http.Handler) http.Handler {
 		// The token's owner is the authenticated principal for the scoped
 		// handlers — otherwise every agent request silently acts as the
 		// installation's first user instead of the user who minted it.
-		ctx := contextWithAgent(r.Context(), uid)
-		ctx = context.WithValue(ctx, authContextKey{}, uid)
+		ctx := context.WithValue(r.Context(), authContextKey{}, uid)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -215,9 +213,4 @@ func (a *App) handleAgentTokenDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
-}
-
-// constantTimeAgentTokenCompare exists so tests can pin the prefix decision.
-func constantTimeAgentTokenCompare(got, want string) bool {
-	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }

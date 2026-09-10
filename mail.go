@@ -369,6 +369,12 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 		writeJSON(w, map[string]any{"ok": true})
 	})
 
+	// Unknown API paths answer RFC 7807 like every other API error, rather
+	// than falling through to the dashboard's HTML 404.
+	api.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		writeProblem(w, http.StatusNotFound, "Not Found", "no such API route")
+	})
+
 	// Auth ceremony/status routes are public; all product data is session
 	// protected. The bootstrap token stops working after the first credential.
 	// Agent Bearer tokens enter through requireAgent, which additionally

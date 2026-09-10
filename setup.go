@@ -112,14 +112,6 @@ func writePrivateFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o600)
 }
 
-// The stored browser origin survives restarts so passkeys (bound to the
-// WebAuthn RP ID) keep working without PUBLIC_URL being set.
-func storeSetting(db *sql.DB, key, value string) error {
-	_, err := db.Exec(`INSERT INTO app_settings (key, value) VALUES ($1,$2)
-		ON CONFLICT (key) DO UPDATE SET value=excluded.value`, key, value)
-	return err
-}
-
 func loadSetting(db *sql.DB, key string) (string, error) {
 	var value string
 	err := db.QueryRow(`SELECT value FROM app_settings WHERE key=$1`, key).Scan(&value)

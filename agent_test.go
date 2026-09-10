@@ -33,13 +33,17 @@ func TestAgentScopeFence(t *testing.T) {
 }
 
 func TestAgentTokenEntersThroughPrefix(t *testing.T) {
-	// Only es_-prefixed Bearer values take the agent path; anything else
-	// (sessions, the bootstrap token) falls through to the session handler.
-	req := httptest.NewRequest(http.MethodGet, "/api/accounts", nil)
-	req.Header.Set("Authorization", "Bearer es_something")
-	if !hasAgentBearer(req) {
-		t.Fatal("es_ bearer not detected")
+	// Agent-prefixed Bearers (lull_ and the pre-rename es_) take the agent
+	// path; anything else (sessions, the bootstrap token) falls through to
+	// the session handler.
+	for _, prefix := range []string{"lull_", "es_"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/accounts", nil)
+		req.Header.Set("Authorization", "Bearer "+prefix+"something")
+		if !hasAgentBearer(req) {
+			t.Fatalf("%s bearer not detected", prefix)
+		}
 	}
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts", nil)
 	req.Header.Set("Authorization", "Bearer qxDNXub8-setup-token")
 	if hasAgentBearer(req) {
 		t.Fatal("non-agent bearer took the agent path")
@@ -47,15 +51,6 @@ func TestAgentTokenEntersThroughPrefix(t *testing.T) {
 	req.Header.Del("Authorization")
 	if hasAgentBearer(req) {
 		t.Fatal("missing bearer took the agent path")
-	}
-}
-
-func TestConstantTimeAgentTokenCompare(t *testing.T) {
-	if !constantTimeAgentTokenCompare("es_a", "es_a") {
-		t.Fatal("equal tokens did not match")
-	}
-	if constantTimeAgentTokenCompare("es_a", "es_b") {
-		t.Fatal("different tokens matched")
 	}
 }
 

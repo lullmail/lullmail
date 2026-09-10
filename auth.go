@@ -65,12 +65,6 @@ func normalizeLoginMethod(method string) string {
 
 type authContextKey struct{}
 type sessionContextKey struct{}
-type agentContextKey struct{}
-
-// contextWithAgent stamps an agent-token identity into a request context.
-func contextWithAgent(ctx context.Context, uid string) context.Context {
-	return context.WithValue(ctx, agentContextKey{}, uid)
-}
 
 type authAttempt struct {
 	Window time.Time

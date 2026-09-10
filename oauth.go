@@ -60,6 +60,10 @@ func (a *App) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	if provider == "microsoft" {
 		provider = "graph"
 	}
+	if provider != "gmail" && provider != "graph" {
+		writeProblem(w, http.StatusNotFound, "Unknown Provider", "provider must be google or microsoft")
+		return
+	}
 	config, err := a.oauthConfig(provider)
 	if err != nil {
 		writeProblem(w, 503, "OAuth Not Configured", err.Error())
@@ -105,24 +109,30 @@ func (a *App) handleOAuthCallback(w http.ResponseWriter, r *http.Request, provid
 	}
 	token, err := config.Exchange(r.Context(), code, oauth2.VerifierOption(verifier))
 	if err != nil {
-		writeProblem(w, 502, "OAuth Exchange Failed", err.Error())
+		// A public route: the upstream exchange error is logged, not handed
+		// to the browser.
+		a.log.Error("oauth exchange failed", "provider", provider, "err", err)
+		writeProblem(w, http.StatusBadGateway, "OAuth Exchange Failed", "the provider rejected the sign-in; start the connection again")
 		return
 	}
 	email, label, err := oauthIdentity(r.Context(), provider, config.Client(r.Context(), token))
 	if err != nil {
-		writeProblem(w, 502, "Identity Failed", err.Error())
+		a.log.Error("oauth identity failed", "provider", provider, "err", err)
+		writeProblem(w, http.StatusBadGateway, "Identity Failed", "the provider did not return a usable identity; start the connection again")
 		return
 	}
 	cred := mail.Credential{Provider: mail.Provider(provider), Email: email, AccessToken: token.AccessToken}
 	adapter, release, err := newResolver()(r.Context(), "verify", cred)
 	if err != nil {
-		writeProblem(w, 502, "Connect Failed", err.Error())
+		a.log.Error("oauth connect failed", "provider", provider, "err", err)
+		writeProblem(w, http.StatusBadGateway, "Connect Failed", "could not reach the mailbox; start the connection again")
 		return
 	}
 	boxes, err := adapter.Mailboxes(r.Context())
 	release()
 	if err != nil {
-		writeProblem(w, 502, "Mailboxes Failed", err.Error())
+		a.log.Error("oauth mailbox listing failed", "provider", provider, "err", err)
+		writeProblem(w, http.StatusBadGateway, "Mailboxes Failed", "the mailbox did not answer; start the connection again")
 		return
 	}
 	raw, _ := json.Marshal(token)
@@ -240,8 +250,6 @@ func (a *App) oauthToken(ctx context.Context, provider, account, address, sealed
 	}
 	return mail.Credential{Provider: mail.Provider(provider), Email: address, AccessToken: fresh.AccessToken}, nil
 }
-
-func safeHeader(value string) string { return strings.NewReplacer("\r", " ", "\n", " ").Replace(value) }
 
 func (a *App) sendOAuth(ctx context.Context, provider, account string, out *mail.Outgoing) error {
 	cred, err := a.Token(ctx, mail.AccountID(account))
