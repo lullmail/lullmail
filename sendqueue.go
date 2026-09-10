@@ -297,9 +297,52 @@ func (a *App) deliveryFor(ctx context.Context, account mail.AccountID) (deliverF
 		return nil, mail.Address{}, false
 	}
 	return func(ctx context.Context, outgoing *mail.Outgoing) error {
-		_, err := sender.Send(ctx, outgoing)
-		return err
+		_, raw, err := sender.Send(ctx, outgoing)
+		if err != nil {
+			return err
+		}
+		a.fileSent(ctx, account, raw)
+		return nil
 	}, from, true
+}
+
+// fileSent appends the exact submitted bytes to the provider's Sent mailbox.
+// Without it, mail sent from here never reaches the mirror, so anyone the
+// owner writes to first stays an unknown sender and keeps hitting the
+// Screener. Gmail and Graph never come down this path — their send APIs keep
+// the sent copy themselves. Filing is best-effort: the message is already
+// delivered, so a failure here is logged, never surfaced as a send failure.
+func (a *App) fileSent(ctx context.Context, account mail.AccountID, raw []byte) {
+	var box string
+	err := a.db.QueryRowContext(ctx,
+		`SELECT id FROM mail_mailboxes WHERE account_id=$1 AND role='sent' LIMIT 1`,
+		string(account)).Scan(&box)
+	if err != nil {
+		a.log.Warn("sent copy not filed: no sent mailbox known for account", "account", account, "err", err)
+		return
+	}
+	cred, err := a.Token(ctx, account)
+	if err != nil {
+		a.log.Warn("sent copy not filed: credential unavailable", "account", account, "err", err)
+		return
+	}
+	adapter, release, err := a.accountResolver()(ctx, account, cred)
+	if err != nil {
+		a.log.Warn("sent copy not filed: connect failed", "account", account, "err", err)
+		return
+	}
+	defer release()
+	appender, ok := adapter.(mail.Appender)
+	if !ok {
+		return
+	}
+	if err := appender.Append(ctx, mail.MailboxID(box), raw); err != nil {
+		a.log.Warn("sent copy not filed", "account", account, "mailbox", box, "err", err)
+		return
+	}
+	// The mirror only sees the appended copy when the mailbox next syncs;
+	// wake the scheduler so the thread completes within seconds.
+	a.sched.Wake(account)
 }
 
 func (a *App) enqueue(w http.ResponseWriter, deliver deliverFunc, outgoing *mail.Outgoing) {
