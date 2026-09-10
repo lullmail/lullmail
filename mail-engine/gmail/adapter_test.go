@@ -237,7 +237,7 @@ func TestIncrementalHistoryPaginationPreservesTokenAndDefersCursor(t *testing.T)
 	}))
 	defer server.Close()
 
-	adapter, err := New(context.Background(), option.WithEndpoint(server.URL+"/"), option.WithoutAuthentication())
+	adapter, err := New(context.Background(), t.Name(), option.WithEndpoint(server.URL+"/"), option.WithoutAuthentication())
 	if err != nil {
 		t.Fatal(err)
 	}
