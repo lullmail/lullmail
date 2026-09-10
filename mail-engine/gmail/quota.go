@@ -117,11 +117,14 @@ func (b *budget) wait(ctx context.Context, units int) error {
 
 // Throttle retries follow Google's recommendation: truncated exponential
 // backoff with up to a second of jitter, then give up and let the scheduler
-// back the whole account off.
+// back the whole account off. Six attempts (1+2+4+8+16+32 s) outlast a full
+// quota minute on purpose: the budget lives in process memory, so a restart
+// forgets the minute before while Google remembers it, and the first page
+// after a restart should wait that minute out rather than be thrown away.
 var (
 	retryBase     = time.Second
 	retryMax      = 32 * time.Second
-	retryAttempts = 5
+	retryAttempts = 6
 )
 
 // call spends units from the account's budget, runs the request, and waits
