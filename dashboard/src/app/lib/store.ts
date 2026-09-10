@@ -36,11 +36,6 @@ export const theme = signal<Theme>(
     : ((document.documentElement.getAttribute("data-theme") as Theme) || "light")
 );
 
-export function toggleTheme() {
-  const next = THEMES[(THEMES.indexOf(theme.value) + 1) % THEMES.length];
-  setTheme(next);
-}
-
 export function setTheme(next: Theme) {
   theme.value = next;
   document.documentElement.setAttribute("data-theme", next);
@@ -541,6 +536,9 @@ function restoreDrafts() {
     or discarded, and the Compose button keeps counting them. */
 export const composeOpen = signal(false);
 
+/** Send undo window in seconds, as the server last reported it. */
+export const undoSeconds = signal(5);
+
 export function openCompose(seed: Partial<ComposeState> = {}) {
   if (seed.replyToId || seed.to) {
     pushDraft(seed);
@@ -620,7 +618,3 @@ export const overlayOpen = computed(
 /* ---- list-column search ---- */
 
 export const query = signal<string>("");
-
-/* ---- sync banner ---- */
-
-export const syncNote = signal<string>("");

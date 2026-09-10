@@ -3,7 +3,7 @@
 // the same place instead of two rival result views.
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { api } from "../lib/api";
-import { accountQS, layout, palette, query, theme, toggleLayout } from "../lib/store";
+import { accountQS, layout, palette, query, toggleLayout } from "../lib/store";
 import { openThread } from "../lib/actions";
 import { navigate } from "../lib/router";
 import { fmtDate, splitFrom } from "../lib/fmt";
@@ -162,7 +162,7 @@ export function Palette() {
       });
     }
     return out;
-  }, [q, folder, folderRows, mailboxes, recent, theme.value, layout.value]);
+  }, [q, folder, folderRows, mailboxes, recent, layout.value]);
 
   const flat = sections.flatMap((s) => s.items);
   useEffect(() => { setCursor(0); }, [q, folder]);

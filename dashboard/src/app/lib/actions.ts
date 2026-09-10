@@ -7,7 +7,7 @@
 import { api, ApiError, clearMemoryCache } from "./api";
 import type { BoardCard, Bucket, Counts, ListBucket, Message, Row, StickyNote } from "./types";
 import {
-  accountCount, accountFilter, accountQS, accounts, closeReader, counts, list, type Mailbox, mailboxes, openCompose, reader, rememberListScroll, resetSelection, screeningEnabled, setAccountFilter, showError, showToast,
+  accountCount, accountFilter, accountQS, accounts, closeReader, counts, list, type Mailbox, mailboxes, openCompose, reader, rememberListScroll, resetSelection, screeningEnabled, setAccountFilter, showError, showToast, undoSeconds,
 } from "./store";
 
 /** The one place bucket names are written. Storage values are unchanged. */
@@ -412,7 +412,7 @@ export interface SendInput {
 
 export async function sendMail(input: SendInput): Promise<boolean> {
   try {
-    const res = await api<{ queued: string }>("/send", {
+    const res = await api<{ queued: string; undo_seconds: number }>("/send", {
       body: {
         to: input.to,
         cc: input.cc || "",
@@ -429,8 +429,10 @@ export async function sendMail(input: SendInput): Promise<boolean> {
         })),
       },
     });
+    const window = Math.max(1, res.undo_seconds || 5);
+    undoSeconds.value = window;
     showToast(
-      "Sending in 5s",
+      `Sending in ${window}s`,
       async () => {
         try {
           await api("/outbox/" + encodeURIComponent(res.queued), { method: "DELETE" });
@@ -448,7 +450,7 @@ export async function sendMail(input: SendInput): Promise<boolean> {
           fail(e, "Too late to cancel");
         }
       },
-      5500
+      window * 1000 + 500
     );
     return true;
   } catch (e) {

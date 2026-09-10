@@ -1032,7 +1032,6 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
   -webkit-backdrop-filter: blur(3px);
   animation: fadein 0.12s ease;
 }
-.veil-mid { align-items: center; padding-top: var(--sp-5); }
 
 .panel {
   display: flex; flex-direction: column; width: 100%; max-width: 620px;
@@ -1433,7 +1432,6 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
   border-right: 1px solid var(--line);
 }
 .sidebar nav { display: flex; flex-direction: column; gap: 1px; height: 100%; }
-.side-spacer { margin-top: auto; }
 .side-label {
   padding: var(--sp-5) var(--sp-3) var(--sp-1);
   font-size: 11px; font-weight: 760; letter-spacing: 0.14em;
@@ -1723,7 +1721,7 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 .notes-topline .btn { flex: none; margin-bottom: var(--sp-6); }
 
 .canvas-frame { margin-top: var(--sp-4); }
-.canvas-error, .canvas-hint { color: var(--ink-3); font-size: var(--t-md); }
+.canvas-hint { color: var(--ink-3); font-size: var(--t-md); }
 .note-canvas {
   height: min(74vh, 920px);
   overflow: auto; position: relative;

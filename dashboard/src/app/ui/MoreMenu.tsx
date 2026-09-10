@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { layout, shortcuts, theme, toggleLayout, toggleTheme } from "../lib/store";
+import { layout, shortcuts, theme, toggleLayout } from "../lib/store";
 import { navigate } from "../lib/router";
 import { Icon } from "./Icon";
 

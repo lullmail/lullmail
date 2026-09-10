@@ -12,10 +12,6 @@ export function Avatar({ email, name, size }: { email: string; name?: string; si
   );
 }
 
-export function Kbd({ children }: { children: ComponentChildren }) {
-  return <span class="kbd">{children}</span>;
-}
-
 export function PageHead({ kicker, title, sub }: { kicker?: string; title: string; sub?: string }) {
   return (
     <div class="page-head">

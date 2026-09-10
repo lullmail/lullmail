@@ -1,7 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { api, download } from "../lib/api";
 import { useLoad } from "../lib/useLoad";
-import { setList, showError, showToast, syncNote } from "../lib/store";
+import { setList, showError, showToast } from "../lib/store";
 import { refreshAccounts, refreshCounts } from "../lib/actions";
 import type { Account } from "../lib/types";
 import { countOf, fmtDate } from "../lib/fmt";
@@ -15,13 +15,11 @@ function AccountCard({ account, onChange }: { account: Account; onChange: () => 
 
   const sync = async () => {
     setBusy("sync");
-    syncNote.value = "Syncing " + account.address + "…";
     try {
       await api("/accounts/" + encodeURIComponent(account.id) + "?op=sync", { method: "POST" });
       showToast("Sync running");
-      setTimeout(() => { syncNote.value = ""; onChange(); refreshCounts(); }, 4000);
+      setTimeout(() => { onChange(); refreshCounts(); }, 4000);
     } catch (e) {
-      syncNote.value = "";
       showError(e instanceof Error ? e.message : "Sync failed");
     } finally {
       setBusy(null);

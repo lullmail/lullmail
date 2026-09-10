@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { accounts, closeCompose, compose, cycleDraft, draftIndex, draftStack, newDraft, retireDraft, showToast, updateDraft, type ComposeState } from "../lib/store";
+import { accounts, closeCompose, compose, cycleDraft, draftIndex, draftStack, newDraft, retireDraft, showToast, undoSeconds, updateDraft, type ComposeState } from "../lib/store";
 import { sendMail, type SendAttachment } from "../lib/actions";
 import { clearDraftAttachments, loadDraftAttachments, saveDraftAttachments } from "../lib/offline";
 
@@ -230,7 +230,7 @@ function DraftForm({ seed }: { seed: ComposeState }) {
         )}
       </div>
       <div class="compose-btns">
-        <span class="hint"><span class="kbd">⌘↵</span> send · <span class="kbd">Esc</span> park · <span class="kbd">c</span> new draft · 5s to undo</span>
+        <span class="hint"><span class="kbd">⌘↵</span> send · <span class="kbd">Esc</span> park · <span class="kbd">c</span> new draft · {undoSeconds}s to undo</span>
         <button class="btn btn-ghost btn-sm" type="button" onClick={() => { localStorage.removeItem(draftKey); void clearDraftAttachments(seed.id); retireDraft(seed.id); }}>Discard</button>
         <button class="btn btn-accent" type="button" disabled={!to.trim() || busy} onClick={send}>
           {busy ? "Sending…" : "Send"}
