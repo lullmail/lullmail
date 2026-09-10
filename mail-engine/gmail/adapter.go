@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -29,23 +28,26 @@ import (
 
 // Adapter is a Gmail client bound to one account.
 type Adapter struct {
-	svc *gmail.Service
+	svc    *gmail.Service
+	budget *budget
 
 	// user is always "me" in practice; the API keys off the token.
 	user string
 }
 
-// New wraps an authenticated Gmail service.
+// New wraps an authenticated Gmail service. account keys the quota budget
+// and must be stable for the mailbox across runs: Google meters the user,
+// not the connection.
 //
 // The caller supplies the token source, so refresh, storage, and revocation
 // stay outside this package — x/oauth2 already handles refresh correctly and
 // reimplementing it here would only add a second thing to get wrong.
-func New(ctx context.Context, opts ...option.ClientOption) (*Adapter, error) {
+func New(ctx context.Context, account string, opts ...option.ClientOption) (*Adapter, error) {
 	svc, err := gmail.NewService(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("gmail: new service: %w", err)
 	}
-	return &Adapter{svc: svc, user: "me"}, nil
+	return &Adapter{svc: svc, budget: budgetFor(account), user: "me"}, nil
 }
 
 func (a *Adapter) Provider() mail.Provider { return mail.ProviderGmail }
@@ -83,9 +85,13 @@ func classify(err error) error {
 // Mailboxes lists labels. Gmail models folders as labels, and a message can
 // carry several at once.
 func (a *Adapter) Mailboxes(ctx context.Context) ([]mail.Mailbox, error) {
-	res, err := a.svc.Users.Labels.List(a.user).Context(ctx).Do()
+	var res *gmail.ListLabelsResponse
+	err := a.call(ctx, costLabelsList, func() (err error) {
+		res, err = a.svc.Users.Labels.List(a.user).Context(ctx).Do()
+		return err
+	})
 	if err != nil {
-		return nil, classify(err)
+		return nil, err
 	}
 
 	boxes := make([]mail.Mailbox, 0, len(res.Labels))
@@ -126,9 +132,13 @@ func roleFrom(labelID string) mail.Role {
 // reset, which is the same recovery path an IMAP UIDVALIDITY change takes.
 func (a *Adapter) Sync(ctx context.Context, box mail.MailboxID, cur mail.Cursor) (*mail.Changes, error) {
 	if cur == "" {
-		profile, err := a.svc.Users.GetProfile(a.user).Context(ctx).Do()
+		var profile *gmail.Profile
+		err := a.call(ctx, costGetProfile, func() (err error) {
+			profile, err = a.svc.Users.GetProfile(a.user).Context(ctx).Do()
+			return err
+		})
 		if err != nil {
-			return nil, classify(err)
+			return nil, err
 		}
 		return a.initialSync(ctx, box, "", profile.HistoryId)
 	}
@@ -157,13 +167,17 @@ func (a *Adapter) Sync(ctx context.Context, box mail.MailboxID, cur mail.Cursor)
 		call = call.PageToken(pageToken)
 	}
 
-	res, err := call.Context(ctx).Do()
+	var res *gmail.ListHistoryResponse
+	err = a.call(ctx, costHistoryList, func() (err error) {
+		res, err = call.Context(ctx).Do()
+		return err
+	})
+	if errors.Is(err, mail.ErrNotFound) {
+		// The history window has moved past this cursor.
+		return &mail.Changes{Reset: true}, nil
+	}
 	if err != nil {
-		if errors.Is(classify(err), mail.ErrNotFound) {
-			// The history window has moved past this cursor.
-			return &mail.Changes{Reset: true}, nil
-		}
-		return nil, classify(err)
+		return nil, err
 	}
 
 	changes := &mail.Changes{More: res.NextPageToken != ""}
@@ -219,6 +233,12 @@ func (a *Adapter) Sync(ctx context.Context, box mail.MailboxID, cur mail.Cursor)
 // initialSync enumerates one label page. historyID is captured before the
 // first list request, so changes arriving while a large import paginates are
 // replayed rather than skipped when the final page becomes incremental.
+//
+// The page carries bare IDs and leaves the envelope fetch to the engine,
+// which skips messages the mirror already holds. That matters for Gmail
+// specifically: a message appears under every label it carries, and one
+// metadata fetch returns all of them, so fetching here would pay for each
+// message once per label.
 func (a *Adapter) initialSync(ctx context.Context, box mail.MailboxID, pageToken string, historyID uint64) (*mail.Changes, error) {
 	call := a.svc.Users.Messages.List(a.user).
 		LabelIds(string(box)).
@@ -226,17 +246,11 @@ func (a *Adapter) initialSync(ctx context.Context, box mail.MailboxID, pageToken
 	if pageToken != "" {
 		call = call.PageToken(pageToken)
 	}
-	res, err := call.Context(ctx).Do()
-	if err != nil {
-		return nil, classify(err)
-	}
-
-	ids := make([]mail.MessageID, 0, len(res.Messages))
-	for _, m := range res.Messages {
-		ids = append(ids, mail.NativeMessageID(mail.ProviderGmail, m.Id))
-	}
-
-	envs, err := a.Envelopes(ctx, ids)
+	var res *gmail.ListMessagesResponse
+	err := a.call(ctx, costMessagesList, func() (err error) {
+		res, err = call.Context(ctx).Do()
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -251,10 +265,9 @@ func (a *Adapter) initialSync(ctx context.Context, box mail.MailboxID, pageToken
 	} else {
 		changes.Next = mail.Cursor(strconv.FormatUint(historyID, 10))
 	}
-	for i := range envs {
-		e := envs[i]
+	for _, m := range res.Messages {
 		changes.Changes = append(changes.Changes, mail.Change{
-			Kind: mail.ChangeCreated, ID: e.ID, Envelope: &e,
+			Kind: mail.ChangeCreated, ID: mail.NativeMessageID(mail.ProviderGmail, m.Id),
 		})
 	}
 	return changes, nil
@@ -312,22 +325,26 @@ func decodeHistoryCursor(cur mail.Cursor) (string, uint64, error) {
 	return state.Page, state.Start, nil
 }
 
-// Envelopes fetches message metadata.
+// Envelopes fetches message metadata, one call per message: the Gmail API
+// has no bulk metadata read, and each call costs the same 20 units whatever
+// format it asks for. format=metadata is chosen for payload size, not quota.
 func (a *Adapter) Envelopes(ctx context.Context, ids []mail.MessageID) ([]mail.Envelope, error) {
 	out := make([]mail.Envelope, 0, len(ids))
 	for _, id := range ids {
-		// format=metadata returns headers and labels without body content,
-		// which is all an envelope needs and a fraction of the quota cost.
-		m, err := a.svc.Users.Messages.Get(a.user, nativeID(id)).
-			Format("metadata").
-			MetadataHeaders("From", "To", "Cc", "Bcc", "Reply-To",
-				"Subject", "Date", "Message-ID", "In-Reply-To", "References").
-			Context(ctx).Do()
+		var m *gmail.Message
+		err := a.call(ctx, costMessagesGet, func() (err error) {
+			m, err = a.svc.Users.Messages.Get(a.user, nativeID(id)).
+				Format("metadata").
+				MetadataHeaders("From", "To", "Cc", "Bcc", "Reply-To",
+					"Subject", "Date", "Message-ID", "In-Reply-To", "References").
+				Context(ctx).Do()
+			return err
+		})
 		if err != nil {
-			if errors.Is(classify(err), mail.ErrNotFound) {
+			if errors.Is(err, mail.ErrNotFound) {
 				continue
 			}
-			return nil, classify(err)
+			return nil, err
 		}
 		out = append(out, toEnvelope(m))
 	}
@@ -443,125 +460,6 @@ func parseAddrs(header string) []mail.Address {
 	return out
 }
 
-// Body fetches and decodes a message body.
-func (a *Adapter) Body(ctx context.Context, id mail.MessageID) (*mail.Body, error) {
-	m, err := a.svc.Users.Messages.Get(a.user, nativeID(id)).
-		Format("full").Context(ctx).Do()
-	if err != nil {
-		return nil, classify(err)
-	}
-
-	body := &mail.Body{MessageID: id}
-	if m.Payload != nil {
-		collectParts(m.Payload, body)
-	}
-	return body, nil
-}
-
-// collectParts walks the MIME tree, decoding text and cataloguing the rest.
-func collectParts(p *gmail.MessagePart, body *mail.Body) {
-	switch {
-	case strings.HasPrefix(p.MimeType, "multipart/"):
-		for _, child := range p.Parts {
-			collectParts(child, body)
-		}
-		return
-	case p.MimeType == "text/plain" && p.Filename == "":
-		body.Text += decodeBody(p)
-	case p.MimeType == "text/html" && p.Filename == "":
-		body.HTML += decodeBody(p)
-	}
-
-	if p.Filename != "" || p.Body != nil && p.Body.AttachmentId != "" {
-		disposition := "attachment"
-		var cid string
-		for _, h := range p.Headers {
-			if strings.EqualFold(h.Name, "Content-ID") {
-				cid = strings.Trim(h.Value, "<>")
-				disposition = "inline"
-			}
-		}
-		var size int64
-		if p.Body != nil {
-			size = p.Body.Size
-		}
-		body.Parts = append(body.Parts, mail.BodyPart{
-			PartID:      p.PartId,
-			Type:        p.MimeType,
-			Filename:    p.Filename,
-			Disposition: disposition,
-			Size:        size,
-			ContentID:   cid,
-		})
-	}
-}
-
-func decodeBody(p *gmail.MessagePart) string {
-	if p.Body == nil || p.Body.Data == "" {
-		return ""
-	}
-	// Gmail uses base64url without padding.
-	raw, err := base64.URLEncoding.WithPadding(base64.NoPadding).DecodeString(p.Body.Data)
-	if err != nil {
-		return ""
-	}
-	return string(raw)
-}
-
-// Raw returns the original RFC 5322 message.
-func (a *Adapter) Raw(ctx context.Context, id mail.MessageID) (io.ReadCloser, error) {
-	m, err := a.svc.Users.Messages.Get(a.user, nativeID(id)).
-		Format("raw").Context(ctx).Do()
-	if err != nil {
-		return nil, classify(err)
-	}
-	raw, err := base64.URLEncoding.WithPadding(base64.NoPadding).DecodeString(m.Raw)
-	if err != nil {
-		return nil, fmt.Errorf("gmail: decode raw: %w", err)
-	}
-	return io.NopCloser(strings.NewReader(string(raw))), nil
-}
-
-// Attachment streams one part's decoded content.
-func (a *Adapter) Attachment(ctx context.Context, id mail.MessageID, partID string) (io.ReadCloser, error) {
-	m, err := a.svc.Users.Messages.Get(a.user, nativeID(id)).
-		Format("full").Context(ctx).Do()
-	if err != nil {
-		return nil, classify(err)
-	}
-
-	attachID := findAttachmentID(m.Payload, partID)
-	if attachID == "" {
-		return nil, fmt.Errorf("gmail: %w: part %s of %s", mail.ErrNotFound, partID, id)
-	}
-
-	att, err := a.svc.Users.Messages.Attachments.
-		Get(a.user, nativeID(id), attachID).Context(ctx).Do()
-	if err != nil {
-		return nil, classify(err)
-	}
-	raw, err := base64.URLEncoding.WithPadding(base64.NoPadding).DecodeString(att.Data)
-	if err != nil {
-		return nil, fmt.Errorf("gmail: decode attachment: %w", err)
-	}
-	return io.NopCloser(strings.NewReader(string(raw))), nil
-}
-
-func findAttachmentID(p *gmail.MessagePart, partID string) string {
-	if p == nil {
-		return ""
-	}
-	if p.PartId == partID && p.Body != nil {
-		return p.Body.AttachmentId
-	}
-	for _, child := range p.Parts {
-		if id := findAttachmentID(child, partID); id != "" {
-			return id
-		}
-	}
-	return ""
-}
-
 // Apply pushes a mutation by modifying labels.
 func (a *Adapter) Apply(ctx context.Context, op mail.Operation) error {
 	ids := make([]string, 0, len(op.IDs))
@@ -600,8 +498,9 @@ func (a *Adapter) Apply(ctx context.Context, op mail.Operation) error {
 		return fmt.Errorf("gmail: unsupported operation %d", op.Kind)
 	}
 
-	err := a.svc.Users.Messages.BatchModify(a.user, &req).Context(ctx).Do()
-	return classify(err)
+	return a.call(ctx, costMessagesBatchMod, func() error {
+		return a.svc.Users.Messages.BatchModify(a.user, &req).Context(ctx).Do()
+	})
 }
 
 func gmailLabel(keyword string) string {

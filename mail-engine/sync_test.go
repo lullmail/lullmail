@@ -339,6 +339,9 @@ type scriptedAdapter struct {
 	// bodyCalls counts fetches per message, so a test can tell "prefetched
 	// once" from "re-downloaded on every sync".
 	bodyCalls map[MessageID]int
+	// envelopeCalls counts IDs handed to Envelopes, so a test can tell
+	// "fetched what was missing" from "refetched what the mirror had".
+	envelopeCalls int
 }
 
 func (a *scriptedAdapter) Provider() Provider { return ProviderIMAP }
@@ -364,6 +367,7 @@ func (a *scriptedAdapter) Sync(_ context.Context, _ MailboxID, cur Cursor) (*Cha
 }
 
 func (a *scriptedAdapter) Envelopes(_ context.Context, ids []MessageID) ([]Envelope, error) {
+	a.envelopeCalls += len(ids)
 	var out []Envelope
 	for _, id := range ids {
 		if e, ok := a.envelopes[id]; ok {
@@ -704,6 +708,41 @@ func TestBareIDDeltasAreBackfilled(t *testing.T) {
 	}
 	if _, err := store.Envelope(context.Background(), acct, e.ID); err != nil {
 		t.Error("bare-ID delta was not backfilled from Envelopes()")
+	}
+}
+
+func TestEnumeratedBareIDsAlreadyMirroredAreNotRefetched(t *testing.T) {
+	// Gmail lists a message under every label it carries and one fetch
+	// returns all of them; a second label's enumeration must count the
+	// message as seen without paying for it again. A genuinely new ID on
+	// the same page is still fetched.
+	eng, store, acct := setup(t)
+	ctx := context.Background()
+	known := envelope("known", "INBOX")
+	known.MailboxIDs = append(known.MailboxIDs, "Label_7")
+	if err := store.PutEnvelopes(ctx, acct, []Envelope{known}); err != nil {
+		t.Fatal(err)
+	}
+	fresh := envelope("fresh", "Label_7")
+	ad := &scriptedAdapter{
+		pages: []*Changes{{
+			Changes:          []Change{{Kind: ChangeCreated, ID: known.ID}, {Kind: ChangeCreated, ID: fresh.ID}},
+			EnumerationStart: true, Complete: true, Next: "c1",
+		}},
+		envelopes: map[MessageID]Envelope{known.ID: known, fresh.ID: fresh},
+	}
+
+	if _, err := eng.SyncMailbox(ctx, acct, "Label_7", ad); err != nil {
+		t.Fatal(err)
+	}
+	if ad.envelopeCalls != 1 {
+		t.Errorf("Envelopes fetched %d IDs, want 1 (only the unmirrored one)", ad.envelopeCalls)
+	}
+	if !store.members[acct][known.ID]["Label_7"] {
+		t.Error("mirrored message was swept from a mailbox that listed it")
+	}
+	if _, err := store.Envelope(ctx, acct, fresh.ID); err != nil {
+		t.Error("new message on the same page was not fetched")
 	}
 }
 

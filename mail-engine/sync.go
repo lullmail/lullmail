@@ -255,9 +255,20 @@ func (e *Engine) apply(ctx context.Context, acct AccountID, box MailboxID, ad Ad
 		case ChangeCreated, ChangeUpdated:
 			if c.Envelope != nil {
 				upsert = append(upsert, *c.Envelope)
-			} else {
-				fetch = append(fetch, c.ID)
+				continue
 			}
+			// An enumeration that reports bare IDs is asking whether we
+			// hold the message, not telling us it changed. One already in
+			// the mirror only needs to count as seen for the sweep; the
+			// fetch it would otherwise cost is the whole bill for a
+			// provider that lists each message once per label.
+			if c.Kind == ChangeCreated {
+				if _, err := e.store.Envelope(ctx, acct, c.ID); err == nil {
+					seen[c.ID] = true
+					continue
+				}
+			}
+			fetch = append(fetch, c.ID)
 		}
 	}
 

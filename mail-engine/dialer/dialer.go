@@ -40,7 +40,7 @@ func New() mail.Resolver {
 		case mail.ProviderJMAP:
 			return dialJMAP(ctx, cred)
 		case mail.ProviderGmail:
-			return dialGmail(ctx, cred)
+			return dialGmail(ctx, acct, cred)
 		case mail.ProviderGraph:
 			return dialGraph(cred)
 		default:
@@ -81,11 +81,11 @@ func dialJMAP(ctx context.Context, cred mail.Credential) (mail.Adapter, func(), 
 	return ad, func() { _ = ad.Close() }, nil
 }
 
-func dialGmail(ctx context.Context, cred mail.Credential) (mail.Adapter, func(), error) {
+func dialGmail(ctx context.Context, acct mail.AccountID, cred mail.Credential) (mail.Adapter, func(), error) {
 	// The token arrives already refreshed by the caller, so a fixed bearer
 	// is correct: this adapter must never attempt a refresh, having neither
 	// a refresh token nor a client secret.
-	ad, err := gmail.New(ctx, option.WithHTTPClient(bearerClient(cred.AccessToken)))
+	ad, err := gmail.New(ctx, string(acct), option.WithHTTPClient(bearerClient(cred.AccessToken)))
 	if err != nil {
 		return nil, nil, err
 	}
