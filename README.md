@@ -163,7 +163,7 @@ the Accounts page. Loopback IMAP is allowed plaintext for exactly this.
 
 Mail is a great context source for scripts and AI agents, so the agent
 surface is first-class: long-lived revocable Bearer tokens (fenced to mail
-and work surfaces — they can never touch sign-in, passkeys, or sessions),
+and work surfaces — they can never touch sign-in, passwords, passkeys, sessions, or mailbox zip export),
 and a standalone MCP adapter in [`mcp/`](./mcp) that exposes the whole
 read/screener/send/board/notes surface to any MCP-capable client. The
 server itself stays agent-agnostic; the adapter is optional and the product
