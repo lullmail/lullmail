@@ -13,7 +13,7 @@ afterEach(() => {
 });
 
 describe("first-run setup", () => {
-  it("advances from the token to owner and passkey setup", () => {
+  it("advances from the token to owner and password setup", () => {
     authStatus.value = {
       configured: false,
       authenticated: false,

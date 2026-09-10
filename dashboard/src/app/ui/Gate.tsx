@@ -44,7 +44,7 @@ export function Unreachable() {
         <GateFan />
         <div class="gate-brand">Lull Mail</div>
         <h1 id="gate-title">Can't reach your mailbox</h1>
-        <p class="gate-sub">The server isn't answering. You're still signed in; this page will reconnect when it comes back.</p>
+        <p class="gate-sub">The server isn't answering. This page will reconnect when it comes back.</p>
         <button class="btn btn-accent gate-primary" type="button" disabled={busy} onClick={retry}>
           {busy ? "Connecting…" : "Try again"}
         </button>
@@ -87,37 +87,37 @@ export function Gate() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
 
   const signInPassword = async (ev: Event) => {
-    ev.preventDefault(); setBusy(true); setError("");
+    ev.preventDefault(); setBusy("password"); setError("");
     try {
       await authApi("/auth/password", { body: { email: email.trim(), password } });
       setPassword("");
       await refreshAuth();
     } catch (e) { setError(describeAuthError(e, "Sign-in failed")); }
-    finally { setBusy(false); }
+    finally { setBusy(""); }
   };
 
   const signIn = async () => {
-    setBusy(true); setError("");
+    setBusy("passkey"); setError(""); setPassword("");
     try {
       const options = await authApi<Record<string, unknown>>("/auth/login/begin", { method: "POST" });
       const credential = await getPasskey(options);
       await authApi("/auth/login/finish", { body: credential });
       await refreshAuth();
     } catch (e) { setError(describeAuthError(e, "Sign-in failed")); }
-    finally { setBusy(false); }
+    finally { setBusy(""); }
   };
 
   const fallback = async (ev: Event) => {
-    ev.preventDefault(); setBusy(true); setError("");
+    ev.preventDefault(); setBusy("code"); setError("");
     try {
-      await authApi(mode === "totp" ? "/auth/totp" : "/auth/recovery", { body: { email, code } });
+      await authApi(mode === "totp" ? "/auth/totp" : "/auth/recovery", { body: { email: email.trim(), code } });
       await refreshAuth();
     } catch (e) { setError(describeAuthError(e, "Sign-in failed")); }
-    finally { setBusy(false); }
+    finally { setBusy(""); }
   };
 
   if (status && !status.configured) return <SetupWizard status={status} />;
@@ -128,24 +128,26 @@ export function Gate() {
         <GateFan />
         <div class="gate-brand">Lull Mail</div>
         <h1 id="gate-title">Welcome back</h1>
-        <p class="gate-sub">Sign in with your password, or use a passkey.</p>
-        <form onSubmit={signInPassword}>
-          <label class="sr-only" for="gate-email">Email or name</label>
-          <input id="gate-email" type="text" placeholder="Email or name" autocomplete="username" value={email}
-            onInput={(e) => setEmail((e.target as HTMLInputElement).value)} />
-          <label class="sr-only" for="gate-password">Password</label>
-          <input id="gate-password" type="password" placeholder="Password" autocomplete="current-password" value={password}
-            onInput={(e) => setPassword((e.target as HTMLInputElement).value)} />
-          <button class="btn btn-accent gate-primary" type="submit" disabled={busy || !email.trim() || !password}>
-            {busy ? "Checking…" : "Sign in"}
-          </button>
-        </form>
+        <p class="gate-sub">Sign in with your password. Passkeys and recovery codes are under other ways.</p>
+        {(!others || mode === "passkey") && (
+          <form onSubmit={signInPassword}>
+            <label class="sr-only" for="gate-email">Email or name</label>
+            <input id="gate-email" type="text" placeholder="Email or name" autocomplete="username" value={email}
+              onInput={(e) => setEmail((e.target as HTMLInputElement).value)} />
+            <label class="sr-only" for="gate-password">Password</label>
+            <input id="gate-password" type="password" placeholder="Password" autocomplete="current-password" value={password}
+              onInput={(e) => setPassword((e.target as HTMLInputElement).value)} />
+            <button class="btn btn-accent gate-primary" type="submit" disabled={!!busy || !email.trim() || !password}>
+              {busy === "password" ? "Checking…" : "Sign in"}
+            </button>
+          </form>
+        )}
         {!others ? (
           <button class="gate-link" type="button" onClick={() => setOthers(true)}>Other ways to sign in</button>
         ) : mode === "passkey" ? (
           <>
-            <button class="btn btn-outline" type="button" disabled={busy} onClick={signIn}>
-              {busy ? "Waiting for your device…" : "Continue with a passkey"}
+            <button class="btn btn-outline" type="button" disabled={!!busy} onClick={signIn}>
+              {busy === "passkey" ? "Waiting for your device…" : "Continue with a passkey"}
             </button>
             <div class="gate-switch">
               <button type="button" onClick={() => setMode("recovery")}>Use a recovery code</button>
@@ -154,14 +156,14 @@ export function Gate() {
           </>
         ) : (
           <form onSubmit={fallback}>
-            <label class="sr-only" for="fallback-email">Account email</label>
-            <input id="fallback-email" type="email" placeholder="Email (optional)" autocomplete="email" value={email}
+            <label class="sr-only" for="fallback-email">Email or name</label>
+            <input id="fallback-email" type="text" placeholder="Email or name (optional)" autocomplete="username" value={email}
               onInput={(e) => setEmail((e.target as HTMLInputElement).value)} />
             <label class="sr-only" for="fallback-code">{mode === "totp" ? "Authenticator code" : "Recovery code"}</label>
             <input id="fallback-code" inputMode={mode === "totp" ? "numeric" : "text"}
               placeholder={mode === "totp" ? "6-digit authenticator code" : "Recovery code"}
               autocomplete="one-time-code" value={code} onInput={(e) => setCode((e.target as HTMLInputElement).value)} />
-            <button class="btn btn-accent" type="submit" disabled={busy || !code.trim()}>{busy ? "Checking…" : "Sign in"}</button>
+            <button class="btn btn-accent" type="submit" disabled={!!busy || !code.trim()}>{busy === "code" ? "Checking…" : "Sign in with code"}</button>
             <div class="gate-switch">
               <button type="button" onClick={() => setMode(mode === "totp" ? "recovery" : "totp")}>
                 Use {mode === "totp" ? "a recovery code" : "an authenticator code"}
@@ -182,7 +184,7 @@ function SetupWizard({ status }: { status: AuthStatus }) {
   const [token, setToken] = useState("");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
@@ -199,7 +201,7 @@ function SetupWizard({ status }: { status: AuthStatus }) {
     ev.preventDefault();
     if (!name.trim()) { setError("Enter your name to continue."); return; }
     if (password.length < 8) { setError("Use at least 8 characters for the password."); return; }
-    setBusy(true); setError("");
+    setBusy("password"); setError("");
     try {
       const result = await authApi<{ recovery_codes: string[] }>("/auth/bootstrap/password", { body: { name: name.trim(), password } }, token.trim());
       setPassword("");
@@ -207,21 +209,21 @@ function SetupWizard({ status }: { status: AuthStatus }) {
       setError("");
       setStep(3);
     } catch (e) { setError(describeAuthError(e, "Setup failed")); }
-    finally { setBusy(false); }
+    finally { setBusy(""); }
   };
 
   const setUpPasskey = async () => {
     if (!name.trim()) { setError("Enter your name to continue."); return; }
-    setBusy(true); setError("");
+    setBusy("passkey"); setError(""); setPassword("");
     try {
       const options = await authApi<Record<string, unknown>>("/auth/bootstrap/begin", { body: { name: name.trim() } }, token.trim());
       const credential = await createPasskey(options);
-      const result = await authApi<{ recovery_codes: string[] }>("/auth/bootstrap/finish?name=" + encodeURIComponent("Primary passkey"), { body: credential }, token.trim());
+      const result = await authApi<{ recovery_codes: string[] }>("/auth/bootstrap/finish?name=" + encodeURIComponent("Passkey"), { body: credential }, token.trim());
       setRecoveryCodes(result.recovery_codes);
       setError("");
       setStep(3);
     } catch (e) { setError(describeAuthError(e, "Setup failed")); }
-    finally { setBusy(false); }
+    finally { setBusy(""); }
   };
 
   const downloadCodes = () => {
@@ -281,7 +283,7 @@ function SetupWizard({ status }: { status: AuthStatus }) {
               <p class="gate-sub">Lull Mail added a one-time code to your container logs when it started. Paste it here to confirm this is your server.</p>
               {!status.bootstrap_available && <div class="gate-error">This setup code has expired. Restart the container to create a new one.</div>}
               <label class="sr-only" for="setup-token">Setup code</label>
-              <input id="setup-token" type="password" placeholder="Setup code" autocomplete="off" autofocus value={token}
+              <input id="setup-token" type="text" placeholder="Setup code" autocomplete="off" autofocus value={token}
                 onInput={(e) => setToken((e.target as HTMLInputElement).value)} />
               <p class="gate-hint">Open your platform's container logs to find it. With Docker Compose, run <code>docker compose logs app</code>. The code expires after 24 hours.</p>
               <div class="gate-nav">
@@ -301,15 +303,15 @@ function SetupWizard({ status }: { status: AuthStatus }) {
               <label class="sr-only" for="setup-password">Password</label>
               <input id="setup-password" type="password" placeholder="Password" autocomplete="new-password" value={password}
                 onInput={(e) => setPassword((e.target as HTMLInputElement).value)} />
-              <p class="gate-hint">You'll sign in with this name or the account email. A passkey can be added now or later in Security.</p>
+              <p class="gate-hint">You'll sign in with this name or the account email. A passkey can be added later in Security.</p>
               <div class="gate-nav">
-                <button class="btn btn-outline" type="button" disabled={busy} onClick={() => goTo(1)}>Back</button>
-                <button class="btn btn-accent" type="submit" disabled={busy || !status.bootstrap_available || password.length < 8}>
-                  {busy ? "Creating your account…" : "Create account"}
+                <button class="btn btn-outline" type="button" disabled={!!busy} onClick={() => goTo(1)}>Back</button>
+                <button class="btn btn-accent" type="submit" disabled={!!busy || !status.bootstrap_available || !name.trim() || password.length < 8}>
+                  {busy === "password" ? "Creating your account…" : "Create account"}
                 </button>
               </div>
-              <button class="gate-link" type="button" disabled={busy || !status.bootstrap_available} onClick={setUpPasskey}>
-                {busy ? "Waiting for your device…" : "Create a passkey instead"}
+              <button class="gate-link" type="button" disabled={!!busy || !status.bootstrap_available || !name.trim()} onClick={setUpPasskey}>
+                {busy === "passkey" ? "Waiting for your device…" : "Create a passkey instead"}
               </button>
               {error && <div class="gate-error" role="alert">{error}</div>}
             </form>

@@ -8,7 +8,7 @@
 #
 # The one-time setup flow: deploy, `teploy logs` (or `docker compose logs
 # app`) for the 24h setup token, open the published origin in a browser, and
-# complete passkey setup. PUBLIC_URL can stay unset — the origin is detected
+# complete first-run setup (password, or a passkey). PUBLIC_URL can stay unset — the origin is detected
 # from the setup visit and pinned.
 app: lullmail
 type: container

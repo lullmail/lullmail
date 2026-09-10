@@ -1,9 +1,9 @@
 package main
 
-// Recovery-first authentication. Passkeys are the primary factor; opaque,
-// hashed server-side sessions keep WebAuthn out of the request hot path.
-// Printable one-use recovery codes and optional TOTP prevent a lost device
-// from turning a self-hosted mailbox into a permanent lockout.
+// Password-primary authentication. Opaque hashed server-side sessions keep
+// WebAuthn out of the request hot path. Passkeys, TOTP and one-use recovery
+// codes are opt-in; recovery codes are an escape hatch, not a standing
+// login factor.
 
 import (
 	"context"
@@ -41,8 +41,8 @@ const (
 )
 
 // How a session was created; the values are pinned by the auth_sessions
-// login_method CHECK constraint in schema.sql. The dashboard uses them to
-// nudge fallback sessions toward adding a passkey on the current device.
+// login_method CHECK constraint in schema.sql. The dashboard nudges only
+// recovery-code sessions toward adding a standing credential.
 const (
 	loginMethodPasskey   = "passkey"
 	loginMethodPassword  = "password"
@@ -77,14 +77,27 @@ type authAttempt struct {
 	Count  int
 }
 
-func (a *App) allowAuthAttempt(r *http.Request) bool {
+func clientHost(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if i := strings.IndexByte(xff, ','); i >= 0 {
+			xff = xff[:i]
+		}
+		if h := strings.TrimSpace(xff); h != "" {
+			return h
+		}
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
 	if host == "" {
-		host = "unknown"
+		return "unknown"
 	}
+	return host
+}
+
+func (a *App) allowAuthAttempt(r *http.Request) bool {
+	host := clientHost(r)
 	a.authMu.Lock()
 	defer a.authMu.Unlock()
 	now := time.Now()
@@ -107,10 +120,7 @@ func (a *App) allowAuthAttempt(r *http.Request) bool {
 }
 
 func (a *App) clearAuthAttempts(r *http.Request) {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
+	host := clientHost(r)
 	a.authMu.Lock()
 	delete(a.authAttempts, host)
 	a.authMu.Unlock()
@@ -375,7 +385,7 @@ func (a *App) handleBootstrapBegin(w http.ResponseWriter, r *http.Request) {
 	}
 	// No origin pinned yet (PUBLIC_URL unset, fresh install): adopt the one
 	// this setup request actually arrived on. Nothing is secret before the
-	// first passkey exists; the completing request's origin gets stored.
+	// first credential exists; the completing request's origin gets stored.
 	if a.cfg.RPID == "" {
 		if !a.setOriginForSetup(detectOrigin(r)) {
 			writeProblem(w, 422, "Origin Unavailable", "the browser origin could not be detected — set PUBLIC_URL on the server")
@@ -455,10 +465,7 @@ func (a *App) handleBootstrapFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.setCookie(w, sessionCookie, rawSession, sessionLifetime)
-	if a.cfg.DataDir != "" && !a.tokenFromEnv {
-		deleteSetupToken(a.cfg.DataDir)
-	}
-	a.setupTokenCreated = time.Time{}
+	a.retireSetupToken()
 	writeJSON(w, map[string]any{"ok": true, "recovery_codes": codes})
 }
 
@@ -498,12 +505,17 @@ func (a *App) handleBootstrapPassword(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 422, "Password Too Short", "use at least 8 characters")
 		return
 	}
-	a.cfg.UserEmail = ownerEmailFromName(name)
-	if err := a.ensureUser(r.Context(), name); err != nil {
-		writeProblem(w, 500, "Setup Failed", err.Error())
-		return
-	}
 	uid, err := a.firstUserID(r.Context())
+	if errors.Is(err, sql.ErrNoRows) {
+		a.cfg.UserEmail = ownerEmailFromName(name)
+		if err := a.ensureUser(r.Context(), name); err != nil {
+			writeProblem(w, 500, "Setup Failed", err.Error())
+			return
+		}
+		uid, err = a.firstUserID(r.Context())
+	} else if err == nil {
+		_ = a.setOwnerName(r.Context(), name)
+	}
 	if err != nil {
 		writeProblem(w, 500, "Setup Failed", err.Error())
 		return
@@ -549,10 +561,7 @@ func (a *App) handleBootstrapPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.setCookie(w, sessionCookie, rawSession, sessionLifetime)
-	if a.cfg.DataDir != "" && !a.tokenFromEnv {
-		deleteSetupToken(a.cfg.DataDir)
-	}
-	a.setupTokenCreated = time.Time{}
+	a.retireSetupToken()
 	writeJSON(w, map[string]any{"ok": true, "recovery_codes": codes})
 }
 
@@ -669,7 +678,7 @@ func (a *App) handleLoginBegin(w http.ResponseWriter, r *http.Request) {
 		if configured, _ := a.ownerConfigured(r.Context()); configured {
 			writeProblem(w, 409, "No Passkey", "this account has no passkey — sign in with a password")
 		} else {
-			writeProblem(w, 409, "Setup Required", "create the first passkey with the setup token")
+			writeProblem(w, 409, "Setup Required", "create the first password or passkey with the setup token")
 		}
 		return
 	}
@@ -745,7 +754,18 @@ func (a *App) handlePasswordLogin(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 400, "Bad Request", "enter your email and password")
 		return
 	}
+	ident := strings.ToLower(strings.TrimSpace(req.Email))
+	if remaining := a.passwordLockRemaining(ident); remaining > 0 {
+		writePasswordLocked(w, remaining)
+		return
+	}
+	// Same 401 for unknown ident, no password, and wrong password. Failures
+	// count against the ident (not the uid) so a 429 cannot reveal that a
+	// password exists. Miss paths still run argon2 against a dummy hash so
+	// the wall-clock cost matches a real verify.
 	rejected := func() {
+		burnPasswordVerify(req.Password)
+		a.recordPasswordFailure(ident)
 		writeProblem(w, 401, "Sign In Failed", "invalid email or password")
 	}
 	uid, err := a.recoveryUser(r.Context(), req.Email)
@@ -753,17 +773,9 @@ func (a *App) handlePasswordLogin(w http.ResponseWriter, r *http.Request) {
 		rejected()
 		return
 	}
-	if remaining := a.passwordLockRemaining(uid); remaining > 0 {
-		w.Header().Set("Retry-After", strconv.Itoa(int(remaining.Seconds())+1))
-		writeProblem(w, 429, "Too Many Attempts",
-			"too many failed attempts — try again in "+(time.Duration(int64(remaining.Seconds())+1)*time.Second).String())
-		return
-	}
 	var encoded string
 	err = a.db.QueryRowContext(r.Context(), `SELECT hash FROM auth_passwords WHERE user_id=$1`, uid).Scan(&encoded)
 	if err == sql.ErrNoRows {
-		// An account without a password is indistinguishable from a wrong
-		// password on purpose; it learns nothing about what is set.
 		rejected()
 		return
 	}
@@ -777,11 +789,11 @@ func (a *App) handlePasswordLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
-		a.recordPasswordFailure(uid)
-		rejected()
+		a.recordPasswordFailure(ident)
+		writeProblem(w, 401, "Sign In Failed", "invalid email or password")
 		return
 	}
-	a.clearPasswordFailures(uid)
+	a.clearPasswordFailures(ident)
 	if err := a.createSession(w, r, uid, loginMethodPassword); err != nil {
 		writeProblem(w, 500, "Session Failed", err.Error())
 		return
@@ -1186,6 +1198,51 @@ func lockAuthUser(ctx context.Context, tx *sql.Tx, uid string) error {
 	return tx.QueryRowContext(ctx, `SELECT id FROM users WHERE id=$1 FOR UPDATE`, uid).Scan(&locked)
 }
 
+type queryRower interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// loginFactors are the standing ways in. Recovery codes are omitted on
+// purpose — D10: they never count as a login credential.
+type loginFactors struct {
+	Passkeys int
+	Password bool
+	TOTP     bool
+}
+
+func loadLoginFactors(ctx context.Context, q queryRower, uid string) (loginFactors, error) {
+	var f loginFactors
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM auth_credentials WHERE user_id=$1`, uid).Scan(&f.Passkeys); err != nil {
+		return f, err
+	}
+	if err := q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM auth_passwords WHERE user_id=$1)`, uid).Scan(&f.Password); err != nil {
+		return f, err
+	}
+	err := q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM auth_totp WHERE user_id=$1 AND enabled_at IS NOT NULL)`, uid).Scan(&f.TOTP)
+	return f, err
+}
+
+// lastFactor reports whether removing this kind would leave the account
+// with no standing sign-in method.
+func lastFactor(f loginFactors, removing string) bool {
+	switch removing {
+	case "password":
+		return f.Passkeys == 0 && !f.TOTP
+	case "totp":
+		return f.Passkeys == 0 && !f.Password
+	case "passkey":
+		return f.Passkeys <= 1 && !f.Password && !f.TOTP
+	default:
+		return false
+	}
+}
+
+func writePasswordLocked(w http.ResponseWriter, remaining time.Duration) {
+	w.Header().Set("Retry-After", strconv.Itoa(int(remaining.Seconds())+1))
+	writeProblem(w, 429, "Too Many Attempts",
+		"too many failed attempts — try again in "+(time.Duration(int64(remaining.Seconds())+1)*time.Second).String())
+}
+
 func (a *App) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 	uid, _ := a.userID(r.Context())
 	tx, err := a.db.BeginTx(r.Context(), nil)
@@ -1202,13 +1259,13 @@ func (a *App) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	var count int
-	if err := tx.QueryRowContext(r.Context(), `SELECT count(*) FROM auth_credentials WHERE user_id=$1`, uid).Scan(&count); err != nil {
+	factors, err := loadLoginFactors(r.Context(), tx, uid)
+	if err != nil {
 		writeProblem(w, 500, "Delete Failed", err.Error())
 		return
 	}
-	if count <= 1 {
-		writeProblem(w, 409, "Last Passkey", "add another passkey before removing this one")
+	if lastFactor(factors, "passkey") {
+		writeProblem(w, 409, "Last Credential", "add a password or an authenticator before removing the last passkey")
 		return
 	}
 	result, err := tx.ExecContext(r.Context(), `DELETE FROM auth_credentials WHERE id=$1 AND user_id=$2`, r.PathValue("id"), uid)
@@ -1302,8 +1359,30 @@ func (a *App) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 	uid, _ := a.userID(r.Context())
-	_, err := a.db.ExecContext(r.Context(), `DELETE FROM auth_totp WHERE user_id=$1`, uid)
+	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
+		writeProblem(w, 500, "TOTP Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+		writeProblem(w, 500, "TOTP Failed", err.Error())
+		return
+	}
+	factors, err := loadLoginFactors(r.Context(), tx, uid)
+	if err != nil {
+		writeProblem(w, 500, "TOTP Failed", err.Error())
+		return
+	}
+	if lastFactor(factors, "totp") {
+		writeProblem(w, 409, "Last Credential", "add a password or a passkey before removing the authenticator")
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM auth_totp WHERE user_id=$1`, uid); err != nil {
+		writeProblem(w, 500, "TOTP Failed", err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		writeProblem(w, 500, "TOTP Failed", err.Error())
 		return
 	}
@@ -1316,7 +1395,16 @@ func (a *App) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 // credential it is riding on. Agent tokens never get here: the router fence
 // (agent.go) scopes them away from /security before this handler runs.
 func (a *App) handlePasswordSet(w http.ResponseWriter, r *http.Request) {
+	if !a.allowAuthAttempt(r) {
+		writeProblem(w, 429, "Too Many Attempts", "wait five minutes before trying again")
+		return
+	}
 	uid, _ := a.userID(r.Context())
+	lockKey := "uid:" + uid
+	if remaining := a.passwordLockRemaining(lockKey); remaining > 0 {
+		writePasswordLocked(w, remaining)
+		return
+	}
 	var req struct {
 		Current string `json:"current"`
 		New     string `json:"new"`
@@ -1341,14 +1429,17 @@ func (a *App) handlePasswordSet(w http.ResponseWriter, r *http.Request) {
 	}
 	var encoded string
 	err = tx.QueryRowContext(r.Context(), `SELECT hash FROM auth_passwords WHERE user_id=$1`, uid).Scan(&encoded)
+	had := false
 	switch {
 	case err == nil:
+		had = true
 		ok, verr := verifyPassword(encoded, req.Current)
 		if verr != nil {
 			writeProblem(w, 500, "Password Failed", verr.Error())
 			return
 		}
 		if !ok {
+			a.recordPasswordFailure(lockKey)
 			writeProblem(w, 401, "Current Password Incorrect", "enter the current password to replace it")
 			return
 		}
@@ -1372,6 +1463,10 @@ func (a *App) handlePasswordSet(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Password Failed", err.Error())
 		return
 	}
+	a.clearPasswordFailures(lockKey)
+	if had {
+		a.revokeOtherSessions(r, uid)
+	}
 	writeJSON(w, map[string]any{"ok": true})
 }
 
@@ -1380,6 +1475,10 @@ func (a *App) handlePasswordSet(w http.ResponseWriter, r *http.Request) {
 // credential an owner can sign in with tomorrow.
 func (a *App) handlePasswordDelete(w http.ResponseWriter, r *http.Request) {
 	uid, _ := a.userID(r.Context())
+	var req struct {
+		Current string `json:"current"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req)
 	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeProblem(w, 500, "Password Failed", err.Error())
@@ -1390,8 +1489,8 @@ func (a *App) handlePasswordDelete(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Password Failed", err.Error())
 		return
 	}
-	var dummy string
-	err = tx.QueryRowContext(r.Context(), `SELECT hash FROM auth_passwords WHERE user_id=$1`, uid).Scan(&dummy)
+	var encoded string
+	err = tx.QueryRowContext(r.Context(), `SELECT hash FROM auth_passwords WHERE user_id=$1`, uid).Scan(&encoded)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeProblem(w, 404, "No Password", "no password is set on this account")
 		return
@@ -1400,18 +1499,21 @@ func (a *App) handlePasswordDelete(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Password Failed", err.Error())
 		return
 	}
-	var passkeys int
-	if err := tx.QueryRowContext(r.Context(), `SELECT count(*) FROM auth_credentials WHERE user_id=$1`, uid).Scan(&passkeys); err != nil {
+	ok, verr := verifyPassword(encoded, req.Current)
+	if verr != nil {
+		writeProblem(w, 500, "Password Failed", verr.Error())
+		return
+	}
+	if !ok {
+		writeProblem(w, 401, "Current Password Incorrect", "enter the current password to remove it")
+		return
+	}
+	factors, err := loadLoginFactors(r.Context(), tx, uid)
+	if err != nil {
 		writeProblem(w, 500, "Password Failed", err.Error())
 		return
 	}
-	var totp bool
-	if err := tx.QueryRowContext(r.Context(),
-		`SELECT EXISTS(SELECT 1 FROM auth_totp WHERE user_id=$1 AND enabled_at IS NOT NULL)`, uid).Scan(&totp); err != nil {
-		writeProblem(w, 500, "Password Failed", err.Error())
-		return
-	}
-	if passkeys == 0 && !totp {
+	if lastFactor(factors, "password") {
 		writeProblem(w, 409, "Last Credential",
 			"add a passkey or an authenticator before removing the password")
 		return
@@ -1424,8 +1526,6 @@ func (a *App) handlePasswordDelete(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Password Failed", err.Error())
 		return
 	}
-	// Removing a credential is the owner saying "something may be
-	// compromised" — same call handlePasskeyDelete makes.
 	a.revokeOtherSessions(r, uid)
 	writeJSON(w, map[string]any{"ok": true})
 }
@@ -1560,7 +1660,7 @@ func (a *App) handleFullAccountDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 // ensureUser bootstraps an installation owner, but never an authentication
-// secret. The setup token is still required to register the first passkey.
+// secret. The setup token is still required to register the first credential.
 // email is a stable internal identifier (owners now supply a name; real
 // addresses come from connected accounts); name becomes display_name, which
 // is what the browser shows in the passkey prompt.

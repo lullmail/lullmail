@@ -1171,6 +1171,7 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 .gate form .btn { margin-top: 0; }
 .gate-primary { min-height: 44px; }
 .gate-link { margin-top: var(--sp-4); color: var(--ink-2); font-size: var(--t-sm); text-decoration: underline; text-underline-offset: 3px; }
+.gate-link:disabled { opacity: 0.45; cursor: not-allowed; }
 .gate-error { margin-top: var(--sp-3); padding: 9px 12px; border-radius: var(--r-md); color: var(--danger); background: var(--danger-soft); font-size: var(--t-sm); }
 .gate-origin { margin: 0 0 var(--sp-3); padding: 10px 12px; border-radius: var(--r-md); color: var(--ink-2); background: var(--raise); font-size: var(--t-xs); line-height: 1.55; }
 .gate-origin b { color: var(--ink); word-break: break-all; }
@@ -1379,7 +1380,7 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 }
 
 .page.classic .topline { grid-column: 1 / -1; grid-row: 1; position: static; }
-.page.classic .nudge { grid-column: 1 / -1; grid-row: 2; }
+.page.classic .nudges { grid-column: 1 / -1; grid-row: 2; display: flex; flex-direction: column; }
 /* Nav lives in the sidebar here, so the flanks stop competing for the centre. */
 .page.classic .topline-side { flex: none; }
 .page.classic .topline-side.left { flex: 1; }

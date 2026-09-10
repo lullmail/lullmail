@@ -1,7 +1,7 @@
 # Self-host with no configuration:
 #   docker compose up -d
 #   docker compose logs app        <- one-time setup token (valid 24h)
-#   open http://localhost:8080     <- paste token, create your passkey, done
+#   open http://localhost:8080     <- paste token, set a password (or a passkey), done
 #
 # SECRET_KEY and the setup token are generated on first boot and kept in the
 # appdata volume. Every env var below is optional and overrides the generated

@@ -102,9 +102,10 @@ export function SecurityView() {
   };
 
   const removePassword = async () => {
+    if (!pwCurrent) { report(new Error("enter the current password"), "Could not remove password"); return; }
     if (!window.confirm("Remove password sign-in? Your other sign-in methods keep working.")) return;
     setBusy("password");
-    try { await api("/security/password", { method: "DELETE" }); showToast("Password removed"); await load(); }
+    try { await api("/security/password", { method: "DELETE", body: { current: pwCurrent } }); setPwCurrent(""); showToast("Password removed"); await load(); }
     catch (e) { report(e, "Could not remove password"); }
     finally { setBusy(""); }
   };
@@ -161,7 +162,11 @@ export function SecurityView() {
     } catch (e) { report(e, "Could not delete account"); setDeleting(false); }
   };
 
-  if (!security) return <><PageHead kicker="Settings" title="Security" sub="Passkeys, recovery, and active sessions." />{loading && <ListSkeleton rows={3} />}{loadError && <LoadError title="Security settings didn't load." error={loadError} retry={load} />}</>;
+  if (!security) return <><PageHead kicker="Settings" title="Security" sub="Password, passkeys, recovery, and active sessions." />{loading && <ListSkeleton rows={3} />}{loadError && <LoadError title="Security settings didn't load." error={loadError} retry={load} />}</>;
+
+  const otherFactors = security.passkeys.length > 0 || security.totp_enabled;
+  const canRemovePasskey = security.passkeys.length > 1 || security.password_set || security.totp_enabled;
+  const canRemoveTotp = security.passkeys.length > 0 || security.password_set;
 
   return (
     <>
@@ -171,10 +176,33 @@ export function SecurityView() {
       {mutationError && <div class="settings-callout" role="alert">{mutationError} <button class="btn btn-ghost btn-sm" type="button" onClick={() => setMutationError(null)}>Dismiss</button></div>}
 
       <section class="settings-section">
-        <div class="settings-section-head"><div><h2>Passkeys</h2><p>Device-bound credentials with user verification. Add two before you need the second.</p></div>
+        <div class="settings-section-head"><div><h2>Password</h2>
+          <p>{security.password_set ? "Password sign-in is on. Hashed with argon2id on your server." : "Optional password sign-in, hashed with argon2id on your server."}</p></div>
+          {security.password_set && <button class="btn btn-quiet-danger btn-sm" type="button" disabled={!!busy || !otherFactors || !pwCurrent} onClick={removePassword} title={!otherFactors ? "Add a passkey or authenticator first" : !pwCurrent ? "Enter the current password" : ""}>Remove</button>}</div>
+        <form class="totp-setup" onSubmit={(e) => { e.preventDefault(); savePassword(); }}>
+          {security.password_set && (
+            <>
+              <p>Enter the current password, then the new one.</p>
+              <label class="sr-only" for="pw-current">Current password</label>
+              <input id="pw-current" type="password" placeholder="Current password" autocomplete="current-password" value={pwCurrent}
+                onInput={(e) => setPwCurrent((e.target as HTMLInputElement).value)} />
+            </>
+          )}
+          <label class="sr-only" for="pw-new">New password</label>
+          <input id="pw-new" type="password" placeholder={security.password_set ? "New password" : "Password"} autocomplete="new-password" value={pwNew}
+            onInput={(e) => setPwNew((e.target as HTMLInputElement).value)} />
+          <div class="inline-form">
+            <button class="btn btn-primary btn-sm" type="submit" disabled={busy === "password" || pwNew.length < 8 || (security.password_set && !pwCurrent)}>
+              {busy === "password" ? "Saving…" : security.password_set ? "Change password" : "Set password"}</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="settings-section">
+        <div class="settings-section-head"><div><h2>Passkeys</h2><p>Device-bound credentials with user verification. Optional — a password is enough to sign in.</p></div>
           <button class="btn btn-primary btn-sm" type="button" disabled={!!busy} onClick={addPasskey}>{busy === "passkey" ? "Waiting…" : "Add passkey"}</button></div>
         {security.passkeys.map((key) => <div class="security-row" key={key.id}><div><strong>{key.name}</strong><span>Added {fmtDate(key.created_at)}{key.last_used_at ? " · used " + fmtDate(key.last_used_at) : " · not used yet"}</span></div>
-          <button class="btn btn-quiet-danger btn-sm" type="button" disabled={security.passkeys.length < 2} onClick={async () => { try { await api("/security/passkeys/" + encodeURIComponent(key.id), { method: "DELETE" }); await load(); } catch (e) { report(e, "Could not remove passkey"); } }}>Remove</button></div>)}
+          <button class="btn btn-quiet-danger btn-sm" type="button" disabled={!canRemovePasskey} onClick={async () => { try { await api("/security/passkeys/" + encodeURIComponent(key.id), { method: "DELETE" }); await load(); } catch (e) { report(e, "Could not remove passkey"); } }}>Remove</button></div>)}
       </section>
 
       <section class="settings-section">
@@ -191,32 +219,9 @@ export function SecurityView() {
 
       <section class="settings-section">
         <div class="settings-section-head"><div><h2>Authenticator app</h2><p>An optional TOTP fallback, encrypted at rest.</p></div>
-          {security.totp_enabled ? <button class="btn btn-quiet-danger btn-sm" type="button" onClick={async () => { try { await api("/security/totp", { method: "DELETE" }); await load(); } catch (e) { report(e, "Could not disable authenticator"); } }}>Disable</button>
+          {security.totp_enabled ? <button class="btn btn-quiet-danger btn-sm" type="button" disabled={!canRemoveTotp} onClick={async () => { try { await api("/security/totp", { method: "DELETE" }); await load(); } catch (e) { report(e, "Could not disable authenticator"); } }}>Disable</button>
             : <button class="btn btn-outline btn-sm" type="button" disabled={!!busy} onClick={beginTOTP}>Set up</button>}</div>
         {totp && <div class="totp-setup"><p>Enter this key in your authenticator app, then verify one code.</p><code>{totp.secret}</code><div class="inline-form"><input value={totpCode} inputMode="numeric" autocomplete="one-time-code" placeholder="6-digit code" onInput={(e) => setTotpCode((e.target as HTMLInputElement).value)} /><button class="btn btn-primary btn-sm" type="button" disabled={totpCode.length < 6 || !!busy} onClick={confirmTOTP}>Verify</button></div></div>}
-      </section>
-
-      <section class="settings-section">
-        <div class="settings-section-head"><div><h2>Password</h2>
-          <p>{security.password_set ? "Password sign-in is on. Hashed with argon2id on your server." : "Optional password sign-in, hashed with argon2id on your server."}</p></div>
-          {security.password_set && <button class="btn btn-quiet-danger btn-sm" type="button" disabled={!!busy} onClick={removePassword}>Remove</button>}</div>
-        <div class="totp-setup">
-          {security.password_set && (
-            <>
-              <p>Enter the current password, then the new one.</p>
-              <label class="sr-only" for="pw-current">Current password</label>
-              <input id="pw-current" type="password" placeholder="Current password" autocomplete="current-password" value={pwCurrent}
-                onInput={(e) => setPwCurrent((e.target as HTMLInputElement).value)} />
-            </>
-          )}
-          <label class="sr-only" for="pw-new">New password</label>
-          <input id="pw-new" type="password" placeholder={security.password_set ? "New password" : "Password"} autocomplete="new-password" value={pwNew}
-            onInput={(e) => setPwNew((e.target as HTMLInputElement).value)} />
-          <div class="inline-form">
-            <button class="btn btn-primary btn-sm" type="button" disabled={busy === "password" || pwNew.length < 8 || (security.password_set && !pwCurrent)}
-              onClick={savePassword}>{busy === "password" ? "Saving…" : security.password_set ? "Change password" : "Set password"}</button>
-          </div>
-        </div>
       </section>
 
       <section class="settings-section">

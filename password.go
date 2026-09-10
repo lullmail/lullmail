@@ -11,10 +11,28 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/argon2"
 )
+
+var (
+	dummyPHC     string
+	dummyPHCOnce sync.Once
+)
+
+// burnPasswordVerify runs argon2 against a dummy hash so a miss costs the
+// same as a hit. Without this, "no such user" returns in milliseconds and
+// "wrong password" pays 64MiB.
+func burnPasswordVerify(password string) {
+	dummyPHCOnce.Do(func() {
+		dummyPHC, _ = hashPassword("not-a-user-password")
+	})
+	if dummyPHC != "" {
+		_, _ = verifyPassword(dummyPHC, password)
+	}
+}
 
 // OWASP-recommended argon2id profile for interactive login (m=64MiB, t=3,
 // p=4). Memory is in KiB, as the argon2 package takes it.
@@ -30,13 +48,13 @@ const (
 // database is trusted, but "trusted" has been wrong before, and a tampered
 // hash with m=2^30 would turn every sign-in into a memory-exhaustion vector.
 const (
-	maxArgonMemory     uint32 = 1 << 20 // 1 GiB in KiB
-	maxArgonTime       uint32 = 1 << 12
-	maxArgonThreads    uint8  = 64
-	passwordMinLen            = 8
-	passwordMaxLen            = 1024
-	passwordLockThreshold     = 5
-	passwordLockDuration      = 15 * time.Minute
+	maxArgonMemory        uint32 = 1 << 20 // 1 GiB in KiB
+	maxArgonTime          uint32 = 1 << 12
+	maxArgonThreads       uint8  = 64
+	passwordMinLen               = 8
+	passwordMaxLen               = 1024
+	passwordLockThreshold        = 5
+	passwordLockDuration         = 15 * time.Minute
 )
 
 func validPasswordLength(pw string) bool {
@@ -84,9 +102,9 @@ func verifyPassword(encoded, password string) (bool, error) {
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 
-// passwordFails is the per-account failed-attempt state. Keyed by user id so
-// the lock follows the account, not whichever host is probing it; the
-// per-host limiter (allowAuthAttempt) still runs alongside it.
+// passwordFails is failed-attempt state. Keyed by the ident the client
+// typed (lowercased email or name) so a 429 cannot reveal that a user or
+// password exists. The per-host limiter still runs alongside it.
 type passwordFails struct {
 	Count       int
 	LockedUntil time.Time

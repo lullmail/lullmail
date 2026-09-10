@@ -8,6 +8,7 @@ package main
 // completion. Env vars always win for operators who want explicit config.
 
 import (
+	"context"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
@@ -160,7 +161,7 @@ func applyOrigin(cfg *Config, origin string) bool {
 }
 
 // setOriginForSetup pins the first setup request's origin and builds the
-// WebAuthn instance it implies. Before the first passkey exists nothing is
+// WebAuthn instance it implies. Before the first credential exists nothing is
 // secret, so re-detecting per ceremony start is safe; the origin that
 // completes setup is the one that gets stored.
 func (a *App) setOriginForSetup(origin string) bool {
@@ -198,6 +199,19 @@ func (a *App) setupTokenValid() bool {
 	return setupNow().Sub(a.setupTokenCreated) < setupTokenLifetime
 }
 
+// retireSetupToken drops the generated first-run token from disk and from
+// the running process. An env-supplied LULL_TOKEN is left in memory but is
+// inert once ownerConfigured is true.
+func (a *App) retireSetupToken() {
+	if a.cfg.DataDir != "" && !a.tokenFromEnv {
+		deleteSetupToken(a.cfg.DataDir)
+	}
+	a.setupTokenCreated = time.Time{}
+	if !a.tokenFromEnv {
+		a.cfg.APIToken = ""
+	}
+}
+
 // constantTimeBearer matches "Bearer <token>" against the configured value.
 func constantTimeBearer(got, want string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte("Bearer "+want)) == 1
@@ -205,7 +219,7 @@ func constantTimeBearer(got, want string) bool {
 
 // prepareSetup runs at boot after the database is reachable: restore a
 // stored origin when PUBLIC_URL was not pinned, and surface or mint the
-// first-run token while no passkey exists.
+// first-run token while no sign-in credential exists.
 func (a *App) prepareSetup() {
 	if !a.cfg.PublicURLSet {
 		if stored, err := loadSetting(a.db, "public_url"); err == nil && stored != "" {
@@ -214,14 +228,12 @@ func (a *App) prepareSetup() {
 			}
 		}
 	}
-	var credentials int
-	if err := a.db.QueryRow(`SELECT count(*) FROM auth_credentials`).Scan(&credentials); err != nil {
+	configured, err := a.ownerConfigured(context.Background())
+	if err != nil {
 		return
 	}
-	if credentials > 0 {
-		if a.cfg.APIToken != "" && a.cfg.DataDir != "" && !a.tokenFromEnv {
-			deleteSetupToken(a.cfg.DataDir)
-		}
+	if configured {
+		a.retireSetupToken()
 		return
 	}
 	if a.cfg.APIToken == "" && a.cfg.DataDir != "" {

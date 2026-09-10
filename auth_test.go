@@ -39,6 +39,15 @@ func TestTOTPValidationWindowAndFormatting(t *testing.T) {
 	}
 }
 
+func TestClientHostPrefersForwardedFor(t *testing.T) {
+	r := httptest.NewRequest("POST", "/api/auth/password", nil)
+	r.RemoteAddr = "10.0.0.1:1234"
+	r.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.1")
+	if got := clientHost(r); got != "203.0.113.9" {
+		t.Fatalf("clientHost = %q", got)
+	}
+}
+
 func TestAuthRateLimitIsBoundedAndResets(t *testing.T) {
 	a := &App{authAttempts: map[string]authAttempt{}}
 	r := httptest.NewRequest("POST", "/api/auth/recovery", nil)
@@ -96,6 +105,28 @@ func TestPersistSessionReturnsTokenOnlyAfterInsert(t *testing.T) {
 	}), r, "user-id", loginMethodRecovery)
 	if raw != "" || !errors.Is(err, wantErr) {
 		t.Fatalf("failed insert returned raw=%q err=%v", raw, err)
+	}
+}
+
+func TestLastFactorInvariant(t *testing.T) {
+	onlyPass := loginFactors{Password: true}
+	if !lastFactor(onlyPass, "password") {
+		t.Fatal("sole password was not last")
+	}
+	if lastFactor(loginFactors{Password: true, Passkeys: 1}, "password") {
+		t.Fatal("password with a passkey treated as last")
+	}
+	if !lastFactor(loginFactors{Passkeys: 1}, "passkey") {
+		t.Fatal("sole passkey was not last")
+	}
+	if lastFactor(loginFactors{Passkeys: 1, Password: true}, "passkey") {
+		t.Fatal("last passkey with a password treated as last credential")
+	}
+	if !lastFactor(loginFactors{TOTP: true}, "totp") {
+		t.Fatal("sole totp was not last")
+	}
+	if lastFactor(loginFactors{TOTP: true, Password: true}, "totp") {
+		t.Fatal("totp with a password treated as last")
 	}
 }
 

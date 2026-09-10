@@ -56,8 +56,8 @@ func TestVerifyPasswordRejectsMalformedAndHostileStrings(t *testing.T) {
 		"",
 		"not-a-hash",
 		"$argon2i$v=19$m=65536,t=3,p=4$ c2FsdA $a2V5", // wrong variant + spaces
-		"$argon2id$v=18$m=65536,t=3,p=4$c2FsdA$a2V5",   // unsupported version
-		"$argon2id$v=19$m=abc,t=3,p=4$c2FsdA$a2V5",     // unparsable params
+		"$argon2id$v=18$m=65536,t=3,p=4$c2FsdA$a2V5",  // unsupported version
+		"$argon2id$v=19$m=abc,t=3,p=4$c2FsdA$a2V5",    // unparsable params
 		// Hostile parameters read back from the string: verify must refuse,
 		// not allocate.
 		"$argon2id$v=19$m=99999999,t=3,p=4$" + base64.RawStdEncoding.EncodeToString([]byte("0123456789abcdef")) + "$a2V5",

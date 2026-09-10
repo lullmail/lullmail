@@ -326,8 +326,10 @@ export default function App() {
         style={splitWidth.value ? ({ "--list-w": splitWidth.value + "px" } as any) : undefined}
       >
         <Topline classic={classic} />
-        <PasskeyNudge />
-        <ExposureBanner />
+        <div class="nudges">
+          <PasskeyNudge />
+          <ExposureBanner />
+        </div>
         <Sidebar />
         <div class="list-pane"><div class="column"><Suspense fallback={<RouteSkeleton />}><CurrentView /></Suspense></div></div>
         <PaneSplit />
@@ -352,9 +354,12 @@ export default function App() {
 
   return (
     <div class="page">
-      <Topline classic={classic} />
-      <PasskeyNudge />
-      {/* A thread replaces the list rather than sitting beside it: the mail
+        <Topline classic={classic} />
+        <div class="nudges">
+          <PasskeyNudge />
+          <ExposureBanner />
+        </div>
+        {/* A thread replaces the list rather than sitting beside it: the mail
           gets the whole window, and there is never an empty pane. */}
       {openThreadId ? (
         <Thread backTo={routeFor(path.value).title} />

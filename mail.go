@@ -370,7 +370,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	})
 
 	// Auth ceremony/status routes are public; all product data is session
-	// protected. The bootstrap token stops working after the first passkey.
+	// protected. The bootstrap token stops working after the first credential.
 	// Agent Bearer tokens enter through requireAgent, which additionally
 	// fences them away from the auth/security surface.
 	public.Handle("/", a.requireAgent(api))

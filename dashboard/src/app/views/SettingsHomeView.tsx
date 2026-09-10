@@ -10,7 +10,7 @@ const PAGES: { href: string; title: string; sub: string }[] = [
   { href: "/settings/accounts", title: "Mailboxes", sub: "Connect, sync, backfill, retention, and export." },
   { href: "/settings/mail", title: "Mail", sub: "Whether unknown senders are screened before they reach you." },
   { href: "/settings/appearance", title: "Appearance", sub: "Thirteen themes, seven accents, two subject voices." },
-  { href: "/settings/security", title: "Security", sub: "Passkeys, recovery, sessions, agent tokens." },
+  { href: "/settings/security", title: "Security", sub: "Password, passkeys, recovery, sessions, agent tokens." },
 ];
 
 export function SettingsHomeView() {

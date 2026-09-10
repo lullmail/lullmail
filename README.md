@@ -43,7 +43,7 @@ RFC 4155) is a table-stakes feature, not a cancellation flow.
 - Installable PWA with an explicit iOS path, account-bound offline reading,
   resilient local drafts, a conservative replay queue for reversible filing
   actions, and optional private web-push alerts.
-- Recovery-first security: password sign-in (argon2id, hashed on your
+- Password-primary security: argon2id password sign-in (hashed on your
   server), discoverable passkeys with required user verification,
   multiple-key management, printable one-use recovery codes, optional TOTP,
   HttpOnly server sessions, revocation, rate limiting, and provable
@@ -106,7 +106,7 @@ recovery codes are opt-in additions, not requirements.
 |---|---|---|
 | `DATABASE_URL` | yes | Postgres, e.g. `postgres://user:pass@host:5432/lullmail` |
 | `SECRET_KEY` | no | Seals mail credentials, OAuth/passkey records, TOTP, and push subscriptions with AES-256-GCM. Generated on first boot into `DATA_DIR/secret.key` when unset; changing it invalidates sealed data. |
-| `LULL_TOKEN` | no | One-time installation token for registering the first passkey. Generated (24h expiry, printed to logs) when unset. Rejected after first setup; restart regenerates while no passkey exists. |
+| `LULL_TOKEN` | no | One-time installation token for first-run setup (password or passkey). Generated (24h expiry, printed to logs) when unset. Rejected after the first credential exists; restart regenerates only while the install is unconfigured. |
 | `LULL_USER_EMAIL` | no | Owner address; normally entered on the setup page instead. |
 | `PUBLIC_URL` | no | Browser origin, e.g. `https://mail.example.com`. Auto-detected from the first setup visit and pinned in the database; the env var forces an origin. WebAuthn and mutation-origin checks reject a different origin. |
 | `DATA_DIR` | no | Where the generated key and setup token live (default `./data`). Mount it as a volume or restarts regenerate them. |
