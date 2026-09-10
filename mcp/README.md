@@ -32,8 +32,8 @@ never its internals, and the main build never compiles it.
 ## Tools
 
 **Accounts:** `list_accounts` · `add_account` (IMAP/JMAP; backfill 0 = all
-history) · `update_account` (pause sync / retention / history window) ·
-`delete_account` · `sync_account`
+history) · `update_account` (pause sync / retention) · `set_backfill`
+(history window: 0 = all, or days) · `delete_account` · `sync_account`
 
 **Read:** `list_bucket` (screener / imbox / paper_trail / feed / snoozed /
 set_aside / later) · `search_mail` · `read_thread` · `recent_mail` ·
@@ -51,7 +51,8 @@ an automatic plain fallback) · `undo_send` · `screener_list` ·
 
 Not exposed, on purpose: sign-in, passwords, passkeys, sessions, TOTP,
 agent-token management, mailbox zip export, full-account deletion, OAuth
-browser flows. Agent tokens are fenced to mail + work surfaces at the
+browser flows. (`GET /personal/export` — the notes/board zip — is reachable;
+it holds no mail.) Agent tokens are fenced to mail + work surfaces at the
 router (`agent.go` in the server).
 
 ## The bulk-import pattern

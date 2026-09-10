@@ -32,7 +32,7 @@ func registerTools(s *mcp.Server, c *client) {
 		Address      string `json:"address" jsonschema:"full email address, e.g. hello@domain.com"`
 		Username     string `json:"username" jsonschema:"login username; defaults to the address"`
 		Password     string `json:"password" jsonschema:"mailbox password or app password"`
-		Host         string `json:"host" jsonschema:"IMAP host, e.g. mail.purelymail.com"`
+		Host         string `json:"host" jsonschema:"IMAP host, e.g. imap.purelymail.com"`
 		Port         int    `json:"port" jsonschema:"IMAP port; default 993"`
 		SMTPHost     string `json:"smtp_host" jsonschema:"sending host; default same as host"`
 		SMTPPort     int    `json:"smtp_port" jsonschema:"sending port; default 587"`
@@ -204,7 +204,7 @@ func registerTools(s *mcp.Server, c *client) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "get_attachment",
-		Description: "Fetch one attachment's raw bytes, base64-encoded with its content type. " +
+		Description: "Fetch one attachment's raw bytes, base64-encoded. " +
 			"Decode before saving or inspecting.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
 		AccountID string `json:"account_id" jsonschema:"account id from list_accounts"`

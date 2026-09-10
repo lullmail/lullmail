@@ -1,4 +1,4 @@
-module github.com/tyler/lullmail/mcp
+module github.com/lullmail/lullmail/mcp
 
 go 1.26
 

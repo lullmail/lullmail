@@ -106,7 +106,10 @@ func (c *client) do(ctx context.Context, method, path string, body any, query ur
 			Title  string `json:"title"`
 			Detail string `json:"detail"`
 		}
-		if json.Unmarshal(data, &problem) == nil {
+		// A body may be valid JSON without being problem+json; only adopt
+		// its fields when the title is actually there, or the status line
+		// fallback gets overwritten with emptiness.
+		if json.Unmarshal(data, &problem) == nil && problem.Title != "" {
 			apiErr.Title, apiErr.Detail = problem.Title, problem.Detail
 		}
 		return nil, apiErr
