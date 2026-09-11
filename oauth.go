@@ -299,7 +299,15 @@ func (a *App) sendOAuth(ctx context.Context, provider, account string, out *mail
 	if out.HTML != "" {
 		contentType, content = "HTML", out.HTML
 	}
-	payload := map[string]any{"message": map[string]any{"subject": out.Subject, "body": map[string]string{"contentType": contentType, "content": content}, "toRecipients": recipients(out.To), "ccRecipients": recipients(out.Cc), "bccRecipients": recipients(out.Bcc), "internetMessageHeaders": headers}, "saveToSentItems": true}
+	files, err := graphAttachments(out.Attachments)
+	if err != nil {
+		return err
+	}
+	message := map[string]any{"subject": out.Subject, "body": map[string]string{"contentType": contentType, "content": content}, "toRecipients": recipients(out.To), "ccRecipients": recipients(out.Cc), "bccRecipients": recipients(out.Bcc), "internetMessageHeaders": headers}
+	if files != nil {
+		message["attachments"] = files
+	}
+	payload := map[string]any{"message": message, "saveToSentItems": true}
 	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://graph.microsoft.com/v1.0/me/sendMail", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -314,4 +322,43 @@ func (a *App) sendOAuth(ctx context.Context, provider, account string, out *mail
 		return fmt.Errorf("graph send status %d: %s", res.StatusCode, strings.TrimSpace(string(data)))
 	}
 	return nil
+}
+
+// Graph's regular attachments cap at 3 MB per file; beyond that the whole
+// request is rejected with a 413. Refuse here, before anything is sent,
+// rather than shipping a message whose attachments were dropped or letting
+// Graph fail it opaquely.
+const (
+	graphAttachmentMax    = 3 << 20
+	graphAttachmentMaxSum = 25 << 20
+)
+
+// graphAttachments serializes engine attachments into Graph fileAttachment
+// entries, mirroring what the SMTP renderer carries.
+func graphAttachments(atts []mail.Attachment) ([]map[string]any, error) {
+	if len(atts) == 0 {
+		return nil, nil
+	}
+	out := make([]map[string]any, 0, len(atts))
+	var total int
+	for i, att := range atts {
+		if len(att.Data) > graphAttachmentMax {
+			return nil, fmt.Errorf("attachment %d (%q) exceeds the 3 MB per-file limit for Microsoft accounts", i+1, att.Filename)
+		}
+		total += len(att.Data)
+		if total > graphAttachmentMaxSum {
+			return nil, fmt.Errorf("attachments exceed the 25 MB total limit for Microsoft accounts")
+		}
+		contentType := att.ContentType
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		out = append(out, map[string]any{
+			"@odata.type":  "#microsoft.graph.fileAttachment",
+			"name":         att.Filename,
+			"contentType":  contentType,
+			"contentBytes": base64.StdEncoding.EncodeToString(att.Data),
+		})
+	}
+	return out, nil
 }

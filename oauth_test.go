@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neutron-build/neutron/mail"
 	"golang.org/x/oauth2"
 )
 
@@ -62,6 +64,52 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 var oauthDriverID atomic.Uint64
+
+func TestGraphAttachmentsSerializeAsFileAttachments(t *testing.T) {
+	atts, err := graphAttachments([]mail.Attachment{
+		{Filename: "invoice.pdf", ContentType: "application/pdf", Data: []byte("PDF")},
+		{Filename: "blob.bin", Data: []byte("B")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(atts) != 2 {
+		t.Fatalf("entries = %d, want 2", len(atts))
+	}
+	first := atts[0]
+	if first["@odata.type"] != "#microsoft.graph.fileAttachment" {
+		t.Errorf("@odata.type = %v, want fileAttachment", first["@odata.type"])
+	}
+	if first["name"] != "invoice.pdf" {
+		t.Errorf("name = %v, want invoice.pdf", first["name"])
+	}
+	if first["contentType"] != "application/pdf" {
+		t.Errorf("contentType = %v, want the attachment's content type", first["contentType"])
+	}
+	if first["contentBytes"] != base64.StdEncoding.EncodeToString([]byte("PDF")) {
+		t.Errorf("contentBytes = %v, want base64 data", first["contentBytes"])
+	}
+	if atts[1]["contentType"] != "application/octet-stream" {
+		t.Errorf("empty content type did not fall back to octet-stream: %v", atts[1]["contentType"])
+	}
+}
+
+func TestGraphAttachmentsRejectOversizedFilesBeforeSending(t *testing.T) {
+	big := make([]byte, graphAttachmentMax+1)
+	if atts, err := graphAttachments([]mail.Attachment{{Filename: "big.pdf", Data: big}}); err == nil || atts != nil {
+		t.Fatalf("per-file over-limit attachment accepted: %v", err)
+	}
+	many := make([]mail.Attachment, 0, 9)
+	for range 9 {
+		many = append(many, mail.Attachment{Filename: "f", Data: make([]byte, 3<<20)})
+	}
+	if atts, err := graphAttachments(many); err == nil || atts != nil {
+		t.Fatalf("over-total attachments accepted: %v", err)
+	}
+	if _, err := graphAttachments(nil); err != nil {
+		t.Fatalf("no attachments should pass: %v", err)
+	}
+}
 
 func TestOAuthRefreshSerializesCASAndPreservesRefreshToken(t *testing.T) {
 	cfg := &Config{
