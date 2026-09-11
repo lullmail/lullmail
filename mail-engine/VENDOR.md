@@ -5,7 +5,7 @@ Upstream: `~/Documents/Code Projects/Neutron/mail` (module
 `replace`. The module has no published version and deploy builds run on servers
 with no Neutron checkout, so the copy has to be in-tree.
 
-Synced: 2026-09-11, from Neutron 199e4407.
+Synced: 2026-09-11, from Neutron 0bb34882.
 
 ## Rule
 

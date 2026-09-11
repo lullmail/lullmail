@@ -251,7 +251,7 @@ func (a *App) oauthToken(ctx context.Context, provider, account, address, sealed
 	return mail.Credential{Provider: mail.Provider(provider), Email: address, AccessToken: fresh.AccessToken}, nil
 }
 
-func (a *App) sendOAuth(ctx context.Context, provider, account string, out *mail.Outgoing) error {
+func (a *App) sendOAuth(ctx context.Context, provider, account string, out *mail.Outgoing, replyParent string) error {
 	cred, err := a.Token(ctx, mail.AccountID(account))
 	if err != nil {
 		return err
@@ -281,19 +281,13 @@ func (a *App) sendOAuth(ctx context.Context, provider, account string, out *mail
 		}
 		return nil
 	}
-	recipients := func(items []mail.Address) []map[string]any {
-		rows := make([]map[string]any, 0, len(items))
-		for _, item := range items {
-			rows = append(rows, map[string]any{"emailAddress": map[string]string{"address": item.Email, "name": item.Name}})
-		}
-		return rows
-	}
-	headers := []map[string]string{}
-	if out.InReplyTo != "" {
-		headers = append(headers, map[string]string{"name": "In-Reply-To", "value": out.InReplyTo})
-	}
-	if len(out.References) > 0 {
-		headers = append(headers, map[string]string{"name": "References", "value": strings.Join(out.References, " ")})
+	// Graph documents that internetMessageHeaders on sendMail accepts only
+	// x- prefixed custom headers, so a reply cannot carry In-Reply-To or
+	// References that way (and renaming them to x- would strip their
+	// standard meaning). Replies go through createReply, which builds the
+	// threading headers server-side from the parent message.
+	if out.InReplyTo != "" && replyParent != "" {
+		return a.graphReplySend(ctx, cred, out, replyParent)
 	}
 	// Graph has no multipart submission: HTML messages send as HTML and
 	// plain messages as plain, with the alternative part already carried
@@ -306,13 +300,13 @@ func (a *App) sendOAuth(ctx context.Context, provider, account string, out *mail
 	if err != nil {
 		return err
 	}
-	message := map[string]any{"subject": out.Subject, "body": map[string]string{"contentType": contentType, "content": content}, "toRecipients": recipients(out.To), "ccRecipients": recipients(out.Cc), "bccRecipients": recipients(out.Bcc), "internetMessageHeaders": headers}
+	message := map[string]any{"subject": out.Subject, "body": map[string]string{"contentType": contentType, "content": content}, "toRecipients": graphRecipients(out.To), "ccRecipients": graphRecipients(out.Cc), "bccRecipients": graphRecipients(out.Bcc)}
 	if files != nil {
 		message["attachments"] = files
 	}
 	payload := map[string]any{"message": message, "saveToSentItems": true}
 	body, _ := json.Marshal(payload)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://graph.microsoft.com/v1.0/me/sendMail", bytes.NewReader(body))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, graphAPIBase+"/me/sendMail", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+cred.AccessToken)
 	res, err := http.DefaultClient.Do(req)
@@ -323,6 +317,99 @@ func (a *App) sendOAuth(ctx context.Context, provider, account string, out *mail
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
 		return fmt.Errorf("graph send status %d: %s", res.StatusCode, strings.TrimSpace(string(data)))
+	}
+	return nil
+}
+
+// graphAPIBase is a variable only so tests can point the Graph client at a
+// fake service; production always talks to the real endpoint.
+var graphAPIBase = "https://graph.microsoft.com/v1.0"
+
+// graphReplySend threads a reply the documented way: createReply drafts a
+// message with In-Reply-To/References set by the service, the draft is
+// shaped with the composer's body and recipients, then sent. A failure
+// after drafting removes the leftover draft rather than littering Drafts.
+func (a *App) graphReplySend(ctx context.Context, cred mail.Credential, out *mail.Outgoing, replyParent string) error {
+	native := mail.NativeID(mail.MessageID(replyParent))
+	if native == "" {
+		return fmt.Errorf("graph reply: parent %q has no native provider id", replyParent)
+	}
+	var draft struct {
+		ID string `json:"id"`
+	}
+	if err := graphCall(ctx, cred, http.MethodPost, "/me/messages/"+native+"/createReply", map[string]any{}, &draft); err != nil {
+		return err
+	}
+	if draft.ID == "" {
+		return fmt.Errorf("graph reply: createReply returned no draft id")
+	}
+	draftPath := "/me/messages/" + draft.ID
+	cleanup := func(err error) error {
+		_ = graphCall(ctx, cred, http.MethodDelete, draftPath, nil, nil)
+		return err
+	}
+	contentType, content := "Text", out.Text
+	if out.HTML != "" {
+		contentType, content = "HTML", out.HTML
+	}
+	patch := map[string]any{
+		"subject":       out.Subject,
+		"body":          map[string]string{"contentType": contentType, "content": content},
+		"toRecipients":  graphRecipients(out.To),
+		"ccRecipients":  graphRecipients(out.Cc),
+		"bccRecipients": graphRecipients(out.Bcc),
+	}
+	if err := graphCall(ctx, cred, http.MethodPatch, draftPath, patch, nil); err != nil {
+		return cleanup(err)
+	}
+	files, err := graphAttachments(out.Attachments)
+	if err != nil {
+		return cleanup(err)
+	}
+	for _, file := range files {
+		if err := graphCall(ctx, cred, http.MethodPost, draftPath+"/attachments", file, nil); err != nil {
+			return cleanup(err)
+		}
+	}
+	if err := graphCall(ctx, cred, http.MethodPost, draftPath+"/send", nil, nil); err != nil {
+		return cleanup(err)
+	}
+	return nil
+}
+
+// graphRecipients serializes engine addresses into Graph recipient values.
+func graphRecipients(items []mail.Address) []map[string]any {
+	rows := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		rows = append(rows, map[string]any{"emailAddress": map[string]string{"address": item.Email, "name": item.Name}})
+	}
+	return rows
+}
+
+// graphCall performs one authorized JSON call against Graph and reports
+// non-2xx answers with the service's own error body.
+func graphCall(ctx context.Context, cred mail.Credential, method, endpoint string, body map[string]any, out any) error {
+	var reader io.Reader
+	if body != nil {
+		encoded, _ := json.Marshal(body)
+		reader = bytes.NewReader(encoded)
+	}
+	req, _ := http.NewRequestWithContext(ctx, method, graphAPIBase+endpoint, reader)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Authorization", "Bearer "+cred.AccessToken)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
+		return fmt.Errorf("graph %s %s status %d: %s", method, endpoint, res.StatusCode, strings.TrimSpace(string(data)))
+	}
+	if out != nil {
+		return json.NewDecoder(res.Body).Decode(out)
 	}
 	return nil
 }

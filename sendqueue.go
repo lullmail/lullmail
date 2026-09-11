@@ -149,7 +149,7 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, http.StatusNotFound, "Parent Not Found", "reply_to_message_id does not resolve")
 			return
 		}
-		deliver, from, ok := a.deliveryFor(r.Context(), mail.AccountID(parentAcct))
+		deliver, from, ok := a.deliveryFor(r.Context(), mail.AccountID(parentAcct), req.ReplyToID)
 		if !ok {
 			writeProblem(w, http.StatusPreconditionFailed, "No Send Credential", "cannot send for this account")
 			return
@@ -169,7 +169,7 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deliver, from, ok := a.deliveryFor(r.Context(), mail.AccountID(mirror))
+	deliver, from, ok := a.deliveryFor(r.Context(), mail.AccountID(mirror), "")
 	if !ok {
 		writeProblem(w, http.StatusPreconditionFailed, "No Send Credential", "cannot send for this account")
 		return
@@ -292,14 +292,18 @@ func stripTags(s string) string {
 	return b.String()
 }
 
-func (a *App) deliveryFor(ctx context.Context, account mail.AccountID) (deliverFunc, mail.Address, bool) {
+// deliveryFor resolves an account to its outbound sender: same host as
+// IMAP, port 587 STARTTLS, unless the account overrides it. replyParent is
+// the mirror message id being answered ("" for fresh sends); OAuth
+// providers that cannot set threading headers on a flat send need it.
+func (a *App) deliveryFor(ctx context.Context, account mail.AccountID, replyParent string) (deliverFunc, mail.Address, bool) {
 	var provider, address string
 	if err := a.db.QueryRowContext(ctx, `SELECT provider,address FROM email_accounts WHERE mirror_account_id=$1`, string(account)).Scan(&provider, &address); err != nil {
 		return nil, mail.Address{}, false
 	}
 	if provider == "gmail" || provider == "graph" {
 		return func(ctx context.Context, outgoing *mail.Outgoing) error {
-			return a.sendOAuth(ctx, provider, string(account), outgoing)
+			return a.sendOAuth(ctx, provider, string(account), outgoing, replyParent)
 		}, mail.Address{Email: address}, true
 	}
 	sender, from, ok := a.SMTPFor(ctx, account)

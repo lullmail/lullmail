@@ -249,3 +249,159 @@ func TestOAuthRefreshReturnsErrorWhenCASUpdatesNoRows(t *testing.T) {
 		t.Fatalf("credential state changed after zero-row CAS: updates=%d", updates)
 	}
 }
+
+// A Graph reply must never try to carry In-Reply-To/References through
+// internetMessageHeaders (Graph documents x--only custom headers): the
+// documented path is createReply, whose draft carries the threading headers
+// the service built, then a shape-and-send.
+func TestGraphReplyThreadsThroughCreateReply(t *testing.T) {
+	cfg := &Config{
+		SecretKey:             "0123456789abcdef0123456789abcdef",
+		MicrosoftClientID:     "client",
+		MicrosoftClientSecret: "secret",
+		MicrosoftTenant:       "common",
+	}
+	token, err := json.Marshal(oauth2.Token{AccessToken: "graph-token", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := sealSecret(cfg, string(token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	credRow := &testRows{
+		columns: []string{"provider", "address", "username", "host", "port", "cred_ciphertext"},
+		values:  [][]driver.Value{{"graph", "owner@example.com", "", "", int64(0), sealed}},
+	}
+	a := &App{cfg: cfg, log: discardLogger(), db: openStepDB(t,
+		dbStep{kind: "query", rows: credRow},
+		dbStep{kind: "query", rows: &testRows{
+			columns: []string{"cred_ciphertext"},
+			values:  [][]driver.Value{{sealed}},
+		}},
+	)}
+
+	type call struct {
+		method, path string
+		body         string
+	}
+	var mu sync.Mutex
+	var calls []call
+	saved := http.DefaultClient.Transport
+	t.Cleanup(func() { http.DefaultClient.Transport = saved })
+	http.DefaultClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := ""
+		if r.Body != nil {
+			raw, _ := io.ReadAll(r.Body)
+			body = string(raw)
+		}
+		mu.Lock()
+		calls = append(calls, call{r.Method, r.URL.Path, body})
+		mu.Unlock()
+		reply := "{}"
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/createReply"):
+			reply = `{"id":"draft-1"}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusAccepted,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(reply)),
+		}, nil
+	})
+
+	out := &mail.Outgoing{
+		To:          []mail.Address{{Email: "peer@example.com"}},
+		Subject:     "Re: hello",
+		Text:        "reply body",
+		InReplyTo:   "parent@example.com",
+		References:  []string{"parent@example.com"},
+		Attachments: []mail.Attachment{{Filename: "a.txt", ContentType: "text/plain", Data: []byte("hi")}},
+	}
+	if err := a.sendOAuth(context.Background(), "graph", "acct-1", out, "n:graph:AAMkParent"); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 4 {
+		t.Fatalf("graph calls = %d, want 4: %+v", len(calls), calls)
+	}
+	want := []struct{ method, path string }{
+		{http.MethodPost, "/v1.0/me/messages/AAMkParent/createReply"},
+		{http.MethodPatch, "/v1.0/me/messages/draft-1"},
+		{http.MethodPost, "/v1.0/me/messages/draft-1/attachments"},
+		{http.MethodPost, "/v1.0/me/messages/draft-1/send"},
+	}
+	for i, w := range want {
+		if calls[i].method != w.method || calls[i].path != w.path {
+			t.Fatalf("call %d = %s %s, want %s %s", i, calls[i].method, calls[i].path, w.method, w.path)
+		}
+	}
+	for i, c := range calls {
+		if strings.Contains(c.body, "internetMessageHeaders") {
+			t.Fatalf("call %d still sends internetMessageHeaders: %s", i, c.body)
+		}
+	}
+	if !strings.Contains(calls[1].body, `"subject":"Re: hello"`) || !strings.Contains(calls[1].body, "peer@example.com") {
+		t.Fatalf("draft patch lost the composer's subject or recipients: %s", calls[1].body)
+	}
+}
+
+// Fresh (non-reply) Graph sends keep using sendMail — and the payload must
+// not carry the unsupported headers field either.
+func TestGraphFreshSendUsesSendMailWithoutCustomHeaders(t *testing.T) {
+	cfg := &Config{
+		SecretKey:             "0123456789abcdef0123456789abcdef",
+		MicrosoftClientID:     "client",
+		MicrosoftClientSecret: "secret",
+		MicrosoftTenant:       "common",
+	}
+	token, err := json.Marshal(oauth2.Token{AccessToken: "graph-token", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := sealSecret(cfg, string(token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &App{cfg: cfg, log: discardLogger(), db: openStepDB(t,
+		dbStep{kind: "query", rows: &testRows{
+			columns: []string{"provider", "address", "username", "host", "port", "cred_ciphertext"},
+			values:  [][]driver.Value{{"graph", "owner@example.com", "", "", int64(0), sealed}},
+		}},
+		dbStep{kind: "query", rows: &testRows{
+			columns: []string{"cred_ciphertext"},
+			values:  [][]driver.Value{{sealed}},
+		}},
+	)}
+
+	var mu sync.Mutex
+	var bodies []string
+	saved := http.DefaultClient.Transport
+	t.Cleanup(func() { http.DefaultClient.Transport = saved })
+	http.DefaultClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, r.Method+" "+r.URL.Path+" "+string(raw))
+		mu.Unlock()
+		return &http.Response{
+			StatusCode: http.StatusAccepted,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader("{}")),
+		}, nil
+	})
+
+	out := &mail.Outgoing{To: []mail.Address{{Email: "peer@example.com"}}, Subject: "hello", Text: "fresh"}
+	if err := a.sendOAuth(context.Background(), "graph", "acct-1", out, ""); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 1 || !strings.HasPrefix(bodies[0], "POST /v1.0/me/sendMail ") {
+		t.Fatalf("calls = %v, want a single sendMail", bodies)
+	}
+	if strings.Contains(bodies[0], "internetMessageHeaders") {
+		t.Fatalf("sendMail payload still carries unsupported custom headers: %s", bodies[0])
+	}
+}
