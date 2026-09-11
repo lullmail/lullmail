@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"net/http"
@@ -60,8 +61,17 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		Attachments []sendAttachmentRequest `json:"attachments"`
 	}
 	// Attachments ride inside the JSON body, so the read cap has to cover
-	// them: 30 MiB of request bounds base64 overhead plus several files.
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 30<<20)).Decode(&req); err != nil {
+	// them at their wire size: base64 grows the decoded bytes by 4/3, so
+	// the advertised 25 MiB total alone arrives as ~33.4 MiB of payload.
+	// 34 MiB covers that plus the envelope; past it the request is refused
+	// as too large, not reported as malformed JSON.
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 34<<20)).Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeProblem(w, http.StatusRequestEntityTooLarge, "Request Too Large",
+				fmt.Sprintf("request exceeds the %d MiB cap; attachments are capped at 25 MiB decoded in total", maxErr.Limit>>20))
+			return
+		}
 		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}

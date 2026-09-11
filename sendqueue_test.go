@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"database/sql/driver"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -141,5 +144,65 @@ func TestDecodeAttachments(t *testing.T) {
 	big := base64.StdEncoding.EncodeToString(make([]byte, 15<<20+1))
 	if _, problem := decodeAttachments([]sendAttachmentRequest{{Filename: "big", DataB64: big}}, 25<<20); !strings.Contains(problem, "15 MiB") {
 		t.Errorf("oversized file: problem = %q", problem)
+	}
+}
+
+// The wire cap must let every attachment set that satisfies the decoded
+// limits (25 MiB total, 15 MiB per file) through the HTTP handler, and
+// refuse anything past it as too large rather than malformed JSON.
+func TestHandleSendEnvelopeCoversAdvertisedAttachmentTotals(t *testing.T) {
+	cfg := &Config{SecretKey: "0123456789abcdef0123456789abcdef"}
+	sealed, err := sealSecret(cfg, "app-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sendApp := func() *App {
+		return &App{
+			cfg:   cfg,
+			log:   discardLogger(),
+			sendq: newSendQueue(),
+			db: openStepDB(t,
+				dbStep{kind: "query", rows: &testRows{
+					columns: []string{"mirror_account_id"},
+					values:  [][]driver.Value{{"mirror-1"}},
+				}},
+				dbStep{kind: "query", rows: &testRows{
+					columns: []string{"provider", "address"},
+					values:  [][]driver.Value{{"imap", "owner@example.com"}},
+				}},
+				dbStep{kind: "query", rows: &testRows{
+					columns: []string{"address", "username", "host", "cred_ciphertext", "smtp_host", "smtp_port", "display_name"},
+					values:  [][]driver.Value{{"owner@example.com", "", "mail.example.com", sealed, "", int64(0), "Owner"}},
+				}},
+			),
+		}
+	}
+	file := func(size int) sendAttachmentRequest {
+		return sendAttachmentRequest{Filename: "f.bin", DataB64: base64.StdEncoding.EncodeToString(make([]byte, size))}
+	}
+	post := func(atts ...sendAttachmentRequest) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]any{"to": "dest@example.com", "subject": "files", "text": "hi", "attachments": atts})
+		r := httptest.NewRequest(http.MethodPost, "/api/send", bytes.NewReader(body))
+		r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, "owner-1"))
+		w := httptest.NewRecorder()
+		sendApp().handleSend(w, r)
+		return w
+	}
+
+	// Two 12 MiB files: legal under the decoded limits, ~32 MiB on the wire.
+	if w := post(file(12<<20), file(12<<20)); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"queued"`) {
+		t.Fatalf("two 12 MiB files: status = %d body = %s", w.Code, w.Body.String())
+	}
+	// Exactly the 25 MiB decoded total still fits the envelope.
+	if w := post(file(13<<20), file(12<<20)); w.Code != http.StatusOK {
+		t.Fatalf("exact total boundary: status = %d body = %s", w.Code, w.Body.String())
+	}
+	// One decoded byte over the total is the attachment-specific rejection.
+	if w := post(file(13<<20), file(12<<20+1)); w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "25 MiB total") {
+		t.Fatalf("total over boundary: status = %d body = %s", w.Code, w.Body.String())
+	}
+	// Past the wire cap the reader refuses with 413, not a JSON complaint.
+	if w := post(file(15<<20), file(15<<20), file(6<<20)); w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("over wire cap: status = %d body = %s", w.Code, w.Body.String())
 	}
 }
