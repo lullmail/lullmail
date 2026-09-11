@@ -199,7 +199,7 @@ func (a *App) startBackground() {
 				// Dated snoozes whose day has come return to the Imbox; the
 				// board and briefing also sweep on demand so a just-arrived
 				// return never waits on the tick.
-				if err := a.sweepSnoozed(ctx, uid); err != nil {
+				if err := a.sweepSnoozed(ctx, uid, ""); err != nil {
 					a.log.Error("sweep failed", "err", err)
 				}
 				if err := a.applyRetention(ctx, uid); err != nil {

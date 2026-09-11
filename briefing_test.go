@@ -21,9 +21,18 @@ type dbStep struct {
 	err  error
 }
 
+// queryLog is one recorded statement: the SQL text plus its arguments, so
+// tests can assert how a handler threads parameters into its queries.
+type queryLog struct {
+	kind  string
+	query string
+	args  []driver.Value
+}
+
 type stepDriver struct {
-	mu    sync.Mutex
-	steps []dbStep
+	mu     sync.Mutex
+	steps  []dbStep
+	logged []queryLog
 }
 
 type stepConn struct{ driver *stepDriver }
@@ -33,6 +42,32 @@ func (d *stepDriver) Open(string) (driver.Conn, error) { return &stepConn{driver
 func (c *stepConn) Prepare(string) (driver.Stmt, error) { return nil, errors.New("not supported") }
 func (c *stepConn) Close() error                        { return nil }
 func (c *stepConn) Begin() (driver.Tx, error)           { return nil, errors.New("not supported") }
+
+// CheckNamedValue lets non-default types (the spoke query's []string)
+// through unchanged, so the recorder sees the arguments as written.
+func (c *stepConn) CheckNamedValue(nv *driver.NamedValue) error {
+	if _, ok := nv.Value.([]string); ok {
+		return nil
+	}
+	_, err := driver.DefaultParameterConverter.ConvertValue(nv.Value)
+	return err
+}
+
+func (d *stepDriver) record(kind, query string, args []driver.NamedValue) {
+	values := make([]driver.Value, 0, len(args))
+	for _, a := range args {
+		values = append(values, a.Value)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.logged = append(d.logged, queryLog{kind: kind, query: query, args: values})
+}
+
+func (d *stepDriver) log() []queryLog {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]queryLog{}, d.logged...)
+}
 
 func (c *stepConn) next(kind string) (dbStep, error) {
 	c.driver.mu.Lock()
@@ -48,7 +83,8 @@ func (c *stepConn) next(kind string) (dbStep, error) {
 	return step, nil
 }
 
-func (c *stepConn) ExecContext(context.Context, string, []driver.NamedValue) (driver.Result, error) {
+func (c *stepConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	c.driver.record("exec", query, args)
 	step, err := c.next("exec")
 	if err != nil || step.err != nil {
 		return nil, firstError(err, step.err)
@@ -56,7 +92,8 @@ func (c *stepConn) ExecContext(context.Context, string, []driver.NamedValue) (dr
 	return driver.RowsAffected(1), nil
 }
 
-func (c *stepConn) QueryContext(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
+func (c *stepConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	c.driver.record("query", query, args)
 	step, err := c.next("query")
 	if err != nil || step.err != nil {
 		return nil, firstError(err, step.err)
@@ -99,7 +136,8 @@ var stepDriverID atomic.Uint64
 func openStepDB(t *testing.T, steps ...dbStep) *sql.DB {
 	t.Helper()
 	name := fmt.Sprintf("lullmail-step-%d", stepDriverID.Add(1))
-	sql.Register(name, &stepDriver{steps: steps})
+	drv := &stepDriver{steps: steps}
+	sql.Register(name, drv)
 	db, err := sql.Open(name, "")
 	if err != nil {
 		t.Fatal(err)
@@ -107,6 +145,22 @@ func openStepDB(t *testing.T, steps ...dbStep) *sql.DB {
 	db.SetMaxOpenConns(8)
 	t.Cleanup(func() { db.Close() })
 	return db
+}
+
+// openRecordingDB is openStepDB for tests that also need the executed
+// statements back.
+func openRecordingDB(t *testing.T, steps ...dbStep) (*sql.DB, *stepDriver) {
+	t.Helper()
+	name := fmt.Sprintf("lullmail-step-%d", stepDriverID.Add(1))
+	drv := &stepDriver{steps: steps}
+	sql.Register(name, drv)
+	db, err := sql.Open(name, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(8)
+	t.Cleanup(func() { db.Close() })
+	return db, drv
 }
 
 func emptyRows(columns ...string) driver.Rows { return &testRows{columns: columns} }

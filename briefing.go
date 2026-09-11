@@ -168,7 +168,7 @@ func (a *App) handleBriefing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Returned snoozes re-enter the picture before it is drawn.
-	if err := a.sweepSnoozed(r.Context(), uid); err != nil {
+	if err := a.sweepSnoozed(r.Context(), uid, ""); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Sweep Failed", err.Error())
 		return
 	}

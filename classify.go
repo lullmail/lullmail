@@ -249,7 +249,7 @@ func (a *App) handleCounts(w http.ResponseWriter, r *http.Request) {
 	}
 	// Counts feed the nav numerals; sweep first so a returned snooze stops
 	// counting as snoozed the moment anything asks.
-	if err := a.sweepSnoozed(r.Context(), uid); err != nil {
+	if err := a.sweepSnoozed(r.Context(), uid, ""); err != nil {
 		a.log.Error("counts sweep failed", "err", err)
 	}
 	var imbox, screener, feed, paper, aside, later int64
@@ -612,7 +612,7 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 	// The Snoozed list (and the calendar fed by it) must never show a return
 	// date already past — sweep before listing.
 	if r.PathValue("bucket") == "snoozed" {
-		if err := a.sweepSnoozed(r.Context(), uid); err != nil {
+		if err := a.sweepSnoozed(r.Context(), uid, ""); err != nil {
 			a.log.Error("bucket sweep failed", "err", err)
 		}
 	}

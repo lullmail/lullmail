@@ -21,12 +21,21 @@ func decodeJSON(r *http.Request, v any) error {
 
 // sweepSnoozed returns dated snoozes whose day has arrived (TASKS 1.4). A
 // Snoozed column that never gave the mail back would just be a second Set
-// Aside — the sweep is what makes deferral a promise.
-func (a *App) sweepSnoozed(ctx context.Context, uid string) error {
-	_, err := a.db.ExecContext(ctx, `
+// Aside — the sweep is what makes deferral a promise. A non-empty account
+// (the per-mailbox lens) limits the sweep to that account; the periodic
+// sweep in the background still returns everyone's mail.
+func (a *App) sweepSnoozed(ctx context.Context, uid, account string) error {
+	query := `
 		UPDATE hey_messages SET bucket = 'imbox'
 		WHERE user_id = $1 AND bucket = 'set_aside'
-		  AND set_aside_until IS NOT NULL AND set_aside_until <= now()`, uid)
+		  AND set_aside_until IS NOT NULL AND set_aside_until <= now()`
+	args := []any{uid}
+	if account != "" {
+		query += `
+		  AND account_id = (SELECT mirror_account_id FROM email_accounts WHERE user_id = $1 AND id = $2)`
+		args = append(args, account)
+	}
+	_, err := a.db.ExecContext(ctx, query, args...)
 	return err
 }
 
@@ -67,12 +76,13 @@ func (a *App) handleBoard(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
 		return
 	}
-	if err := a.sweepSnoozed(r.Context(), uid); err != nil {
+	if err := a.sweepSnoozed(r.Context(), uid, r.URL.Query().Get("account")); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Sweep Failed", err.Error())
 		return
 	}
 
-	needsYou, waiting, err := a.briefThreads(r.Context(), uid, r.URL.Query().Get("account"))
+	account := r.URL.Query().Get("account")
+	needsYou, waiting, err := a.briefThreads(r.Context(), uid, account)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return
@@ -86,12 +96,21 @@ func (a *App) handleBoard(w http.ResponseWriter, r *http.Request) {
 
 	// Live data for pinned threads: subject and date follow the thread's
 	// newest message; the stored title only outlives a disconnected account.
+	// Cards are scoped to the selected account the same way the derived
+	// lists are; a subquery (not a join) so a pinned card still shows its
+	// stored title when its account is disconnected.
 	type cardRow struct{ id, account, thread, title, note string }
 	var open []cardRow
-	rows, err := a.db.QueryContext(r.Context(), `
+	pinnedQuery := `
 		SELECT id::text, COALESCE(account_id,''), COALESCE(thread_key,''), title, note FROM board_cards
-		WHERE user_id = $1 AND done_at IS NULL AND thread_key IS NOT NULL
-		ORDER BY created_at`, uid)
+		WHERE user_id = $1 AND done_at IS NULL AND thread_key IS NOT NULL`
+	pinnedArgs := []any{uid}
+	if account != "" {
+		pinnedQuery += ` AND account_id = (SELECT mirror_account_id FROM email_accounts WHERE user_id = $1 AND id = $2)`
+		pinnedArgs = append(pinnedArgs, account)
+	}
+	pinnedQuery += ` ORDER BY created_at`
+	rows, err := a.db.QueryContext(r.Context(), pinnedQuery, pinnedArgs...)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return
@@ -113,14 +132,20 @@ func (a *App) handleBoard(w http.ResponseWriter, r *http.Request) {
 	rows.Close()
 	if len(open) > 0 {
 		live := map[string]briefThread{}
-		r2, err := a.db.QueryContext(r.Context(), `
+		liveQuery := `
 			SELECT DISTINCT ON (b.id)
 			       m.account_id, m.thread_id, m.id, m.subject, m.from_addrs, m.received_at, m.preview
 			FROM board_cards b
 			JOIN mail_messages m ON m.account_id = b.account_id AND m.thread_id = b.thread_key
 			JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-			WHERE b.user_id = $1 AND b.done_at IS NULL AND b.thread_key IS NOT NULL
-			ORDER BY b.id, m.received_at DESC NULLS LAST`, uid)
+			WHERE b.user_id = $1 AND b.done_at IS NULL AND b.thread_key IS NOT NULL`
+		liveArgs := []any{uid}
+		if account != "" {
+			liveQuery += ` AND ea.id = $2`
+			liveArgs = append(liveArgs, account)
+		}
+		liveQuery += ` ORDER BY b.id, m.received_at DESC NULLS LAST`
+		r2, err := a.db.QueryContext(r.Context(), liveQuery, liveArgs...)
 		if err != nil {
 			writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 			return
@@ -193,10 +218,16 @@ func (a *App) handleBoard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	done := []boardCard{}
-	r4, err := a.db.QueryContext(r.Context(), `
+	doneQuery := `
 		SELECT id::text, COALESCE(account_id,''), COALESCE(thread_key,''), title, note FROM board_cards
-		WHERE user_id = $1 AND done_at IS NOT NULL
-		ORDER BY done_at DESC LIMIT 20`, uid)
+		WHERE user_id = $1 AND done_at IS NOT NULL`
+	doneArgs := []any{uid}
+	if account != "" {
+		doneQuery += ` AND account_id = (SELECT mirror_account_id FROM email_accounts WHERE user_id = $1 AND id = $2)`
+		doneArgs = append(doneArgs, account)
+	}
+	doneQuery += ` ORDER BY done_at DESC LIMIT 20`
+	r4, err := a.db.QueryContext(r.Context(), doneQuery, doneArgs...)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return
