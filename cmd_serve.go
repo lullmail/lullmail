@@ -114,17 +114,30 @@ func securityHeaders(next http.Handler) http.Handler {
 // serveServiceWorker stamps the worker with a fingerprint of the built
 // shell. The browser only reinstalls a service worker when its bytes
 // change; a static file would keep serving the deploy-time shell offline
-// forever. Hashing index.html ties the version to whatever the build
-// actually shipped, so every deploy re-installs and re-caches — no manual
-// VERSION bumps to forget.
+// forever. Hashing every build artifact — not only index.html — ties the
+// version to whatever the build shipped, so a deploy that changes only an
+// icon or the manifest still re-installs and re-caches the shell: no
+// manual VERSION bumps to forget.
 func serveServiceWorker(w http.ResponseWriter, r *http.Request, fsys fs.FS) {
 	data, err := fs.ReadFile(fsys, "service-worker.js")
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	shell, _ := fs.ReadFile(fsys, "index.html")
-	sum := sha256.Sum256(shell)
+	h := sha256.New()
+	fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || path == "service-worker.js" {
+			return nil
+		}
+		file, err := fs.ReadFile(fsys, path)
+		if err != nil {
+			return nil
+		}
+		h.Write([]byte(path))
+		h.Write(file)
+		return nil
+	})
+	sum := h.Sum(nil)
 	body := strings.Replace(string(data),
 		`const VERSION = "lull-shell-v1";`,
 		`const VERSION = "lull-shell-`+hex.EncodeToString(sum[:6])+`";`, 1)
