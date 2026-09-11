@@ -12,6 +12,22 @@ import (
 	"time"
 )
 
+// writeZipEntries writes each archive member. Map order is irrelevant: the
+// entries are addressable by name, and a failure must surface to the caller
+// so the handler answers 500 before download headers are committed.
+func writeZipEntries(zw *zip.Writer, files map[string][]byte) error {
+	for name, data := range files {
+		file, err := zw.Create(name)
+		if err != nil {
+			return err
+		}
+		if _, err := file.Write(data); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Personal data has no provider original to preserve. Markdown keeps every
 // note/card readable without this app; JSON preserves canvas positions,
 // colours, ids, completion state, and thread references for re-import tools.
@@ -54,7 +70,12 @@ func (a *App) handlePersonalExport(w http.ResponseWriter, r *http.Request) {
 	rows.Close()
 
 	type cardExport struct {
-		ID        string     `json:"id"`
+		ID string `json:"id"`
+		// AccountID preserves which mailbox a pinned thread belonged to:
+		// the same provider thread id can exist on two accounts, and the
+		// pair (account, thread) — not the thread alone — is the identity
+		// the live board joins on. Empty for manual cards.
+		AccountID string     `json:"account_id,omitempty"`
 		ThreadID  string     `json:"thread_id,omitempty"`
 		Title     string     `json:"title"`
 		Note      string     `json:"note"`
@@ -62,14 +83,14 @@ func (a *App) handlePersonalExport(w http.ResponseWriter, r *http.Request) {
 		CreatedAt time.Time  `json:"created_at"`
 	}
 	cards := []cardExport{}
-	rows, err = a.db.QueryContext(r.Context(), `SELECT id::text,COALESCE(thread_key,''),title,note,done_at,created_at FROM board_cards WHERE user_id=$1 ORDER BY created_at`, uid)
+	rows, err = a.db.QueryContext(r.Context(), `SELECT id::text,COALESCE(account_id,''),COALESCE(thread_key,''),title,note,done_at,created_at FROM board_cards WHERE user_id=$1 ORDER BY created_at`, uid)
 	if err != nil {
 		writeProblem(w, 500, "Export Failed", err.Error())
 		return
 	}
 	for rows.Next() {
 		var c cardExport
-		if err := rows.Scan(&c.ID, &c.ThreadID, &c.Title, &c.Note, &c.DoneAt, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.AccountID, &c.ThreadID, &c.Title, &c.Note, &c.DoneAt, &c.CreatedAt); err != nil {
 			rows.Close()
 			writeProblem(w, 500, "Export Failed", err.Error())
 			return
@@ -95,14 +116,6 @@ func (a *App) handlePersonalExport(w http.ResponseWriter, r *http.Request) {
 	defer tmp.Close()
 
 	zw := zip.NewWriter(tmp)
-	write := func(name string, data []byte) error {
-		file, err := zw.Create(name)
-		if err != nil {
-			return err
-		}
-		_, err = file.Write(data)
-		return err
-	}
 
 	var notesMD strings.Builder
 	notesMD.WriteString("# Notes\n\n")
@@ -120,6 +133,9 @@ func (a *App) handlePersonalExport(w http.ResponseWriter, r *http.Request) {
 		if c.ThreadID != "" {
 			fmt.Fprintf(&cardsMD, "- Thread: `%s`\n", c.ThreadID)
 		}
+		if c.AccountID != "" {
+			fmt.Fprintf(&cardsMD, "- Account: `%s`\n", c.AccountID)
+		}
 		if c.Note != "" {
 			fmt.Fprintf(&cardsMD, "\n%s\n", c.Note)
 		}
@@ -128,11 +144,13 @@ func (a *App) handlePersonalExport(w http.ResponseWriter, r *http.Request) {
 	notesJSON, _ := json.MarshalIndent(notes, "", "  ")
 	cardsJSON, _ := json.MarshalIndent(cards, "", "  ")
 	manifest, _ := json.MarshalIndent(map[string]any{"format": "lullmail-personal-export", "version": 1, "exported_at": time.Now().UTC(), "notes": len(notes), "board_cards": len(cards)}, "", "  ")
-	for name, data := range map[string][]byte{"notes.md": []byte(notesMD.String()), "notes-layout.json": notesJSON, "board.md": []byte(cardsMD.String()), "board.json": cardsJSON, "export-manifest.json": manifest} {
-		if err := write(name, data); err != nil {
-			a.log.Error("personal export build failed", "err", err)
-			return
-		}
+	files := map[string][]byte{"notes.md": []byte(notesMD.String()), "notes-layout.json": notesJSON, "board.md": []byte(cardsMD.String()), "board.json": cardsJSON, "export-manifest.json": manifest}
+	if err := writeZipEntries(zw, files); err != nil {
+		// Entry writes fail before any download header is sent, so this is
+		// a clean 500 — not the empty 200 a bare return here used to leave.
+		a.log.Error("personal export build failed", "err", err)
+		writeProblem(w, http.StatusInternalServerError, "Export Failed", err.Error())
+		return
 	}
 	if err := zw.Close(); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Export Failed", err.Error())
