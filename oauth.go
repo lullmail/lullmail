@@ -258,8 +258,11 @@ func (a *App) sendOAuth(ctx context.Context, provider, account string, out *mail
 	}
 	if provider == "gmail" {
 		// Raw MIME via the engine renderer: identical multipart handling
-		// to SMTP, including the HTML part when one is set.
-		raw, err := out.Render()
+		// to SMTP, including the HTML part when one is set. The raw
+		// upload has no envelope, so Bcc must ride in the headers to be
+		// delivered at all; Gmail strips the header for recipients but
+		// keeps it on the saved Sent copy.
+		raw, err := out.RenderWithBcc()
 		if err != nil {
 			return err
 		}
