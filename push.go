@@ -109,29 +109,56 @@ func (a *App) sendPushForUser(ctx context.Context, uid string) {
 	if len(subs) == 0 {
 		return
 	}
+	// A message is push-pending while any subscription has neither a
+	// delivered receipt nor a live claim for it. Legacy receipts
+	// (subscription_hash '') covered "some device was notified" and keep
+	// covering every subscription; a delivered receipt on one device does
+	// not stop a retry for a device that failed.
 	var accountID, messageID, threadID string
-	err = a.db.QueryRowContext(ctx, `SELECT m.account_id,m.id,m.thread_id FROM hey_messages h JOIN mail_messages m ON m.account_id=h.account_id AND m.id=h.message_id JOIN email_accounts ea ON ea.mirror_account_id=m.account_id AND ea.user_id=h.user_id LEFT JOIN push_deliveries p ON p.user_id=h.user_id AND p.account_id=h.account_id AND p.message_id=h.message_id WHERE h.user_id=$1 AND h.bucket='imbox' AND h.read_at IS NULL AND p.message_id IS NULL ORDER BY m.received_at DESC NULLS LAST LIMIT 1`, uid).Scan(&accountID, &messageID, &threadID)
+	err = a.db.QueryRowContext(ctx, `SELECT m.account_id,m.id,m.thread_id FROM hey_messages h JOIN mail_messages m ON m.account_id=h.account_id AND m.id=h.message_id JOIN email_accounts ea ON ea.mirror_account_id=m.account_id AND ea.user_id=h.user_id WHERE h.user_id=$1 AND h.bucket='imbox' AND h.read_at IS NULL AND EXISTS (SELECT 1 FROM push_subscriptions s WHERE s.user_id=h.user_id AND NOT EXISTS (SELECT 1 FROM push_deliveries p WHERE p.user_id=h.user_id AND p.account_id=m.account_id AND p.message_id=m.message_id AND (p.subscription_hash='' OR p.subscription_hash=s.endpoint_hash) AND (p.delivered_at IS NOT NULL OR p.claimed_at > now() - interval '10 minutes'))) ORDER BY m.received_at DESC NULLS LAST LIMIT 1`, uid).Scan(&accountID, &messageID, &threadID)
 	if err != nil {
 		return
 	}
 	payload, _ := json.Marshal(map[string]string{"title": "New mail needs you", "body": "Open Lull Mail to read it.", "path": "/today", "thread": threadID, "account": accountID})
-	sent := false
 	for _, item := range subs {
+		// Claim the delivery before submitting: the background loop and a
+		// manual classify can dispatch concurrently, and both would
+		// otherwise select this message and double-notify. The claim is a
+		// lease — a dispatch that dies mid-send leaves a row that the
+		// purge reclaims after ten minutes.
+		claim, err := a.db.ExecContext(ctx, `INSERT INTO push_deliveries(user_id,account_id,message_id,subscription_hash,claimed_at)
+			VALUES ($1,$2,$3,$4,now()) ON CONFLICT (user_id,account_id,message_id,subscription_hash) DO NOTHING`,
+			uid, accountID, messageID, item.hash)
+		if err != nil {
+			continue
+		}
+		if claimed, _ := claim.RowsAffected(); claimed == 0 {
+			continue
+		}
+		// An unconfirmed outcome must stay retryable: drop the claim unless
+		// a delivered receipt landed on this row.
+		releaseClaim := func() {
+			_, _ = a.db.ExecContext(ctx, `DELETE FROM push_deliveries
+				WHERE user_id=$1 AND account_id=$2 AND message_id=$3 AND subscription_hash=$4 AND delivered_at IS NULL`,
+				uid, accountID, messageID, item.hash)
+		}
 		response, err := webpush.SendNotificationWithContext(ctx, payload, &item.sub, &webpush.Options{HTTPClient: &http.Client{Timeout: 15 * time.Second}, Subscriber: a.cfg.VAPIDSubject, VAPIDPublicKey: a.cfg.VAPIDPublic, VAPIDPrivateKey: a.cfg.VAPIDPrivate, TTL: 3600, Topic: "new-mail", Urgency: webpush.UrgencyNormal})
 		if err != nil {
+			releaseClaim()
 			continue
 		}
 		response.Body.Close()
 		if response.StatusCode == http.StatusGone || response.StatusCode == http.StatusNotFound {
 			_, _ = a.db.ExecContext(ctx, `DELETE FROM push_subscriptions WHERE endpoint_hash=$1`, item.hash)
+			releaseClaim()
 			continue
 		}
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
-			sent = true
+			_, _ = a.db.ExecContext(ctx, `UPDATE push_deliveries SET delivered_at=now()
+				WHERE user_id=$1 AND account_id=$2 AND message_id=$3 AND subscription_hash=$4 AND delivered_at IS NULL`,
+				uid, accountID, messageID, item.hash)
+			continue
 		}
-	}
-	if sent {
-		_, _ = a.db.ExecContext(ctx, `INSERT INTO push_deliveries(user_id,account_id,message_id,delivered_at)
-			VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`, uid, accountID, messageID, time.Now())
+		releaseClaim()
 	}
 }

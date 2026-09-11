@@ -163,7 +163,9 @@ func migrateAccountScopedState(ctx context.Context, db *sql.DB) error {
 		`DELETE FROM push_deliveries WHERE account_id IS NULL`,
 		`ALTER TABLE push_deliveries ALTER COLUMN account_id SET NOT NULL`,
 		`ALTER TABLE push_deliveries DROP CONSTRAINT IF EXISTS push_deliveries_pkey`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS push_deliveries_identity ON push_deliveries (user_id, account_id, message_id)`,
+		`DROP INDEX IF EXISTS push_deliveries_identity`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS push_deliveries_per_subscription
+			ON push_deliveries (user_id, account_id, message_id, subscription_hash)`,
 		`UPDATE board_cards b SET account_id = (
 			SELECT min(m.account_id) FROM mail_messages m
 			JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = b.user_id
@@ -219,12 +221,14 @@ func (a *App) startBackground(ctx context.Context) {
 
 // purgeExpired keeps auth tables bounded: ceremonies and OAuth states are
 // consumed-or-deleted today, so anything expired is garbage; sessions are
-// filtered on read but would otherwise live in the table forever.
+// filtered on read but would otherwise live in the table forever. It also
+// reclaims expired push-claim leases whose dispatch died mid-send.
 func (a *App) purgeExpired() {
 	for _, q := range []string{
 		`DELETE FROM auth_challenges WHERE expires_at < now()`,
 		`DELETE FROM oauth_states WHERE expires_at < now()`,
 		`DELETE FROM auth_sessions WHERE expires_at < now()`,
+		`DELETE FROM push_deliveries WHERE delivered_at IS NULL AND claimed_at < now() - interval '10 minutes'`,
 	} {
 		if _, err := a.db.Exec(q); err != nil {
 			a.log.Error("purge failed", "err", err, "query", q)

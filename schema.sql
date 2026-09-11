@@ -89,14 +89,29 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
 );
 CREATE INDEX IF NOT EXISTS push_subscriptions_user ON push_subscriptions (user_id);
 
+-- Push delivery receipts are per subscription, not per user: a successful
+-- delivery to one device must not mark the message delivered for a device
+-- that failed. A pending row (delivered_at NULL) is a dispatch lease — the
+-- claim is inserted before the external submit so concurrent dispatches
+-- cannot double-notify, and an uncompleted lease expires with claimed_at.
+-- subscription_hash '' marks pre-migration receipts ("some device was
+-- notified") and keeps covering every subscription.
 CREATE TABLE IF NOT EXISTS push_deliveries (
   user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   account_id text NOT NULL,
   message_id text NOT NULL,
-  delivered_at timestamptz NOT NULL DEFAULT now(),
+  subscription_hash text NOT NULL DEFAULT '',
+  claimed_at timestamptz NOT NULL DEFAULT now(),
+  delivered_at timestamptz,
   PRIMARY KEY (user_id, account_id, message_id)
 );
 ALTER TABLE push_deliveries ADD COLUMN IF NOT EXISTS account_id text;
+ALTER TABLE push_deliveries ADD COLUMN IF NOT EXISTS subscription_hash text NOT NULL DEFAULT '';
+ALTER TABLE push_deliveries ADD COLUMN IF NOT EXISTS claimed_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE push_deliveries ALTER COLUMN delivered_at DROP NOT NULL;
+DROP INDEX IF EXISTS push_deliveries_identity;
+CREATE UNIQUE INDEX IF NOT EXISTS push_deliveries_per_subscription
+  ON push_deliveries (user_id, account_id, message_id, subscription_hash);
 
 CREATE TABLE IF NOT EXISTS oauth_states (
   state_hash text PRIMARY KEY,

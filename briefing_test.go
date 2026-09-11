@@ -19,6 +19,9 @@ type dbStep struct {
 	kind string
 	rows driver.Rows
 	err  error
+	// zeroAffected makes an exec step report RowsAffected 0 (a conflicted
+	// INSERT ... ON CONFLICT, say) instead of the default 1.
+	zeroAffected bool
 }
 
 // queryLog is one recorded statement: the SQL text plus its arguments, so
@@ -88,6 +91,9 @@ func (c *stepConn) ExecContext(_ context.Context, query string, args []driver.Na
 	step, err := c.next("exec")
 	if err != nil || step.err != nil {
 		return nil, firstError(err, step.err)
+	}
+	if step.zeroAffected {
+		return driver.RowsAffected(0), nil
 	}
 	return driver.RowsAffected(1), nil
 }
