@@ -1,12 +1,45 @@
 package main
 
 import (
+	"database/sql"
 	"io"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
+
+// Liveness must stay 200 with a prompt "down" body even when the database
+// is unreachable: the probe has its own deadline, so a stalled pool cannot
+// hang the endpoint until the caller disconnects.
+func TestHealthStaysLiveWhenDatabaseIsDown(t *testing.T) {
+	db, err := sql.Open("pgx", "postgres://nobody:nopass@127.0.0.1:1/nowhere")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	for _, tc := range []struct {
+		name string
+		app  *App
+	}{
+		{"unreachable database", &App{db: db}},
+		{"no app at all", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			tc.app.handleHealth(w, httptest.NewRequest("GET", "/health", nil))
+			if w.Code != 200 {
+				t.Fatalf("status = %d, want 200", w.Code)
+			}
+			if !strings.Contains(w.Body.String(), `"database":"down"`) {
+				t.Fatalf("body = %s, want database down", w.Body.String())
+			}
+		})
+	}
+}
 
 func TestServeHTMLVersionsStylesheet(t *testing.T) {
 	files := fstest.MapFS{

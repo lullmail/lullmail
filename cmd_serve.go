@@ -1,14 +1,19 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -21,25 +26,12 @@ func serve() {
 	app := connectApp(cfg)
 	if app != nil {
 		app.mountAPI(mux)
-		app.startBackground()
 	} else {
 		apiUnavailable(mux, "no database configured")
 	}
 
-	// Always 200 on purpose: deploy health checks should restart on process
-	// death, not on a database blip — the API degrades to 503 instead and
-	// the dashboard says why. Registered after connectApp so it can report
-	// database state.
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		db := "down"
-		if app != nil {
-			if err := app.db.PingContext(r.Context()); err == nil {
-				db = "up"
-			}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"ok","database":"` + db + `"}`))
-	})
+	// Registered after connectApp so it can report database state.
+	mux.HandleFunc("/health", app.handleHealth)
 
 	dist, err := fs.Sub(assets, "dashboard/dist")
 	if err != nil {
@@ -92,8 +84,58 @@ func serve() {
 		Handler:           securityHeaders(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+
+	// SIGTERM/SIGINT drain in-flight requests and stop the background
+	// workers before the process exits, so a deploy or container stop never
+	// cuts a request or a sync mid-flight. The drain is bounded: requests
+	// that outlive it are dropped rather than blocking shutdown forever.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if app != nil {
+		app.startBackground(ctx)
+	}
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		<-ctx.Done()
+		log.Printf("lullmail shutting down (%v), draining HTTP", ctx.Err())
+		drainCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(drainCtx); err != nil {
+			log.Printf("shutdown: HTTP drain incomplete: %v", err)
+		}
+	}()
+
 	log.Printf("lullmail listening on %s", addr)
-	log.Fatal(srv.ListenAndServe())
+	err = srv.ListenAndServe()
+	if !errors.Is(err, http.ErrServerClosed) {
+		log.Fatal(err)
+	}
+	// The listener is closed and the drain goroutine owns the remaining
+	// in-flight budget; wait it out, then release the pools.
+	<-drained
+	if app != nil {
+		app.db.Close()
+		app.store.Close()
+	}
+}
+
+// handleHealth is the deploy liveness probe. Always 200 on purpose: health
+// checks should restart on process death, not on a database blip — the API
+// degrades to 503 instead and the dashboard says why. The database state in
+// the body carries its own short deadline so a stalled probe cannot hang
+// liveness until the caller disconnects.
+func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
+	db := "down"
+	if a != nil && a.db != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		if err := a.db.PingContext(ctx); err == nil {
+			db = "up"
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"ok","database":"` + db + `"}`))
 }
 
 func securityHeaders(next http.Handler) http.Handler {

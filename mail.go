@@ -182,9 +182,9 @@ func migrateAccountScopedState(ctx context.Context, db *sql.DB) error {
 
 // startBackground runs the sync scheduler and a classification pass on the
 // app's own cadence. Classification is idempotent; a slightly stale bucket
-// fixes itself on the next tick.
-func (a *App) startBackground() {
-	ctx := context.Background()
+// fixes itself on the next tick. The context is the server's shutdown
+// context, so both loops stop when the process drains.
+func (a *App) startBackground(ctx context.Context) {
 	go a.sched.Run(ctx)
 	go func() {
 		t := time.NewTicker(2 * time.Minute)
@@ -207,7 +207,11 @@ func (a *App) startBackground() {
 				}
 				a.sendPushForUser(ctx, uid)
 			}
-			<-t.C
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
 			a.purgeExpired()
 		}
 	}()
