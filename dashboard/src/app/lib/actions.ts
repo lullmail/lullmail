@@ -92,6 +92,28 @@ async function actMany(rows: Row[], action: ActionName, untilDays?: number) {
   await Promise.all(rows.map((r) => actOn(r.account, r.message_id, action, untilDays)));
 }
 
+/** Per-row outcome of a bulk mutation: which rows actually changed and
+    which requests failed, so a partial success is never reported as a
+    total failure (the list would show stale state with no undo) nor as a
+    total success (failed rows would look done and never be retried). */
+async function actManySettled(rows: Row[], action: ActionName, untilDays?: number) {
+  const results = await Promise.allSettled(rows.map((r) => actOn(r.account, r.message_id, action, untilDays)));
+  const changed: Row[] = [];
+  const failed: Row[] = [];
+  results.forEach((res, i) => (res.status === "fulfilled" ? changed : failed).push(rows[i]));
+  return { changed, failed };
+}
+
+/** Reconcile the view after a (possibly partial) bulk mutation and say
+    which subset failed. Returns the rows the user can still undo. */
+function settleMutation(changed: Row[], failed: Row[], verb: string): Row[] {
+  afterMutation();
+  if (failed.length) {
+    showError(`Could not ${verb} ${failed.length} of ${failed.length + changed.length} threads`);
+  }
+  return changed;
+}
+
 /** Where a row should go back to if the user undoes.
     The Snoozed list mixes two storage buckets, so the row's own value wins —
     it is the only thing that knows whether the snooze had a date. */
@@ -120,15 +142,15 @@ function describe(rows: Row[], verbPhrase: string): string {
 /** Done = read and out of the way. The inverse is exact, so the undo is honest. */
 export async function markDone(rows: Row[]) {
   if (!rows.length) return;
-  const previouslyUnread = rows.filter((r) => !r.read);
-  try {
-    await actMany(rows, "read");
-    if (rows.some((r) => r.thread_id === reader.value.threadId && r.account === reader.value.account)) closeReader();
-    afterMutation();
-    showToast(describe(rows, "Done"), () => undoRead(previouslyUnread));
-  } catch (e) {
-    fail(e, "Could not mark done");
-  }
+  const { changed, failed } = await actManySettled(rows, "read");
+  const done = settleMutation(changed, failed, "mark done");
+  if (!done.length) return;
+  if (rows.some((r) => r.thread_id === reader.value.threadId && r.account === reader.value.account)) closeReader();
+  // Only rows that were unread before the action flip back on undo; rows
+  // already read must stay read, and rows whose request failed were never
+  // marked and must not be touched at all.
+  const undoRows = done.filter((r) => !r.read);
+  showToast(describe(done, "Done"), () => undoRead(undoRows));
 }
 
 async function undoRead(rows: Row[]) {
@@ -143,14 +165,26 @@ async function undoRead(rows: Row[]) {
 
 export async function markRead(rows: Row[], read: boolean) {
   if (!rows.length) return;
+  const { changed, failed } = await actManySettled(rows, read ? "read" : "unread");
+  const done = settleMutation(changed, failed, "update");
+  if (!done.length) return;
+  // Snapshot the flipped rows' original state: undo restores what each row
+  // was, never a blanket inverse that would unread rows the user had
+  // already read before the action. Rows already in the target state, or
+  // whose request failed, are not captured and stay untouched by undo.
+  const before = done
+    .filter((row) => !!row.read !== read)
+    .map((row) => ({ row, was: !!row.read }));
+  showToast(describe(done, read ? "Marked read" : "Marked unread"), () => undoMarkRead(before));
+}
+
+async function undoMarkRead(before: { row: Row; was: boolean }[]) {
+  if (!before.length) return;
   try {
-    await actMany(rows, read ? "read" : "unread");
+    await Promise.all(before.map(({ row, was }) => actOn(row.account, row.message_id, was ? "read" : "unread")));
     afterMutation();
-    showToast(describe(rows, read ? "Marked read" : "Marked unread"), () =>
-      markRead(rows, !read)
-    );
   } catch (e) {
-    fail(e, "Could not update");
+    fail(e, "Could not undo");
   }
 }
 
@@ -173,30 +207,28 @@ function snoozeUndoState(r: Row): { from: Bucket; days?: number } {
 
 export async function moveTo(rows: Row[], to: Bucket) {
   if (!rows.length) return;
-  const before: Before[] = rows.map((r) => ({ row: r, ...snoozeUndoState(r) }));
-  try {
-    await actMany(rows, to);
-    if (rows.some((r) => r.thread_id === reader.value.threadId && r.account === reader.value.account)) closeReader();
-    afterMutation();
-    showToast(describe(rows, "Moved to " + BUCKET_LABEL[to]), () => restore(before));
-  } catch (e) {
-    fail(e, "Could not move");
-  }
+  const before = new Map(rows.map((r) => [r, snoozeUndoState(r)] as const));
+  const { changed, failed } = await actManySettled(rows, to);
+  const done = settleMutation(changed, failed, "move");
+  if (!done.length) return;
+  if (rows.some((r) => r.thread_id === reader.value.threadId && r.account === reader.value.account)) closeReader();
+  showToast(describe(done, "Moved to " + BUCKET_LABEL[to]), () =>
+    restore(done.map((row) => ({ row, ...before.get(row)! })))
+  );
 }
 
 /** days = 0 means someday: snoozed with no return date. */
 export async function snooze(rows: Row[], days: number) {
   if (!rows.length) return;
-  const before: Before[] = rows.map((r) => ({ row: r, ...snoozeUndoState(r) }));
-  try {
-    await actMany(rows, days > 0 ? "set_aside" : "later", days > 0 ? days : undefined);
-    if (rows.some((r) => r.thread_id === reader.value.threadId && r.account === reader.value.account)) closeReader();
-    afterMutation();
-    const when = days === 0 ? "for someday" : days === 1 ? "until tomorrow" : "for " + days + " days";
-    showToast(describe(rows, "Snoozed " + when), () => restore(before));
-  } catch (e) {
-    fail(e, "Could not snooze that");
-  }
+  const before = new Map(rows.map((r) => [r, snoozeUndoState(r)] as const));
+  const { changed, failed } = await actManySettled(rows, days > 0 ? "set_aside" : "later", days > 0 ? days : undefined);
+  const done = settleMutation(changed, failed, "snooze");
+  if (!done.length) return;
+  if (rows.some((r) => r.thread_id === reader.value.threadId && r.account === reader.value.account)) closeReader();
+  const when = days === 0 ? "for someday" : days === 1 ? "until tomorrow" : "for " + days + " days";
+  showToast(describe(done, "Snoozed " + when), () =>
+    restore(done.map((row) => ({ row, ...before.get(row)! })))
+  );
 }
 
 async function restore(before: Before[]) {
