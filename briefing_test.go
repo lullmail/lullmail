@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -109,6 +110,10 @@ func openStepDB(t *testing.T, steps ...dbStep) *sql.DB {
 }
 
 func emptyRows(columns ...string) driver.Rows { return &testRows{columns: columns} }
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 func requestAsOwner(method, target string) *http.Request {
 	r := httptest.NewRequest(method, target, nil)

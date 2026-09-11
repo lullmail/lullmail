@@ -1,8 +1,13 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
+	"database/sql/driver"
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	stdmail "net/mail"
 	"strings"
 	"testing"
@@ -10,6 +15,60 @@ import (
 
 	nmail "github.com/neutron-build/neutron/mail"
 )
+
+func TestAccountExportFallsBackToMirrorWhenProviderUnreachable(t *testing.T) {
+	// A resolver failure must degrade the export to the local mirror, not
+	// 502: the product promise is that a user's exit never depends on a
+	// healthy upstream. The credential below is an IMAP account with no
+	// host, so the resolver refuses it before any dialing.
+	cfg := &Config{SecretKey: "0123456789abcdef0123456789abcdef"}
+	sealed, err := sealSecret(cfg, "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &App{
+		cfg: cfg,
+		log: discardLogger(),
+		db: openStepDB(t,
+			dbStep{kind: "query", rows: &testRows{
+				columns: []string{"mirror_account_id", "address"},
+				values:  [][]driver.Value{{"mirror-1", "user@example.com"}},
+			}},
+			dbStep{kind: "query", rows: emptyRows("id", "name")},
+			dbStep{kind: "query", rows: &testRows{
+				columns: []string{"provider", "address", "username", "host", "port", "cred_ciphertext"},
+				values:  [][]driver.Value{{"imap", "user@example.com", "user", "", int64(0), sealed}},
+			}},
+		),
+	}
+	w := httptest.NewRecorder()
+	a.handleAccountExport(w, requestAsOwner(http.MethodGet, "/api/accounts/1/export"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Type"); got != "application/zip" {
+		t.Fatalf("content type = %q, want application/zip", got)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(w.Body.Bytes()), int64(w.Body.Len()))
+	if err != nil {
+		t.Fatalf("response is not a readable zip: %v", err)
+	}
+	var manifest exportManifest
+	for _, f := range zr.File {
+		if f.Name != "export-manifest.json" {
+			continue
+		}
+		rc, _ := f.Open()
+		raw, _ := io.ReadAll(rc)
+		rc.Close()
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			t.Fatalf("manifest is not JSON: %v", err)
+		}
+	}
+	if len(manifest.Warnings) == 0 || !strings.Contains(manifest.Warnings[0], "local mirror") {
+		t.Fatalf("manifest does not note mirror-only mode: %v", manifest.Warnings)
+	}
+}
 
 func TestWriteMboxRDEscapesOnlyBodyFromLines(t *testing.T) {
 	envelope := &nmail.Envelope{

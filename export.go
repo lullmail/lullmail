@@ -90,12 +90,15 @@ func (a *App) handleAccountExport(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Credential Failed", err.Error())
 		return
 	}
-	adapter, release, err := newResolver()(r.Context(), nmail.AccountID(mirrorID), cred)
-	if err != nil {
-		writeProblem(w, http.StatusBadGateway, "Connect Failed", err.Error())
-		return
+	adapter, release, resolveErr := newResolver()(r.Context(), nmail.AccountID(mirrorID), cred)
+	if resolveErr != nil {
+		// The export contract is provider-independent: with no adapter the
+		// whole archive is rendered from the local mirror instead of
+		// failing the user's exit on an unhealthy upstream.
+		a.log.Warn("mail export degraded to local mirror", "account", address, "err", resolveErr)
+	} else {
+		defer release()
 	}
-	defer release()
 
 	filename := safeExportName(address) + "-mail-export.zip"
 
@@ -119,10 +122,14 @@ func (a *App) handleAccountExport(w http.ResponseWriter, r *http.Request) {
 		Warnings:    warnings,
 		Note:        "Original provider messages are preserved when available. Mirror fallbacks are valid RFC 5322 messages but may omit provider-only headers or attachment bytes.",
 	}
+	if resolveErr != nil {
+		manifest.Warnings = appendExportWarning(manifest.Warnings,
+			fmt.Sprintf("provider unavailable (%v); the whole export was rendered from the local mirror", resolveErr))
+	}
 
 	for _, box := range plans {
 		report := exportMailboxReport{Name: box.name, File: box.filename, Messages: len(box.messages)}
-		if adapter.Provider() == nmail.ProviderIMAP {
+		if adapter != nil && adapter.Provider() == nmail.ProviderIMAP {
 			if cursor, cursorErr := a.store.Cursor(r.Context(), nmail.AccountID(mirrorID), box.id); cursorErr == nil {
 				if _, selectErr := adapter.Sync(r.Context(), box.id, cursor); selectErr != nil {
 					manifest.Warnings = appendExportWarning(manifest.Warnings,
@@ -138,15 +145,23 @@ func (a *App) handleAccountExport(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		for _, msg := range box.messages {
-			raw, rawErr := readProviderRaw(r.Context(), adapter, msg.id)
+			var raw []byte
+			var rawErr error
+			if adapter != nil {
+				raw, rawErr = readProviderRaw(r.Context(), adapter, msg.id)
+			} else {
+				rawErr = resolveErr
+			}
 			if rawErr == nil {
 				report.Raw++
 			} else {
 				report.Fallback++
 				body, _ := a.store.Body(r.Context(), nmail.AccountID(mirrorID), msg.id)
 				raw = mirrorEML(msg.envelope, body, rawErr)
-				manifest.Warnings = appendExportWarning(manifest.Warnings,
-					fmt.Sprintf("%s/%s used the local mirror: %v", box.name, msg.id, rawErr))
+				if adapter != nil {
+					manifest.Warnings = appendExportWarning(manifest.Warnings,
+						fmt.Sprintf("%s/%s used the local mirror: %v", box.name, msg.id, rawErr))
+				}
 			}
 			if err := writeMboxRD(entry, msg.envelope, raw); err != nil {
 				manifest.Warnings = appendExportWarning(manifest.Warnings,
