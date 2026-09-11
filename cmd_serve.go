@@ -26,6 +26,13 @@ func serve() {
 	app := connectApp(cfg)
 	if app != nil {
 		app.mountAPI(mux)
+	} else if cfg.DatabaseURL != "" {
+		// A configured database that never came up must not leave a
+		// permanently degraded process behind: liveness stays 200 for
+		// runtime blips, so nothing else would restart it. Exit here and
+		// let the supervisor's restart policy retry until Postgres
+		// answers; only an unset DATABASE_URL runs deliberately degraded.
+		log.Fatal("app: database is configured but startup failed — exiting for supervisor retry")
 	} else {
 		apiUnavailable(mux, "no database configured")
 	}
