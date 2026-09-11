@@ -1,6 +1,9 @@
 package main
 
 import (
+	"database/sql/driver"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -140,4 +143,60 @@ func TestFullAccountDeletionAcquiresOnceBlocksAndRetires(t *testing.T) {
 		t.Fatal("full deletion did not release the owner lock")
 	}
 	release()
+}
+
+// The audit's deadlock scenario: a handler already inside the lifecycle gate
+// queues a deletion writer (which waits on the owner lock) and then resolves
+// an account, which re-acquires the same read lock. Recursive read locks are
+// unsafe while a writer is pending, so the nested use must be a no-op gate
+// carried by the context — this test must complete, not hang.
+func TestAccountResolverUnderLifecycleGateWithPendingDeletion(t *testing.T) {
+	app := &App{db: openStepDB(t,
+		dbStep{kind: "query", rows: emptyRows("expr")},
+		dbStep{kind: "query", rows: &testRows{
+			columns: []string{"provider", "address", "username", "host", "port", "cred_ciphertext"},
+			values:  [][]driver.Value{{"imap", "a@x.com", "", "", int64(0), ""}},
+		}},
+	)}
+	resolver := app.accountResolver()
+
+	deletionReturned := make(chan struct{})
+	h := app.accountWorkLifecycle(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := make(chan struct{})
+		go func() {
+			close(started)
+			finish, _ := app.beginAccountDeletion("account-1")
+			if finish != nil {
+				finish(false)
+			}
+			close(deletionReturned)
+		}()
+		<-started
+		// Give the writer time to pend on the owner lock the gate holds.
+		time.Sleep(20 * time.Millisecond)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			// The DB stub yields no owned account, so the resolver errors —
+			// the point is that it returns at all rather than deadlocking.
+			_, _, _ = resolver(r.Context(), "account-1", mail.Credential{})
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("nested account use deadlocked against the pending deletion")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, requestAsOwner(http.MethodGet, "/api/threads/x"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	select {
+	case <-deletionReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("deletion stayed blocked after the gated request finished")
+	}
 }

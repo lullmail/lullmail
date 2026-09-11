@@ -95,12 +95,29 @@ func (a *App) beginAccountDeletion(acct mail.AccountID) (func(bool), bool) {
 	}, true
 }
 
+// accountGateKey marks a request that already holds the account owner read
+// lock via accountWorkLifecycle. Go's RWMutex blocks new read locks while a
+// writer is waiting, so a nested beginAccountUse under the gate would
+// deadlock the request against a concurrent deletion. Carrying the gate in
+// the context lets the inner acquisition see it and become a no-op.
+type accountGateKey struct{}
+
 func (a *App) accountWorkLifecycle(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		a.accountOwnerMu.RLock()
 		defer a.accountOwnerMu.RUnlock()
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), accountGateKey{}, true)))
 	})
+}
+
+// beginAccountUseCtx is beginAccountUse for call chains that may already run
+// inside accountWorkLifecycle. The request-level gate excludes deletion
+// outright, so a nested use needs no second lock pair.
+func (a *App) beginAccountUseCtx(ctx context.Context, acct mail.AccountID) (func(), bool) {
+	if ctx.Value(accountGateKey{}) != nil {
+		return func() {}, true
+	}
+	return a.beginAccountUse(acct)
 }
 
 // beginFullAccountDeletion blocks account creation and waits for every account
@@ -188,7 +205,7 @@ func storedCredential(provider mail.Provider, address, username, secret, host st
 func (a *App) accountResolver() mail.Resolver {
 	base := newResolver()
 	return func(ctx context.Context, acct mail.AccountID, cred mail.Credential) (mail.Adapter, func(), error) {
-		releaseUse, ok := a.beginAccountUse(acct)
+		releaseUse, ok := a.beginAccountUseCtx(ctx, acct)
 		if !ok {
 			return nil, nil, fmt.Errorf("account %s is being deleted", acct)
 		}
