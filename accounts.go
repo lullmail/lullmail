@@ -10,7 +10,9 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -311,6 +313,36 @@ func (a *App) getAccountJSON(w http.ResponseWriter, r *http.Request, id string) 
 	writeJSON(w, acc)
 }
 
+// decodeSettingsJSON reads exactly one bounded JSON document with unknown
+// fields rejected. Non-pointer request shapes cannot tell "field omitted"
+// from an explicit zero, and zero is a meaningful value on these endpoints
+// (0 = all history / forever) (audit 3 DATA-07).
+func decodeSettingsJSON(w http.ResponseWriter, r *http.Request, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return err
+		}
+		return errors.New("request must contain exactly one JSON object")
+	}
+	return nil
+}
+
+func writeSettingsDecodeError(w http.ResponseWriter, err error) {
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		writeProblem(w, http.StatusRequestEntityTooLarge, "Request Too Large", "the settings body is too large")
+		return
+	}
+	writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
+}
+
 // updateSyncEnabled flips the background-sync pause. Manual ?op=sync stays
 // available either way — pausing the scheduler is not pausing the owner.
 func (a *App) updateSyncEnabled(w http.ResponseWriter, r *http.Request, id string) {
@@ -320,13 +352,17 @@ func (a *App) updateSyncEnabled(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 	var req struct {
-		Enabled bool `json:"enabled"`
+		Enabled *bool `json:"enabled"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
-		writeProblem(w, 422, "Invalid Flag", "body must be {\"enabled\": true|false}")
+	if err := decodeSettingsJSON(w, r, &req); err != nil {
+		writeSettingsDecodeError(w, err)
 		return
 	}
-	result, err := a.db.ExecContext(r.Context(), `UPDATE email_accounts SET sync_enabled=$1 WHERE id=$2 AND user_id=$3`, req.Enabled, id, uid)
+	if req.Enabled == nil {
+		writeProblem(w, 422, "Missing Flag", "enabled is required and must be true or false")
+		return
+	}
+	result, err := a.db.ExecContext(r.Context(), `UPDATE email_accounts SET sync_enabled=$1 WHERE id=$2 AND user_id=$3`, *req.Enabled, id, uid)
 	if err != nil {
 		writeProblem(w, 500, "Update Failed", err.Error())
 		return
@@ -335,7 +371,7 @@ func (a *App) updateSyncEnabled(w http.ResponseWriter, r *http.Request, id strin
 		writeProblem(w, 404, "Not Found", "no such account")
 		return
 	}
-	writeJSON(w, map[string]any{"sync_enabled": req.Enabled})
+	writeJSON(w, map[string]any{"sync_enabled": *req.Enabled})
 }
 
 // updateBackfill sets how much history the product organizes. Zero means
@@ -350,16 +386,20 @@ func (a *App) updateBackfill(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 	var req struct {
-		Days int `json:"days"`
+		Days *int `json:"days"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil || req.Days < 0 || req.Days > 3650 {
-		writeProblem(w, 422, "Invalid Backfill", "days must be 0 (all history) through 3650")
+	if err := decodeSettingsJSON(w, r, &req); err != nil {
+		writeSettingsDecodeError(w, err)
+		return
+	}
+	if req.Days == nil || *req.Days < 0 || *req.Days > 3650 {
+		writeProblem(w, 422, "Invalid Backfill", "days is required and must be 0 (all history) through 3650")
 		return
 	}
 	var mirror string
 	err = a.db.QueryRowContext(r.Context(),
 		`UPDATE email_accounts SET backfill_days=$1 WHERE id=$2 AND user_id=$3 RETURNING mirror_account_id`,
-		req.Days, id, uid).Scan(&mirror)
+		*req.Days, id, uid).Scan(&mirror)
 	if err != nil {
 		writeProblem(w, 404, "Not Found", "no such account")
 		return
@@ -371,7 +411,7 @@ func (a *App) updateBackfill(w http.ResponseWriter, r *http.Request, id string) 
 		  WHERE m.account_id=$2
 		    AND $3 > 0
 		    AND (m.received_at AT TIME ZONE 'UTC') <= now() - make_interval(days => $3))`,
-		uid, mirror, req.Days); err != nil {
+		uid, mirror, *req.Days); err != nil {
 		writeProblem(w, 500, "Backfill Failed", err.Error())
 		return
 	}
@@ -381,7 +421,7 @@ func (a *App) updateBackfill(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 	a.events.publish(uid, syncEvent{Type: "sync-finished", AccountID: id, Changed: true})
-	writeJSON(w, map[string]any{"backfill_days": req.Days})
+	writeJSON(w, map[string]any{"backfill_days": *req.Days})
 }
 
 func (a *App) updateRetention(w http.ResponseWriter, r *http.Request, id string) {
@@ -391,13 +431,17 @@ func (a *App) updateRetention(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 	var req struct {
-		Days int `json:"days"`
+		Days *int `json:"days"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil || req.Days < 0 || req.Days > 3650 {
-		writeProblem(w, 422, "Invalid Retention", "days must be 0 (forever) through 3650")
+	if err := decodeSettingsJSON(w, r, &req); err != nil {
+		writeSettingsDecodeError(w, err)
 		return
 	}
-	result, err := a.db.ExecContext(r.Context(), `UPDATE email_accounts SET retention_days=$1 WHERE id=$2 AND user_id=$3`, req.Days, id, uid)
+	if req.Days == nil || *req.Days < 0 || *req.Days > 3650 {
+		writeProblem(w, 422, "Invalid Retention", "days is required and must be 0 (forever) through 3650")
+		return
+	}
+	result, err := a.db.ExecContext(r.Context(), `UPDATE email_accounts SET retention_days=$1 WHERE id=$2 AND user_id=$3`, *req.Days, id, uid)
 	if err != nil {
 		writeProblem(w, 500, "Retention Failed", err.Error())
 		return
@@ -410,7 +454,7 @@ func (a *App) updateRetention(w http.ResponseWriter, r *http.Request, id string)
 		writeProblem(w, 500, "Retention Failed", err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"retention_days": req.Days})
+	writeJSON(w, map[string]any{"retention_days": *req.Days})
 }
 
 // Retention affects only the local encrypted/mirrored copy; it never issues a

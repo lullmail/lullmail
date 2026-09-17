@@ -4,6 +4,7 @@ import (
 	"database/sql/driver"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -198,5 +199,47 @@ func TestAccountResolverUnderLifecycleGateWithPendingDeletion(t *testing.T) {
 	case <-deletionReturned:
 	case <-time.After(2 * time.Second):
 		t.Fatal("deletion stayed blocked after the gated request finished")
+	}
+}
+
+// Settings bodies must carry an explicit value: `{}` used to read as
+// "disable sync"/"keep nothing" because absence and zero collapsed into
+// one value, and trailing documents were silently ignored (audit 3
+// DATA-07).
+func TestSettingsDecodeRequiresExplicitValues(t *testing.T) {
+	type body struct {
+		Days *int `json:"days"`
+	}
+	for _, tc := range []struct {
+		name    string
+		payload string
+		wantErr bool
+		wantNil bool
+	}{
+		{name: "explicit zero is a real value", payload: `{"days":0}`, wantNil: false},
+		{name: "omitted field decodes to nil and the handler rejects it", payload: `{}`, wantNil: true},
+		{name: "null field decodes to nil and the handler rejects it", payload: `{"days":null}`, wantNil: true},
+		{name: "unknown fields are rejected", payload: `{"days":30,"unit":"days"}`, wantErr: true},
+		{name: "trailing document is rejected", payload: `{"days":30} {"days":60}`, wantErr: true},
+		{name: "oversized body is rejected", payload: `{"days":30,"pad":"` + string(make([]byte, 32<<10)) + `"}`, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var req body
+			r := httptest.NewRequest(http.MethodPost, "/api/accounts/x?op=retention", strings.NewReader(tc.payload))
+			w := httptest.NewRecorder()
+			err := decodeSettingsJSON(w, r, &req)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("decode should have failed")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantNil != (req.Days == nil) {
+				t.Fatalf("days nil = %v, want nil = %v", req.Days == nil, tc.wantNil)
+			}
+		})
 	}
 }

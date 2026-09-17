@@ -758,6 +758,14 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 	}
 	thread := r.PathValue("thread")
 	account := r.URL.Query().Get("account")
+	// Provider/native IDs and RFC Message-IDs are not globally unique
+	// across connected accounts; a missing account used to resolve
+	// duplicates with LIMIT 1, acting on whatever matched first (audit 3
+	// DATA-06).
+	if account == "" {
+		writeProblem(w, http.StatusBadRequest, "Missing Account", "account is required for thread operations")
+		return
+	}
 	threadQuery := `
 		SELECT m.id, m.account_id, m.subject, m.from_addrs, m.to_addrs, m.received_at,
 		       COALESCE(h.bucket,''), b.text_body, b.html_body, b.parts, b.fetched_at
@@ -765,12 +773,8 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
 		LEFT JOIN mail_bodies b ON b.account_id = m.account_id AND b.message_id = m.id
-		WHERE m.thread_id = $2`
-	threadArgs := []any{uid, thread}
-	if account != "" {
-		threadQuery += ` AND (m.account_id = $3 OR ea.id::text = $3)`
-		threadArgs = append(threadArgs, account)
-	}
+		WHERE m.thread_id = $2 AND (m.account_id = $3 OR ea.id::text = $3)`
+	threadArgs := []any{uid, thread, account}
 	threadQuery += ` ORDER BY m.received_at ASC NULLS LAST`
 	rows, err := a.db.QueryContext(r.Context(), threadQuery, threadArgs...)
 	if err != nil {
@@ -914,16 +918,18 @@ func (a *App) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	msgID := r.PathValue("message")
 	partID := r.PathValue("part")
 	requestedAccount := r.URL.Query().Get("account")
+	// Message ids are only account-scoped at the provider: without an
+	// account, a duplicate id resolves arbitrarily (audit 3 DATA-06).
+	if requestedAccount == "" {
+		writeProblem(w, http.StatusBadRequest, "Missing Account", "account is required for attachment downloads")
+		return
+	}
 	var acct string
 	attachmentQuery := `
 		SELECT m.account_id FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-		WHERE m.id = $2`
-	attachmentArgs := []any{uid, msgID}
-	if requestedAccount != "" {
-		attachmentQuery += ` AND (m.account_id = $3 OR ea.id::text = $3)`
-		attachmentArgs = append(attachmentArgs, requestedAccount)
-	}
+		WHERE m.id = $2 AND (m.account_id = $3 OR ea.id::text = $3)`
+	attachmentArgs := []any{uid, msgID, requestedAccount}
 	attachmentQuery += ` LIMIT 1`
 	err = a.db.QueryRowContext(r.Context(), attachmentQuery, attachmentArgs...).Scan(&acct)
 	if err != nil {
@@ -1012,16 +1018,19 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 	}
 	msg := r.PathValue("message")
 	account := r.URL.Query().Get("account")
+	// Same account-scoping rule as the thread and attachment endpoints:
+	// duplicate message ids across the owner's accounts must not resolve
+	// arbitrarily (audit 3 DATA-06).
+	if account == "" {
+		writeProblem(w, http.StatusBadRequest, "Missing Account", "account is required for message actions")
+		return
+	}
 	var acct, thread string
 	lookup := `SELECT m.account_id, m.thread_id
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-		WHERE m.id = $2`
-	lookupArgs := []any{uid, msg}
-	if account != "" {
-		lookup += ` AND (m.account_id = $3 OR ea.id::text = $3)`
-		lookupArgs = append(lookupArgs, account)
-	}
+		WHERE m.id = $2 AND (m.account_id = $3 OR ea.id::text = $3)`
+	lookupArgs := []any{uid, msg, account}
 	lookup += ` ORDER BY m.received_at DESC NULLS LAST LIMIT 1`
 	if err := a.db.QueryRowContext(r.Context(), lookup, lookupArgs...).Scan(&acct, &thread); err != nil {
 		writeProblem(w, http.StatusNotFound, "Not Found", "no such message")
