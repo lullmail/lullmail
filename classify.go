@@ -364,7 +364,7 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
 		WHERE (m.subject ILIKE $2 ESCAPE '\' OR m.from_addrs ILIKE $2 ESCAPE '\' OR m.to_addrs ILIKE $2 ESCAPE '\' OR m.preview ILIKE $2 ESCAPE '\')`+
 		accountClause(r)+
-		` ORDER BY m.received_at DESC NULLS LAST
+		` ORDER BY m.received_at DESC NULLS LAST, m.id DESC
 		LIMIT 60`, uid, like)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
@@ -683,8 +683,8 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 		    JOIN mail_messages m2 ON m2.account_id = h2.account_id AND m2.id = h2.message_id
 		    WHERE h2.user_id = $1 AND h2.bucket = ANY($2)
 		      AND m2.account_id = m.account_id AND m2.thread_id = m.thread_id
-		    ORDER BY m2.received_at DESC NULLS LAST LIMIT 1)
-		ORDER BY m.received_at DESC NULLS LAST
+		    ORDER BY m2.received_at DESC NULLS LAST, m2.id DESC LIMIT 1)
+		ORDER BY m.received_at DESC NULLS LAST, m.id DESC
 		LIMIT 200`
 	rows, err := a.db.QueryContext(r.Context(), query, args...)
 	if err != nil {
@@ -794,6 +794,11 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		Body        string       `json:"body"`
 		HTML        string       `json:"html,omitempty"`
 		Attachments []attachment `json:"attachments,omitempty"`
+		// "ready" (cached or fetched now), "missing" (never fetched; the
+		// eager pass was capped or skipped), "failed" (an eager fetch
+		// errored). Empty content with status "ready" is authoritative —
+		// a genuinely empty message (audit 3 DATA-12).
+		BodyStatus string `json:"body_status"`
 	}
 	out := []msgRow{}
 	type ref struct {
@@ -814,6 +819,11 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		}
 		row.Body = textBody.String
 		row.HTML = htmlBody.String
+		if fetched.Valid {
+			row.BodyStatus = "ready"
+		} else {
+			row.BodyStatus = "missing"
+		}
 		row.Attachments = parseAttachments(parts)
 		row.From = firstSenderName(fromJSON.String)
 		var to []mail.Address
@@ -880,10 +890,12 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 			b, err := a.eng.Body(fetchCtx, mail.AccountID(rf.acct), mail.MessageID(rf.id), ad)
 			if err != nil {
 				a.log.Error("body fetch: engine", "msg", rf.id, "err", err)
+				out[rf.idx].BodyStatus = "failed"
 				continue
 			}
 			out[rf.idx].Body = b.Text
 			out[rf.idx].HTML = b.HTML
+			out[rf.idx].BodyStatus = "ready"
 			if atts := b.Attachments(); len(atts) > 0 {
 				list := []attachment{}
 				for _, p := range atts {

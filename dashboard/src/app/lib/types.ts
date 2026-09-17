@@ -73,6 +73,9 @@ export interface Message {
   body: string;
   html?: string;
   attachments?: Attachment[];
+  /** "ready" | "missing" (not fetched yet) | "failed" (fetch errored).
+      Empty content with status "ready" is a genuinely empty message. */
+  body_status?: "ready" | "missing" | "failed";
 }
 
 export interface ScreenerSender {
