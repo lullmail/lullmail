@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/neutron-build/neutron/mail"
 )
@@ -974,21 +976,54 @@ func (a *App) handleAttachment(w http.ResponseWriter, r *http.Request) {
 
 	// Filename from the stored parts list; harmless fallback if absent.
 	var partsRaw sql.NullString
-	filename := "attachment"
+	// attachmentFilename reduces a provider-supplied name to a safe single
+	// path component: separators and backslashes drop their prefixes,
+	// control characters vanish, and hostile/dot names fall back to a
+	// generic one. Never used as a server filesystem path — only as the
+	// Content-Disposition display value (audit 3 DATA-14).
+	filename := attachmentFilename("attachment")
 	if a.db.QueryRowContext(r.Context(),
 		`SELECT parts FROM mail_bodies WHERE account_id = $1 AND message_id = $2`, acct, msgID).Scan(&partsRaw) == nil && partsRaw.Valid {
 		var raw []mail.BodyPart
 		if json.Unmarshal([]byte(partsRaw.String), &raw) == nil {
 			for _, p := range raw {
 				if p.PartID == partID && p.Filename != "" {
-					filename = p.Filename
+					filename = attachmentFilename(p.Filename)
 				}
 			}
 		}
 	}
-	w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ReplaceAll(filename, `"`, "")+`"`)
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment",
+		map[string]string{"filename": filename}))
 	w.Header().Set("Content-Type", "application/octet-stream")
-	io.Copy(w, rc)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if _, err := io.Copy(w, rc); err != nil {
+		// Headers and possibly some body bytes are already out; the only
+		// honest action is logging — a second HTTP response is impossible.
+		a.log.Warn("attachment stream interrupted", "account", acct, "message", msgID, "part", partID, "err", err)
+	}
+}
+
+// attachmentFilename normalizes a provider filename for the
+// Content-Disposition header: one path component, no controls, never
+// empty or a dot-name.
+func attachmentFilename(s string) string {
+	s = strings.ReplaceAll(s, "\\", "/")
+	if i := strings.LastIndex(s, "/"); i >= 0 {
+		s = s[i+1:]
+	}
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+	s = strings.TrimSpace(s)
+	if s == "" || s == "." || s == ".." {
+		return "attachment"
+	}
+	return s
 }
 
 // parseAttachments reads the parts JSON the engine stores with bodies.

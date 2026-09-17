@@ -42,3 +42,22 @@ func TestLikeContainsEscapesWildcards(t *testing.T) {
 		t.Fatalf("likeContains(a_b) = %q", got)
 	}
 }
+
+// Provider filenames must not smuggle separators, controls, or dot-names
+// into Content-Disposition (audit 3 DATA-14).
+func TestAttachmentFilename(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"invoice.pdf", "invoice.pdf"},
+		{"../folder\\résumé\n.txt", "résumé.txt"},
+		{"..", "attachment"},
+		{".", "attachment"},
+		{"", "attachment"},
+		{"  ", "attachment"},
+		{"a/b/c.png", "c.png"},
+		{"line\nbreak.txt", "linebreak.txt"},
+	} {
+		if got := attachmentFilename(tc.in); got != tc.want {
+			t.Errorf("attachmentFilename(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
