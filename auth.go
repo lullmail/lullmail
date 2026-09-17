@@ -439,6 +439,20 @@ func (a *App) handleBootstrapBegin(w http.ResponseWriter, r *http.Request) {
 	a.beginRegistration(w, r, uid, "bootstrap")
 }
 
+// bootstrapAdvisoryKey serializes first-run completion installation-wide.
+// The per-user row lock cannot do this: two concurrent ceremonies with
+// different names create DIFFERENT owner rows and lock different rows, so
+// the global ownerConfiguredDB recheck alone cannot stop both from
+// installing a first credential (audit 3 AUTH-03). A transaction-scoped
+// advisory lock is released at commit/rollback, so a crashed ceremony
+// never wedges setup. 0x6C756C6C is "lull" in ASCII.
+const bootstrapAdvisoryKey = 0x6C756C6C
+
+func lockBootstrapInstallation(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, bootstrapAdvisoryKey)
+	return err
+}
+
 func (a *App) handleBootstrapFinish(w http.ResponseWriter, r *http.Request) {
 	if !a.bootstrapAuthorized(r) {
 		writeProblem(w, 401, "Unauthorized", "the one-time setup token is required")
@@ -450,6 +464,13 @@ func (a *App) handleBootstrapFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	// Installation-wide serialization BEFORE the configured check: two
+	// in-flight ceremonies must not both observe an unconfigured install
+	// (audit 3 AUTH-03).
+	if err := lockBootstrapInstallation(r.Context(), tx); err != nil {
+		writeProblem(w, 500, "Setup Failed", err.Error())
+		return
+	}
 	uid, err := a.finishRegistration(w, r, "bootstrap", tx)
 	if err != nil {
 		return
@@ -550,6 +571,13 @@ func (a *App) handleBootstrapPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	// Same installation-wide serialization as the passkey finish path: a
+	// password ceremony and a passkey ceremony racing must not both
+	// install a first credential (audit 3 AUTH-03).
+	if err := lockBootstrapInstallation(r.Context(), tx); err != nil {
+		writeProblem(w, 500, "Setup Failed", err.Error())
+		return
+	}
 	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
 		writeProblem(w, 500, "Setup Failed", err.Error())
 		return
@@ -739,7 +767,7 @@ func (a *App) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 400, "Sign In Expired", "start sign-in again")
 		return
 	}
-	userAny, credential, err := a.wa.FinishPasskeyLogin(func(rawID, handle []byte) (webauthn.User, error) {
+	userAny, credential, err := a.webAuthn().FinishPasskeyLogin(func(rawID, handle []byte) (webauthn.User, error) {
 		user, err := a.loadWebUserByHandle(r.Context(), handle)
 		if err != nil {
 			return nil, err

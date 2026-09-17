@@ -86,32 +86,73 @@ type setupTokenFile struct {
 // loadOrCreateSetupToken returns the current first-run token, reusing a
 // still-fresh file so restarts do not invalidate a token the operator has
 // not used yet, and regenerating once the 24h window lapses.
+//
+// The whole read/expiry-check/generate/publish sequence runs under a
+// cross-process file lock, so two concurrent starts cannot each publish
+// their own token and each answer with a value the other process (or the
+// final file) disagrees with (audit 3 AUTH-07).
 func loadOrCreateSetupToken(dir string) (setupTokenFile, error) {
-	path := filepath.Join(dir, "setup-token.json")
-	if raw, err := os.ReadFile(path); err == nil {
-		var file setupTokenFile
-		if json.Unmarshal(raw, &file) == nil && file.Token != "" {
-			if setupNow().Sub(file.Created) < setupTokenLifetime {
-				return file, nil
+	var file setupTokenFile
+	err := withPrivateDirLock(dir, func() error {
+		path := filepath.Join(dir, "setup-token.json")
+		if raw, err := os.ReadFile(path); err == nil {
+			var existing setupTokenFile
+			if json.Unmarshal(raw, &existing) == nil && existing.Token != "" {
+				if setupNow().Sub(existing.Created) < setupTokenLifetime {
+					file = existing
+					return nil
+				}
+				log.Println("setup: previous setup token expired — generating a new one")
 			}
-			log.Println("setup: previous setup token expired — generating a new one")
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return setupTokenFile{}, err
-	}
-	token, err := opaqueToken(24)
+		token, err := opaqueToken(24)
+		if err != nil {
+			return err
+		}
+		file = setupTokenFile{Token: token, Created: setupNow().UTC()}
+		data, err := json.Marshal(file)
+		if err != nil {
+			return err
+		}
+		return writePrivateFile(path, string(data)+"\n")
+	})
 	if err != nil {
-		return setupTokenFile{}, err
-	}
-	file := setupTokenFile{Token: token, Created: setupNow().UTC()}
-	data, err := json.Marshal(file)
-	if err != nil {
-		return setupTokenFile{}, err
-	}
-	if err := writePrivateFile(path, string(data)+"\n"); err != nil {
 		return setupTokenFile{}, err
 	}
 	return file, nil
+}
+
+// withPrivateDirLock holds an exclusive advisory lock on a marker file in
+// dir for the duration of fn. The lock is per-directory (not per-process),
+// so concurrent starts sharing a data volume serialize; a crash releases it
+// via the closed descriptor.
+func withPrivateDirLock(dir string, fn func() error) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, ".private.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := flockExclusive(f); err != nil {
+		return err
+	}
+	defer funlock(f)
+	return fn()
+}
+
+// syncDirectory makes a rename durable: without the directory fsync, a
+// crash can leave the OLD name in place even though the rename returned.
+func syncDirectory(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func deleteSetupToken(dir string) {
@@ -145,7 +186,10 @@ func writePrivateFile(path, content string) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(name, path)
+	if err := os.Rename(name, path); err != nil {
+		return err
+	}
+	return syncDirectory(dir)
 }
 
 // publishPrivateOnce publishes an immutable private file so that exactly one
@@ -239,16 +283,26 @@ func applyOrigin(cfg *Config, origin string) bool {
 // WebAuthn instance it implies. Before the first credential exists nothing is
 // secret, so re-detecting per ceremony start is safe; the origin that
 // completes setup is the one that gets stored.
+//
+// The candidate is validated on a COPY of the config and published only
+// after WebAuthn construction succeeds: applying the origin to the live
+// config first left a half-updated configuration (new RP ID, stale
+// instance) behind when construction failed (audit 3 AUTH-04).
 func (a *App) setOriginForSetup(origin string) bool {
 	a.waMu.Lock()
 	defer a.waMu.Unlock()
-	if origin == "" || !applyOrigin(a.cfg, origin) {
+	if origin == "" {
 		return false
 	}
-	wa, err := newWebAuthn(a.cfg)
+	candidate := *a.cfg
+	if !applyOrigin(&candidate, origin) {
+		return false
+	}
+	wa, err := newWebAuthn(&candidate)
 	if err != nil {
 		return false
 	}
+	*a.cfg = candidate
 	a.wa = wa
 	return true
 }
