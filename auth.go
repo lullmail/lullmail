@@ -23,6 +23,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -71,24 +72,31 @@ type authAttempt struct {
 	Count  int
 }
 
+// clientHost is the rate-limit identity for public auth endpoints.
+//
+// It deliberately ignores X-Forwarded-For and every other client-supplied
+// forwarding header (audit AUTH-01): without an explicitly trusted proxy
+// configuration, the first forwarded value is chosen by whoever is
+// connecting, so a direct client could mint a fresh limiter bucket per
+// request and defeat every host-keyed throttle. Fail closed instead —
+// deployments behind an ingress share that one peer bucket, which the
+// ingress's own rate limiting is responsible for complementing.
 func clientHost(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if i := strings.IndexByte(xff, ','); i >= 0 {
-			xff = xff[:i]
-		}
-		if h := strings.TrimSpace(xff); h != "" {
-			return h
-		}
-	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	if host == "" {
-		return "unknown"
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return "invalid-peer"
 	}
-	return host
+	return ip.Unmap().String()
 }
+
+// authAttemptCeil bounds the limiter table itself. Fresh keys beyond it are
+// rejected rather than admitted: the sweep only removes expired entries, so
+// a flood of distinct live peers must not grow the map without limit.
+const authAttemptCeil = 1024
 
 func (a *App) allowAuthAttempt(r *http.Request) bool {
 	host := clientHost(r)
@@ -104,8 +112,11 @@ func (a *App) allowAuthAttempt(r *http.Request) bool {
 			}
 		}
 	}
-	attempt := a.authAttempts[host]
-	if attempt.Window.IsZero() || now.Sub(attempt.Window) > 5*time.Minute {
+	attempt, seen := a.authAttempts[host]
+	if !seen && len(a.authAttempts) >= authAttemptCeil {
+		return false
+	}
+	if !seen || attempt.Window.IsZero() || now.Sub(attempt.Window) > 5*time.Minute {
 		attempt = authAttempt{Window: now}
 	}
 	attempt.Count++
@@ -360,8 +371,16 @@ func (a *App) bootstrapAuthorized(r *http.Request) bool {
 // both key off this, not passkeys alone, so a password-only install is
 // a finished install.
 func (a *App) ownerConfigured(ctx context.Context) (bool, error) {
+	return ownerConfiguredDB(ctx, a.db)
+}
+
+// ownerConfiguredDB is ownerConfigured against a transaction or pool, so
+// first-run completion can re-check under the user lock it already holds.
+// Two ceremonies that both passed token authorization must not both
+// install credentials (audit AUTH-07).
+func ownerConfiguredDB(ctx context.Context, q queryRower) (bool, error) {
 	var ok bool
-	err := a.db.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 		SELECT EXISTS(SELECT 1 FROM auth_credentials)
 		    OR EXISTS(SELECT 1 FROM auth_passwords)
 		    OR EXISTS(SELECT 1 FROM auth_totp WHERE enabled_at IS NOT NULL)`).Scan(&ok)
@@ -514,7 +533,13 @@ func (a *App) handleBootstrapPassword(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Setup Failed", err.Error())
 		return
 	}
+	hashRelease, busyErr := acquirePasswordWork()
+	if busyErr != nil {
+		writeAuthBusy(w)
+		return
+	}
 	hash, err := hashPassword(req.Password)
+	hashRelease()
 	if err != nil {
 		writeProblem(w, 500, "Setup Failed", err.Error())
 		return
@@ -527,6 +552,13 @@ func (a *App) handleBootstrapPassword(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback()
 	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
 		writeProblem(w, 500, "Setup Failed", err.Error())
+		return
+	}
+	// The pre-transaction check raced any competing ceremony; the final
+	// word is under the lock, in the same transaction as the insert
+	// (audit AUTH-07).
+	if configured, err := ownerConfiguredDB(r.Context(), tx); err != nil || configured {
+		writeProblem(w, 409, "Already Configured", "this installation already finished setup")
 		return
 	}
 	if _, err := tx.ExecContext(r.Context(), `INSERT INTO auth_passwords (user_id,hash,updated_at) VALUES ($1,$2,now())`, uid, hash); err != nil {
@@ -649,6 +681,15 @@ func (a *App) finishRegistration(w http.ResponseWriter, r *http.Request, kind st
 		writeProblem(w, 409, "Passkey Failed", "the account is being deleted")
 		return "", err
 	}
+	// First-run completion re-checks installation state under the lock it
+	// just took, BEFORE inserting: two bootstrap ceremonies that both held
+	// tokens must not both install a first credential (audit AUTH-07).
+	if kind == "bootstrap" {
+		if configured, err := ownerConfiguredDB(r.Context(), tx); err != nil || configured {
+			writeProblem(w, 409, "Already Configured", "this installation already finished setup")
+			return "", sql.ErrNoRows
+		}
+	}
 	_, err = tx.ExecContext(r.Context(), `INSERT INTO auth_credentials
 		(id,user_id,name,credential_ciphertext) VALUES ($1,$2,$3,$4)`, id, uid, name, sealed)
 	if err != nil {
@@ -748,21 +789,27 @@ func (a *App) handlePasswordLogin(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 400, "Bad Request", "enter your email and password")
 		return
 	}
-	ident := strings.ToLower(strings.TrimSpace(req.Email))
-	if remaining := a.passwordLockRemaining(ident); remaining > 0 {
+	// Lock keys are resolved, not typed: "uid:<id>" once the ident resolves,
+	// the shared unknown-user bucket otherwise. Aliases of one account (email
+	// vs display name) share a single allowance, and unknown idents cannot
+	// grow attempt state without bound (audit AUTH-02).
+	lockKey := unknownPasswordLockKey
+	uid, err := a.recoveryUser(r.Context(), req.Email)
+	if err == nil {
+		lockKey = "uid:" + uid
+	}
+	if remaining := a.passwordLockRemaining(lockKey); remaining > 0 {
 		writePasswordLocked(w, remaining)
 		return
 	}
-	// Same 401 for unknown ident, no password, and wrong password. Failures
-	// count against the ident (not the uid) so a 429 cannot reveal that a
-	// password exists. Miss paths still run argon2 against a dummy hash so
-	// the wall-clock cost matches a real verify.
+	// Same 401 for unknown ident, no password, and wrong password. Misses
+	// still run argon2 against a dummy hash so the wall-clock cost matches
+	// a real verify.
 	rejected := func() {
 		burnPasswordVerify(req.Password)
-		a.recordPasswordFailure(ident)
+		a.recordPasswordFailure(lockKey)
 		writeProblem(w, 401, "Sign In Failed", "invalid email or password")
 	}
-	uid, err := a.recoveryUser(r.Context(), req.Email)
 	if err != nil {
 		rejected()
 		return
@@ -777,17 +824,23 @@ func (a *App) handlePasswordLogin(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Sign In Failed", err.Error())
 		return
 	}
-	ok, err := verifyPassword(encoded, req.Password)
+	release, err := acquirePasswordWork()
 	if err != nil {
-		writeProblem(w, 500, "Sign In Failed", err.Error())
+		writeAuthBusy(w)
+		return
+	}
+	ok, verr := verifyPassword(encoded, req.Password)
+	release()
+	if verr != nil {
+		writeProblem(w, 500, "Sign In Failed", verr.Error())
 		return
 	}
 	if !ok {
-		a.recordPasswordFailure(ident)
+		a.recordPasswordFailure(lockKey)
 		writeProblem(w, 401, "Sign In Failed", "invalid email or password")
 		return
 	}
-	a.clearPasswordFailures(ident)
+	a.clearPasswordFailures(lockKey)
 	if err := a.createSession(w, r, uid, loginMethodPassword); err != nil {
 		writeProblem(w, 500, "Session Failed", err.Error())
 		return
@@ -961,26 +1014,38 @@ func (a *App) saveUsedCredential(ctx context.Context, uid string, credential *we
 	return nil
 }
 
-// revokeOtherSessions signs out every session except the one making the
-// request. Credential events (passkey removed, recovery codes replaced) are
-// the owner saying "something may be compromised" — stale sessions must not
-// outlive that.
-func (a *App) revokeOtherSessions(r *http.Request, uid string) {
-	if cookie, err := r.Cookie(sessionCookie); err == nil {
-		_, _ = a.db.ExecContext(r.Context(),
-			`DELETE FROM auth_sessions WHERE user_id=$1 AND id_hash<>$2`, uid, tokenHash(cookie.Value))
+// revokeOtherSessionsTx signs out every session except the one making the
+// request, inside the caller's credential-change transaction. Credential
+// events (passkey removed, password replaced, recovery codes regenerated)
+// are the owner saying "something may be compromised" — stale sessions must
+// not outlive that, and a revocation that cannot be confirmed must fail the
+// change rather than silently leave sessions usable (audit AUTH-05).
+func revokeOtherSessionsTx(ctx context.Context, db sqlExecer, r *http.Request, uid string) error {
+	cookie, err := r.Cookie(sessionCookie)
+	if err != nil {
+		return nil // no current session to preserve
 	}
+	_, err = db.ExecContext(ctx,
+		`DELETE FROM auth_sessions WHERE user_id=$1 AND id_hash<>$2`, uid, tokenHash(cookie.Value))
+	return err
 }
 
 func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
+	// Clearing this browser's cookie is not the same as revoking the
+	// session: another copy of the token stays usable if the server-side
+	// deletion failed. Report that instead of claiming success.
 	if cookie, err := r.Cookie(sessionCookie); err == nil {
-		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM auth_sessions WHERE id_hash=$1`, tokenHash(cookie.Value))
+		if _, err := a.db.ExecContext(r.Context(), `DELETE FROM auth_sessions WHERE id_hash=$1`, tokenHash(cookie.Value)); err != nil {
+			a.clearCookie(w, sessionCookie)
+			writeProblem(w, 500, "Logout Failed", "the session could not be revoked server-side — try again")
+			return
+		}
 	}
 	a.clearCookie(w, sessionCookie)
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-func (a *App) replaceRecoveryCodes(ctx context.Context, uid string) ([]string, error) {
+func (a *App) replaceRecoveryCodes(ctx context.Context, r *http.Request, uid string) ([]string, error) {
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -991,6 +1056,11 @@ func (a *App) replaceRecoveryCodes(ctx context.Context, uid string) ([]string, e
 	}
 	codes, err := a.replaceRecoveryCodesTx(ctx, tx, uid)
 	if err != nil {
+		return nil, err
+	}
+	// Fresh recovery codes retire the old ones; other sessions do not
+	// survive the rotation either (audit AUTH-05).
+	if err := revokeOtherSessionsTx(ctx, tx, r, uid); err != nil {
 		return nil, err
 	}
 	return codes, tx.Commit()
@@ -1085,9 +1155,9 @@ func (a *App) handleRecoveryLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-func totpCode(secret []byte, at time.Time) string {
+func totpCodeAt(secret []byte, step int64) string {
 	var counter [8]byte
-	binary.BigEndian.PutUint64(counter[:], uint64(at.Unix()/30))
+	binary.BigEndian.PutUint64(counter[:], uint64(step))
 	h := hmac.New(sha1.New, secret)
 	h.Write(counter[:])
 	sum := h.Sum(nil)
@@ -1096,13 +1166,28 @@ func totpCode(secret []byte, at time.Time) string {
 	return fmt.Sprintf("%06d", value%1_000_000)
 }
 
-func validTOTP(secret []byte, value string, now time.Time) bool {
+func totpCode(secret []byte, at time.Time) string {
+	return totpCodeAt(secret, at.Unix()/30)
+}
+
+// totpMatchedStep returns the highest time step whose code matches within
+// the ±1 window, or -1. Returning the step (not just a boolean) is what
+// lets login consume the accepted code exactly once (audit AUTH-03).
+func totpMatchedStep(secret []byte, value string, now time.Time) int64 {
 	value = strings.TrimSpace(value)
-	valid := 0
-	for step := -1; step <= 1; step++ {
-		valid |= subtle.ConstantTimeCompare([]byte(totpCode(secret, now.Add(time.Duration(step)*30*time.Second))), []byte(value))
+	best := int64(-1)
+	nowStep := now.Unix() / 30
+	for _, delta := range []int64{-1, 0, 1} {
+		step := nowStep + delta
+		if subtle.ConstantTimeCompare([]byte(totpCodeAt(secret, step)), []byte(value)) == 1 && step > best {
+			best = step
+		}
 	}
-	return valid == 1
+	return best
+}
+
+func validTOTP(secret []byte, value string, now time.Time) bool {
+	return totpMatchedStep(secret, value, now) >= 0
 }
 
 func (a *App) handleTOTPLogin(w http.ResponseWriter, r *http.Request) {
@@ -1135,14 +1220,48 @@ func (a *App) handleTOTPLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secret, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(plain)
-	if err != nil || !validTOTP(secret, req.Code, time.Now()) {
+	if err != nil {
+		writeProblem(w, 500, "Sign In Failed", "stored authenticator secret is unreadable")
+		return
+	}
+	step := totpMatchedStep(secret, req.Code, time.Now())
+	if step < 0 {
 		writeProblem(w, 401, "Sign In Failed", "invalid authenticator code")
 		return
 	}
-	if err := a.createSession(w, r, uid, loginMethodTOTP); err != nil {
+	// Consume the accepted step atomically with session creation: the
+	// UPDATE claims it (last_used_step advances monotonically) and returns
+	// no row for a replay or a disabled factor, so no session is minted for
+	// a code that already signed someone in (audit AUTH-03).
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeProblem(w, 500, "Sign In Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+		writeProblem(w, 500, "Sign In Failed", err.Error())
+		return
+	}
+	var claimed string
+	err = tx.QueryRowContext(r.Context(), `
+		UPDATE auth_totp SET last_used_step = $2
+		WHERE user_id = $1 AND enabled_at IS NOT NULL AND last_used_step < $2
+		RETURNING user_id`, uid, step).Scan(&claimed)
+	if err != nil {
+		writeProblem(w, 401, "Sign In Failed", "invalid authenticator code")
+		return
+	}
+	rawSession, err := a.persistSession(r.Context(), tx, r, uid, loginMethodTOTP)
+	if err != nil {
 		writeProblem(w, 500, "Session Failed", err.Error())
 		return
 	}
+	if err := tx.Commit(); err != nil {
+		writeProblem(w, 500, "Session Failed", err.Error())
+		return
+	}
+	a.setCookie(w, sessionCookie, rawSession, sessionLifetime)
 	a.clearAuthAttempts(r)
 	writeJSON(w, map[string]any{"ok": true})
 }
@@ -1237,6 +1356,17 @@ func writePasswordLocked(w http.ResponseWriter, remaining time.Duration) {
 		"too many failed attempts — try again in "+(time.Duration(int64(remaining.Seconds())+1)*time.Second).String())
 }
 
+// unknownPasswordLockKey is the shared failure bucket for identifiers that
+// resolve to no account: bounded storage, identical lock responses.
+const unknownPasswordLockKey = "unknown-user"
+
+// writeAuthBusy answers a KDF admission rejection: retryable, and distinct
+// from a wrong-password result.
+func writeAuthBusy(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "1")
+	writeProblem(w, 429, "Busy", "too many sign-ins at once — try again in a moment")
+}
+
 func (a *App) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 	uid, _ := a.userID(r.Context())
 	tx, err := a.db.BeginTx(r.Context(), nil)
@@ -1271,29 +1401,47 @@ func (a *App) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 404, "Not Found", "no such passkey")
 		return
 	}
+	if err := revokeOtherSessionsTx(r.Context(), tx, r, uid); err != nil {
+		writeProblem(w, 500, "Delete Failed", "could not revoke other sessions: "+err.Error())
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		writeProblem(w, 500, "Delete Failed", err.Error())
 		return
 	}
-	a.revokeOtherSessions(r, uid)
 	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (a *App) handleRecoveryRegenerate(w http.ResponseWriter, r *http.Request) {
 	uid, _ := a.userID(r.Context())
-	codes, err := a.replaceRecoveryCodes(r.Context(), uid)
+	codes, err := a.replaceRecoveryCodes(r.Context(), r, uid)
 	if err != nil {
 		writeProblem(w, 500, "Recovery Failed", err.Error())
 		return
 	}
-	a.revokeOtherSessions(r, uid)
 	writeJSON(w, map[string]any{"recovery_codes": codes})
 }
 
 func (a *App) handleTOTPBegin(w http.ResponseWriter, r *http.Request) {
 	uid, _ := a.userID(r.Context())
+	// Serialized with confirm against the owner row, and the upsert only
+	// replaces a still-pending enrollment: a begin that raced a confirm
+	// must not overwrite a factor the user just enabled (audit AUTH-04).
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeProblem(w, 500, "TOTP Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+		writeProblem(w, 500, "TOTP Failed", err.Error())
+		return
+	}
 	var enabled bool
-	_ = a.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM auth_totp WHERE user_id=$1 AND enabled_at IS NOT NULL)`, uid).Scan(&enabled)
+	if err := tx.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM auth_totp WHERE user_id=$1 AND enabled_at IS NOT NULL)`, uid).Scan(&enabled); err != nil {
+		writeProblem(w, 500, "TOTP Failed", err.Error())
+		return
+	}
 	if enabled {
 		writeProblem(w, 409, "TOTP Already Enabled", "disable the existing authenticator before replacing it")
 		return
@@ -1309,9 +1457,18 @@ func (a *App) handleTOTPBegin(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "TOTP Failed", err.Error())
 		return
 	}
-	_, err = a.db.ExecContext(r.Context(), `INSERT INTO auth_totp(user_id,secret_ciphertext,enabled_at) VALUES ($1,$2,NULL)
-		ON CONFLICT(user_id) DO UPDATE SET secret_ciphertext=excluded.secret_ciphertext,enabled_at=NULL`, uid, sealed)
+	result, err := tx.ExecContext(r.Context(), `INSERT INTO auth_totp(user_id,secret_ciphertext,enabled_at) VALUES ($1,$2,NULL)
+		ON CONFLICT(user_id) DO UPDATE SET secret_ciphertext=excluded.secret_ciphertext,enabled_at=NULL
+		WHERE auth_totp.enabled_at IS NULL`, uid, sealed)
 	if err != nil {
+		writeProblem(w, 500, "TOTP Failed", err.Error())
+		return
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		writeProblem(w, 409, "TOTP Already Enabled", "an authenticator was enabled while this setup started — try again")
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		writeProblem(w, 500, "TOTP Failed", err.Error())
 		return
 	}
@@ -1327,8 +1484,18 @@ func (a *App) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		Code string `json:"code"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeProblem(w, 500, "TOTP Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+		writeProblem(w, 500, "TOTP Failed", err.Error())
+		return
+	}
 	var sealed string
-	err := a.db.QueryRowContext(r.Context(), `SELECT secret_ciphertext FROM auth_totp WHERE user_id=$1`, uid).Scan(&sealed)
+	err = tx.QueryRowContext(r.Context(), `SELECT secret_ciphertext FROM auth_totp WHERE user_id=$1`, uid).Scan(&sealed)
 	if err != nil {
 		writeProblem(w, 409, "TOTP Missing", "start setup again")
 		return
@@ -1339,12 +1506,26 @@ func (a *App) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secret, _ := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(plain)
-	if !validTOTP(secret, req.Code, time.Now()) {
+	step := totpMatchedStep(secret, req.Code, time.Now())
+	if step < 0 {
 		writeProblem(w, 422, "Code Rejected", "the six-digit code did not match")
 		return
 	}
-	_, err = a.db.ExecContext(r.Context(), `UPDATE auth_totp SET enabled_at=now() WHERE user_id=$1`, uid)
+	// Enabling is conditional on the enrollment still being pending, and
+	// consumes the confirming step so that same code cannot immediately
+	// sign in again (audit AUTH-03/04).
+	result, err := tx.ExecContext(r.Context(), `
+		UPDATE auth_totp SET enabled_at=now(), last_used_step=$2
+		WHERE user_id=$1 AND enabled_at IS NULL`, uid, step)
 	if err != nil {
+		writeProblem(w, 500, "TOTP Failed", err.Error())
+		return
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		writeProblem(w, 409, "TOTP Already Enabled", "an authenticator is already enabled")
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		writeProblem(w, 500, "TOTP Failed", err.Error())
 		return
 	}
@@ -1374,6 +1555,12 @@ func (a *App) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := tx.ExecContext(r.Context(), `DELETE FROM auth_totp WHERE user_id=$1`, uid); err != nil {
 		writeProblem(w, 500, "TOTP Failed", err.Error())
+		return
+	}
+	// Removing a factor is a credential change: other sessions do not
+	// survive it (audit AUTH-05).
+	if err := revokeOtherSessionsTx(r.Context(), tx, r, uid); err != nil {
+		writeProblem(w, 500, "TOTP Failed", "could not revoke other sessions: "+err.Error())
 		return
 	}
 	if err := tx.Commit(); err != nil {
@@ -1427,7 +1614,13 @@ func (a *App) handlePasswordSet(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case err == nil:
 		had = true
+		release, busyErr := acquirePasswordWork()
+		if busyErr != nil {
+			writeAuthBusy(w)
+			return
+		}
 		ok, verr := verifyPassword(encoded, req.Current)
+		release()
 		if verr != nil {
 			writeProblem(w, 500, "Password Failed", verr.Error())
 			return
@@ -1443,7 +1636,13 @@ func (a *App) handlePasswordSet(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Password Failed", err.Error())
 		return
 	}
+	hashRelease, busyErr := acquirePasswordWork()
+	if busyErr != nil {
+		writeAuthBusy(w)
+		return
+	}
 	hash, err := hashPassword(req.New)
+	hashRelease()
 	if err != nil {
 		writeProblem(w, 500, "Password Failed", err.Error())
 		return
@@ -1453,14 +1652,19 @@ func (a *App) handlePasswordSet(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Password Failed", err.Error())
 		return
 	}
+	if had {
+		// Replacing a password revokes every other session, inside the
+		// same transaction as the change (audit AUTH-05).
+		if err := revokeOtherSessionsTx(r.Context(), tx, r, uid); err != nil {
+			writeProblem(w, 500, "Password Failed", "could not revoke other sessions: "+err.Error())
+			return
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		writeProblem(w, 500, "Password Failed", err.Error())
 		return
 	}
 	a.clearPasswordFailures(lockKey)
-	if had {
-		a.revokeOtherSessions(r, uid)
-	}
 	writeJSON(w, map[string]any{"ok": true})
 }
 
@@ -1493,12 +1697,26 @@ func (a *App) handlePasswordDelete(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Password Failed", err.Error())
 		return
 	}
+	// Deleting the password is a credential change; it gets the same
+	// failure counting as changing one (audit AUTH-02).
+	lockKey := "uid:" + uid
+	if remaining := a.passwordLockRemaining(lockKey); remaining > 0 {
+		writePasswordLocked(w, remaining)
+		return
+	}
+	release, busyErr := acquirePasswordWork()
+	if busyErr != nil {
+		writeAuthBusy(w)
+		return
+	}
 	ok, verr := verifyPassword(encoded, req.Current)
+	release()
 	if verr != nil {
 		writeProblem(w, 500, "Password Failed", verr.Error())
 		return
 	}
 	if !ok {
+		a.recordPasswordFailure(lockKey)
 		writeProblem(w, 403, "Current Password Incorrect", "enter the current password to remove it")
 		return
 	}
@@ -1516,11 +1734,14 @@ func (a *App) handlePasswordDelete(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Password Failed", err.Error())
 		return
 	}
+	if err := revokeOtherSessionsTx(r.Context(), tx, r, uid); err != nil {
+		writeProblem(w, 500, "Password Failed", "could not revoke other sessions: "+err.Error())
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		writeProblem(w, 500, "Password Failed", err.Error())
 		return
 	}
-	a.revokeOtherSessions(r, uid)
 	writeJSON(w, map[string]any{"ok": true})
 }
 

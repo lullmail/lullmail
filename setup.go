@@ -57,11 +57,24 @@ func resolveSecretKey(cfg *Config) error {
 		return err
 	}
 	key := hex.EncodeToString(b)
-	if err := writePrivateFile(path, key+"\n"); err != nil {
+	// The key is generated-then-published exactly once: os.WriteFile would
+	// let two concurrent starts (or a crash mid-write) overwrite or
+	// truncate the only persisted key, and losing it loses every stored
+	// provider credential (audit AUTH-08).
+	stored, err := publishPrivateOnce(path, []byte(key+"\n"))
+	if err != nil {
 		return err
 	}
-	log.Printf("setup: generated SECRET_KEY at %s (set the env var to pin your own)", path)
-	cfg.SecretKey = key
+	winner := strings.TrimSpace(string(stored))
+	if _, err := hex.DecodeString(winner); err != nil || len(winner) != 64 {
+		return errors.New("secret.key is not a 64-char hex key — delete it or fix permissions")
+	}
+	if winner != key {
+		log.Printf("setup: concurrent start won SECRET_KEY publication at %s — using the existing key", path)
+	} else {
+		log.Printf("setup: generated SECRET_KEY at %s (set the env var to pin your own)", path)
+	}
+	cfg.SecretKey = winner
 	return nil
 }
 
@@ -105,11 +118,81 @@ func deleteSetupToken(dir string) {
 	_ = os.Remove(filepath.Join(dir, "setup-token.json"))
 }
 
+// writePrivateFile writes mutable private state atomically: a same-directory
+// temp file, fsynced, then renamed over the target. A crash mid-write leaves
+// the previous contents intact instead of a truncated file (audit AUTH-08).
 func writePrivateFile(path, content string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(content), 0o600)
+	f, err := os.CreateTemp(dir, ".lullmail-private-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	defer os.Remove(name)
+	defer f.Close()
+	if err := f.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := f.WriteString(content); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
+}
+
+// publishPrivateOnce publishes an immutable private file so that exactly one
+// concurrent writer wins and every loser reads the winner's bytes: a temp
+// file is fsynced and hard-linked into place, and link(2) fails with EEXIST
+// if any other process got there first (audit AUTH-08). The directory is
+// fsynced so the new name survives a crash. The returned bytes are whatever
+// actually holds the path — the caller's candidate or the winner's.
+func publishPrivateOnce(path string, data []byte) ([]byte, error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.CreateTemp(dir, ".lullmail-secret-*")
+	if err != nil {
+		return nil, err
+	}
+	name := f.Name()
+	defer os.Remove(name)
+	defer f.Close()
+	if err := f.Chmod(0o600); err != nil {
+		return nil, err
+	}
+	if _, err := f.Write(data); err != nil {
+		return nil, err
+	}
+	if err := f.Sync(); err != nil {
+		return nil, err
+	}
+	if err := f.Close(); err != nil {
+		return nil, err
+	}
+	if err := os.Link(name, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return os.ReadFile(path)
+		}
+		return nil, err
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil {
+		return nil, err
+	}
+	return append([]byte(nil), data...), nil
 }
 
 func loadSetting(db *sql.DB, key string) (string, error) {

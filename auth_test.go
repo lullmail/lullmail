@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -39,12 +41,41 @@ func TestTOTPValidationWindowAndFormatting(t *testing.T) {
 	}
 }
 
-func TestClientHostPrefersForwardedFor(t *testing.T) {
+func TestClientHostIgnoresForwardedFor(t *testing.T) {
+	// Two requests from the same peer with different client-supplied
+	// forwarding headers must land in the SAME limiter bucket: otherwise a
+	// direct client mints a fresh allowance per request (audit AUTH-01).
 	r := httptest.NewRequest("POST", "/api/auth/password", nil)
 	r.RemoteAddr = "10.0.0.1:1234"
 	r.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.1")
-	if got := clientHost(r); got != "203.0.113.9" {
-		t.Fatalf("clientHost = %q", got)
+	if got := clientHost(r); got != "10.0.0.1" {
+		t.Fatalf("clientHost = %q, want the socket peer", got)
+	}
+	r.Header.Set("X-Forwarded-For", "198.51.100.7")
+	if got := clientHost(r); got != "10.0.0.1" {
+		t.Fatalf("clientHost followed a rotated header: %q", got)
+	}
+	// IPv4-mapped IPv6 peers normalize onto their IPv4 form.
+	r.RemoteAddr = "[::ffff:192.0.2.4]:999"
+	if got := clientHost(r); got != "192.0.2.4" {
+		t.Fatalf("mapped v6 = %q", got)
+	}
+	// An unparseable peer gets a stable, distinct bucket.
+	r.RemoteAddr = "garbage"
+	if got := clientHost(r); got != "invalid-peer" {
+		t.Fatalf("invalid peer = %q", got)
+	}
+}
+
+func TestAuthAttemptsBoundByTableCeiling(t *testing.T) {
+	a := &App{authAttempts: map[string]authAttempt{}}
+	for i := 0; i < authAttemptCeil; i++ {
+		a.authAttempts[fmt.Sprintf("198.51.100.%d", i%250)+"-"+strconv.Itoa(i)] = authAttempt{Window: time.Now()}
+	}
+	r := httptest.NewRequest("POST", "/api/auth/recovery", nil)
+	r.RemoteAddr = "203.0.113.9:1234" // a fresh key; table is at capacity
+	if a.allowAuthAttempt(r) {
+		t.Fatal("a fresh limiter key was admitted at table capacity")
 	}
 }
 
@@ -157,5 +188,29 @@ func TestLoginMethodConstantsAndSchemaSync(t *testing.T) {
 	add := "ALTER TABLE auth_sessions ADD CONSTRAINT auth_sessions_login_method_check"
 	if !strings.Contains(schemaSQL, add) {
 		t.Fatal("schema.sql is missing the login_method constraint re-add")
+	}
+}
+
+// The matched step must be the highest acceptable one so replay
+// consumption is monotonic: a code valid for two windows claims the later
+// step, and no step ever moves backwards (audit AUTH-03).
+func TestTOTPMatchedStepIsHighestAndMonotonic(t *testing.T) {
+	secret, _ := hex.DecodeString("3132333435363738393031323334353637383930")
+	now := time.Unix(59, 0)
+	code := totpCode(secret, now)
+	step := totpMatchedStep(secret, code, now)
+	if step != now.Unix()/30 {
+		t.Fatalf("matched step %d, want the current step %d", step, now.Unix()/30)
+	}
+	// One window later the previous step's code is still inside the -1
+	// skew window; it must match at its own (earlier) step, never the
+	// current one.
+	later := now.Add(30 * time.Second)
+	step = totpMatchedStep(secret, code, later)
+	if step != now.Unix()/30 {
+		t.Fatalf("skew match reported step %d, want the earlier step %d", step, now.Unix()/30)
+	}
+	if totpMatchedStep(secret, "000000", now) != -1 {
+		t.Fatal("a nonmatching code produced a step")
 	}
 }

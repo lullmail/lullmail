@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -177,4 +178,58 @@ func TestConstantTimeBearer(t *testing.T) {
 	if constantTimeBearer("Bearer abc", "abd") || constantTimeBearer("abc", "abc") {
 		t.Fatal("mismatched bearer accepted")
 	}
+}
+
+// Many concurrent publishers with different candidate keys must all read
+// back the same winner, and a loser must not overwrite it (audit AUTH-08).
+func TestPublishPrivateOnceSingleWinner(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret.key")
+
+	const writers = 8
+	results := make(chan string, writers)
+	for i := 0; i < writers; i++ {
+		go func(i int) {
+			candidate := fmt.Sprintf("%064x", i)
+			stored, err := publishPrivateOnce(path, []byte(candidate+"\n"))
+			if err != nil {
+				t.Errorf("writer %d: %v", i, err)
+				results <- ""
+				return
+			}
+			results <- strings.TrimSpace(string(stored))
+		}(i)
+	}
+	first := ""
+	for i := 0; i < writers; i++ {
+		got := <-results
+		if got == "" {
+			t.Fatal("a publisher failed")
+		}
+		if first == "" {
+			first = got
+		} else if got != first {
+			t.Fatalf("publishers read different winners: %q vs %q", got, first)
+		}
+	}
+	onDisk := strings.TrimSpace(mustReadFile(t, path))
+	if len(first) != 64 || onDisk != first {
+		t.Fatalf("disk holds %q, winner was %q", onDisk, first)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("published key mode is %v, want 0600", info.Mode().Perm())
+	}
+}
+
+func mustReadFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }

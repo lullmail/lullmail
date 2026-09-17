@@ -70,6 +70,10 @@ CREATE TABLE IF NOT EXISTS auth_totp (
   secret_ciphertext text NOT NULL,
   enabled_at timestamptz
 );
+-- Replay consumption for standalone TOTP login (audit AUTH-03): the last
+-- time step whose code was accepted, advanced atomically with session
+-- creation so a captured code cannot be reused while still valid.
+ALTER TABLE auth_totp ADD COLUMN IF NOT EXISTS last_used_step bigint NOT NULL DEFAULT -1;
 
 -- Password credentials, mirroring auth_totp: one row per user, material
 -- server-side, argon2id PHC string in `hash`. Plain hash, not sealed with

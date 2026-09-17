@@ -22,6 +22,26 @@ var (
 	dummyPHCOnce sync.Once
 )
 
+// Password verification costs ~64 MiB of memory. A flood of concurrent
+// requests — real or bogus — would otherwise let an unauthenticated caller
+// allocate that much per in-flight request. Admission here is what bounds
+// argon2's memory use; the KDF itself cannot be interrupted mid-computation
+// (audit AUTH-02).
+var passwordWork = make(chan struct{}, 2)
+
+var errAuthBusy = errors.New("authentication is busy, retry shortly")
+
+// acquirePasswordWork takes one KDF admission slot without blocking. The
+// caller must call the returned release exactly once.
+func acquirePasswordWork() (func(), error) {
+	select {
+	case passwordWork <- struct{}{}:
+		return func() { <-passwordWork }, nil
+	default:
+		return nil, errAuthBusy
+	}
+}
+
 // burnPasswordVerify runs argon2 against a dummy hash so a miss costs the
 // same as a hit. Without this, "no such user" returns in milliseconds and
 // "wrong password" pays 64MiB.
@@ -29,9 +49,17 @@ func burnPasswordVerify(password string) {
 	dummyPHCOnce.Do(func() {
 		dummyPHC, _ = hashPassword("not-a-user-password")
 	})
-	if dummyPHC != "" {
-		_, _ = verifyPassword(dummyPHC, password)
+	if dummyPHC == "" {
+		return
 	}
+	release, err := acquirePasswordWork()
+	if err != nil {
+		// The limiter is already saturated with real work; skipping the
+		// burn only narrows a timing signal the flood itself created.
+		return
+	}
+	defer release()
+	_, _ = verifyPassword(dummyPHC, password)
 }
 
 // OWASP-recommended argon2id profile for interactive login (m=64MiB, t=3,
@@ -102,13 +130,21 @@ func verifyPassword(encoded, password string) (bool, error) {
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 
-// passwordFails is failed-attempt state. Keyed by the ident the client
-// typed (lowercased email or name) so a 429 cannot reveal that a user or
-// password exists. The per-host limiter still runs alongside it.
+// passwordFails is failed-attempt state. Keyed by the resolved lock key —
+// "uid:<id>" for a known account, the shared unknown-user bucket otherwise —
+// so identifier aliases (email vs display name) cannot multiply one
+// account's guessing allowance, and unknown identifiers cannot grow the map
+// without bound. Lock responses are identical either way, so the bucket
+// choice still reveals nothing about which identifiers exist.
 type passwordFails struct {
 	Count       int
+	Window      time.Time
 	LockedUntil time.Time
 }
+
+// passwordFailsTTL bounds how long an unlocked failure count is remembered.
+// A lock, once set, always outlives it.
+const passwordFailsTTL = 15 * time.Minute
 
 // passwordLockRemaining reports how much longer the account is locked. An
 // expired lock is deleted on read, so the next failure starts a fresh window
@@ -131,6 +167,16 @@ func (a *App) passwordLockRemaining(uid string) time.Duration {
 	return 0
 }
 
+// prunePasswordFails drops dead entries: expired locks and stale unlocked
+// counts. Called under authMu.
+func (a *App) prunePasswordFails(now time.Time) {
+	for key, f := range a.pwFails {
+		if !f.LockedUntil.After(now) && now.Sub(f.Window) > passwordFailsTTL {
+			delete(a.pwFails, key)
+		}
+	}
+}
+
 // recordPasswordFailure counts one failed attempt and locks the account at
 // the threshold. Returns the lock duration when this failure caused a lock.
 func (a *App) recordPasswordFailure(uid string) time.Duration {
@@ -139,10 +185,16 @@ func (a *App) recordPasswordFailure(uid string) time.Duration {
 	if a.pwFails == nil {
 		a.pwFails = map[string]passwordFails{}
 	}
+	now := time.Now()
+	a.prunePasswordFails(now)
 	f := a.pwFails[uid]
+	if f.Window.IsZero() || now.Sub(f.Window) > passwordFailsTTL {
+		f = passwordFails{Window: now}
+	}
 	f.Count++
+	f.Window = now
 	if f.Count >= passwordLockThreshold {
-		a.pwFails[uid] = passwordFails{LockedUntil: time.Now().Add(passwordLockDuration)}
+		a.pwFails[uid] = passwordFails{Window: now, LockedUntil: now.Add(passwordLockDuration)}
 		return passwordLockDuration
 	}
 	a.pwFails[uid] = f
