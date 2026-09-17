@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -44,10 +45,48 @@ func New(hc *http.Client) *Adapter {
 func (a *Adapter) Provider() mail.Provider { return mail.ProviderGraph }
 func (a *Adapter) Close() error            { return nil }
 
+// graphEndpoint resolves an endpoint (absolute continuation URL from a
+// response body, or a relative API path) against the configured base and
+// rejects anything that leaves the approved origin or API path prefix: a
+// poisoned or corrupted nextLink/deltaLink must not turn the mirror into
+// an open proxy (audit 3 PROVIDER-02). Plain HTTP is tolerated only on
+// loopback, where local test fakes (and dev instances) live.
+func graphEndpoint(base, endpoint string) (string, error) {
+	b, err := url.Parse(base)
+	if err != nil || b.Hostname() == "" || b.User != nil ||
+		(b.Scheme != "https" && !(b.Scheme == "http" && isLoopbackHostname(b.Hostname()))) {
+		return "", errors.New("graph: invalid base origin")
+	}
+	raw := endpoint
+	if !strings.HasPrefix(endpoint, "http") {
+		if !strings.HasPrefix(endpoint, "/") {
+			return "", errors.New("graph: endpoint must be absolute or root-relative")
+		}
+		raw = strings.TrimRight(base, "/") + endpoint
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != b.Scheme || u.User != nil || u.Fragment != "" ||
+		!strings.EqualFold(u.Host, b.Host) ||
+		!strings.HasPrefix(u.Path, strings.TrimRight(b.Path, "/")+"/") {
+		return "", errors.New("graph: endpoint left the approved origin/path")
+	}
+	return u.String(), nil
+}
+
+// isLoopbackHostname reports whether a host is a loopback name or address.
+func isLoopbackHostname(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // get issues a GET and decodes JSON into out.
 func (a *Adapter) get(ctx context.Context, endpoint string, out any) error {
-	if !strings.HasPrefix(endpoint, "http") {
-		endpoint = baseURL + endpoint
+	endpoint, err := graphEndpoint(baseURL, endpoint)
+	if err != nil {
+		return err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {

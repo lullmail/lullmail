@@ -25,6 +25,15 @@ func serve(t *testing.T, handler http.HandlerFunc) *Adapter {
 	return New(srv.Client())
 }
 
+// useBase points the adapter at a fake provider origin for one test, the
+// way a deployment configures its Graph endpoint.
+func useBase(t *testing.T, url string) {
+	t.Helper()
+	old := baseURL
+	baseURL = url
+	t.Cleanup(func() { baseURL = old })
+}
+
 func TestExpiredDeltaTokenBecomesAReset(t *testing.T) {
 	// Graph reports an aged-out delta token as 410 Gone. It has to reach
 	// the engine as a reset, not an error, so it joins the one recovery
@@ -35,6 +44,7 @@ func TestExpiredDeltaTokenBecomesAReset(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	useBase(t, srv.URL)
 	a := New(srv.Client())
 	changes, err := a.Sync(context.Background(), "inbox", mail.Cursor(srv.URL+"/stale"))
 	if err != nil {
@@ -57,6 +67,7 @@ func TestRemovedAnnotationBecomesADestroy(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	useBase(t, srv.URL)
 	a := New(srv.Client())
 	changes, err := a.Sync(context.Background(), "inbox", mail.Cursor(srv.URL+"/delta"))
 	if err != nil {
@@ -90,6 +101,7 @@ func TestDeltaContinuationIsNeverComplete(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	useBase(t, srv.URL)
 	a := New(srv.Client())
 	changes, err := a.Sync(context.Background(), "inbox", mail.Cursor(srv.URL+"/delta"))
 	if err != nil {
@@ -114,6 +126,7 @@ func TestNextLinkPagesBeforeDeltaLink(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	useBase(t, srv.URL)
 	a := New(srv.Client())
 	changes, err := a.Sync(context.Background(), "inbox", mail.Cursor(srv.URL+"/delta"))
 	if err != nil {
@@ -135,7 +148,10 @@ func TestMailboxesFollowsEveryNextLink(t *testing.T) {
 			return respondJSON(`{"id":"x"}`)
 		}
 		pages = append(pages, r.URL.String())
-		body := `{"value":[{"id":"inbox","displayName":"Inbox"}],"@odata.nextLink":"https://graph.test/page2"}`
+		// The nextLink stays on the configured origin: continuations that
+		// leave it are rejected before any request is made (audit 3
+		// PROVIDER-02).
+		body := `{"value":[{"id":"inbox","displayName":"Inbox"}],"@odata.nextLink":"https://graph.microsoft.com/v1.0/page2"}`
 		if len(pages) == 2 {
 			body = `{"value":[{"id":"archive","displayName":"Archive"}]}`
 		}
@@ -149,8 +165,45 @@ func TestMailboxesFollowsEveryNextLink(t *testing.T) {
 	if len(boxes) != 2 || boxes[0].ID != "inbox" || boxes[1].ID != "archive" {
 		t.Fatalf("mailboxes = %+v, want both pages", boxes)
 	}
-	if len(pages) != 2 || pages[1] != "https://graph.test/page2" {
+	if len(pages) != 2 || pages[1] != "https://graph.microsoft.com/v1.0/page2" {
 		t.Fatalf("listing requests = %v, want the nextLink page", pages)
+	}
+}
+
+// A continuation that leaves the configured origin — different host, port,
+// scheme, userinfo, or API path — must be refused before any request is
+// issued (audit 3 PROVIDER-02).
+func TestGraphEndpointRejectsOffOriginContinuations(t *testing.T) {
+	base := "https://graph.microsoft.com/v1.0"
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		good     bool
+	}{
+		{"relative path", "/me/messages", true},
+		{"same-origin continuation", base + "/me/messages?$skiptoken=x", true},
+		{"different host", "https://evil.example/v1.0/me", false},
+		{"downgraded scheme", "http://graph.microsoft.com/v1.0/me", false},
+		{"different port", "https://graph.microsoft.com:8443/v1.0/me", false},
+		{"off-api-path", "https://graph.microsoft.com/beta/me", false},
+		{"userinfo", "https://u:p@graph.microsoft.com/v1.0/me", false},
+		{"fragment", base + "/me/messages#frag", false},
+		{"non-root-relative", "me/messages", false},
+	} {
+		_, err := graphEndpoint(base, tc.endpoint)
+		if tc.good && err != nil {
+			t.Errorf("%s: unexpected rejection: %v", tc.name, err)
+		}
+		if !tc.good && err == nil {
+			t.Errorf("%s: off-origin continuation accepted", tc.name)
+		}
+	}
+	// Loopback HTTP bases stay usable for local fakes and dev instances.
+	if _, err := graphEndpoint("http://127.0.0.1:9999/v1.0", "http://127.0.0.1:9999/v1.0/me"); err != nil {
+		t.Errorf("loopback base rejected: %v", err)
+	}
+	if _, err := graphEndpoint("http://127.0.0.1:9999/v1.0", "https://127.0.0.1:9999/v1.0/me"); err == nil {
+		t.Error("scheme change against loopback accepted")
 	}
 }
 
