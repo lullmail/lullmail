@@ -19,29 +19,142 @@ func adapterFor(t *testing.T, handler http.HandlerFunc) *Adapter {
 }
 
 func TestInitialSyncPaginatesPastServerLimit(t *testing.T) {
-	page := 0
+	request := 0
 	a := adapterFor(t, func(w http.ResponseWriter, r *http.Request) {
-		page++
-		if page == 1 {
-			_, _ = w.Write([]byte(`{"methodResponses":[["Email/query",{"ids":["m1"],"position":0,"total":2},"0"],["Email/get",{"state":"s1","list":[{"id":"m1","threadId":"t","mailboxIds":{"box":true},"keywords":{}}]},"1"]]}`))
-			return
+		request++
+		switch request {
+		case 1:
+			// First page: baseline Email/get + query + page get.
+			_, _ = w.Write([]byte(`{"methodResponses":[
+				["Email/get",{"state":"s0","list":[]},"b"],
+				["Email/query",{"ids":["m1"],"position":0,"total":2},"q"],
+				["Email/get",{"state":"s1","list":[{"id":"m1","threadId":"t","mailboxIds":{"box":true},"keywords":{}}]},"g"]
+			]}`))
+		case 2:
+			// Final page: query + get.
+			_, _ = w.Write([]byte(`{"methodResponses":[
+				["Email/query",{"ids":["m2"],"position":1,"total":2},"q"],
+				["Email/get",{"state":"s2","list":[{"id":"m2","threadId":"t","mailboxIds":{"box":true},"keywords":{}}]},"g"]
+			]}`))
+		case 3:
+			// Baseline catch-up: m1 was modified and m3 destroyed while the
+			// enumeration paginated.
+			_, _ = w.Write([]byte(`{"methodResponses":[
+				["Email/changes",{"newState":"s9","hasMoreChanges":false,"created":[],"updated":["m1"],"destroyed":["m3"]},"0"]
+			]}`))
+		default:
+			// Catch-up envelope refetch for m1.
+			_, _ = w.Write([]byte(`{"methodResponses":[
+				["Email/get",{"state":"s9","list":[{"id":"m1","threadId":"t","mailboxIds":{"box":true},"keywords":{"$seen":true}}]},"0"]
+			]}`))
 		}
-		_, _ = w.Write([]byte(`{"methodResponses":[["Email/query",{"ids":["m2"],"position":1,"total":2},"0"],["Email/get",{"state":"s2","list":[{"id":"m2","threadId":"t","mailboxIds":{"box":true},"keywords":{}}]},"1"]]}`))
 	})
 
 	first, err := a.Sync(context.Background(), "box", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !first.More || first.Next != "jmap-initial:1" || len(first.Changes) != 1 {
+	if !first.More || len(first.Changes) != 1 {
 		t.Fatalf("first page = %+v", first)
+	}
+	state, ok := decodeInitialCursor(first.Next)
+	if !ok || state.Position != 1 || state.Baseline != "s0" {
+		t.Fatalf("first cursor = %+v ok=%v, want position 1 baseline s0", state, ok)
 	}
 	second, err := a.Sync(context.Background(), "box", first.Next)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.More || second.Next != "s2" || len(second.Changes) != 1 {
+	if second.More || second.Next != "s9" || !second.Complete {
 		t.Fatalf("second page = %+v", second)
+	}
+	// The page's own message, the catch-up update, and the destroy all
+	// survive: the final cursor is past every change it never observed
+	// (audit JMAP-03).
+	var updated, destroyed int
+	for _, c := range second.Changes {
+		switch c.Kind {
+		case mail.ChangeCreated:
+		case mail.ChangeUpdated:
+			updated++
+		case mail.ChangeDestroyed:
+			destroyed++
+			if c.ID != mail.NativeMessageID(mail.ProviderJMAP, "m3") {
+				t.Errorf("destroyed id = %s, want m3", c.ID)
+			}
+		}
+	}
+	if len(second.Changes) != 3 || updated != 1 || destroyed != 1 {
+		t.Fatalf("second page changes = %+v", second.Changes)
+	}
+}
+
+// A 200 response with an empty, short, or out-of-order methodResponses
+// array must produce an error, never an index panic (audit JMAP-02).
+func TestCallRejectsMalformedResponses(t *testing.T) {
+	cases := []string{
+		`{"methodResponses":[]}`,
+		`{}`,
+		`{"methodResponses":[["Email/get",{"list":[]},"1"]]}`,                               // wrong call entirely
+		`{"methodResponses":[["error",{"type":"serverFail"},"0"]]}`,                         // error tuple
+		`{"methodResponses":[["Email/get",{"list":[]},"0"],["Email/get",{"list":[]},"0"]]}`, // duplicate
+	}
+	for _, body := range cases {
+		a := adapterFor(t, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(body))
+		})
+		if _, err := a.call(context.Background(), [3]any{"Email/get", map[string]any{"ids": []string{"x"}}, "0"}); err == nil {
+			t.Errorf("malformed response %s produced no error", body)
+		}
+	}
+}
+
+// A method-level 200 whose Email/set payload reports per-message failures
+// is a failed mutation, not a success (audit JMAP-01).
+func TestApplyReportsSetFailures(t *testing.T) {
+	a := adapterFor(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"methodResponses":[
+			["Email/set",{"oldState":"s1","newState":"s2","updated":{"m1":null},"notUpdated":{"m2":{"type":"invalidPatch"}}},"0"]
+		]}`))
+	})
+	err := a.Apply(context.Background(), mail.Operation{
+		Kind:    mail.OpAddKeyword,
+		Keyword: "seen",
+		IDs:     []mail.MessageID{mail.NativeMessageID(mail.ProviderJMAP, "m1"), mail.NativeMessageID(mail.ProviderJMAP, "m2")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "m2") {
+		t.Fatalf("notUpdated was swallowed: %v", err)
+	}
+
+	a = adapterFor(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"methodResponses":[
+			["Email/set",{"notDestroyed":{"m9":{"type":"notFound"}}},"0"]
+		]}`))
+	})
+	err = a.Apply(context.Background(), mail.Operation{
+		Kind: mail.OpDelete,
+		IDs:  []mail.MessageID{mail.NativeMessageID(mail.ProviderJMAP, "m9")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "m9") {
+		t.Fatalf("notDestroyed was swallowed: %v", err)
+	}
+}
+
+// Body values the provider flags as truncated must not be cached as
+// complete content (audit JMAP-04).
+func TestBodyRefusesTruncatedBodyValues(t *testing.T) {
+	a := adapterFor(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"methodResponses":[
+			["Email/get",{"list":[{
+				"id":"m1",
+				"bodyValues":{"p1":{"value":"half a mes","isTruncated":true}},
+				"textBody":[{"partId":"p1","type":"text/plain"}],
+				"attachments":[]
+			}]},"0"]
+		]}`))
+	})
+	if _, err := a.Body(context.Background(), mail.NativeMessageID(mail.ProviderJMAP, "m1")); err == nil {
+		t.Fatal("a truncated body value was accepted as complete")
 	}
 }
 

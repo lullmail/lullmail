@@ -8,7 +8,9 @@ package jmap
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -96,7 +98,15 @@ func Dial(ctx context.Context, cfg Config) (*Adapter, error) {
 func (a *Adapter) Provider() mail.Provider { return mail.ProviderJMAP }
 func (a *Adapter) Close() error            { return nil }
 
-// call issues one or more JMAP method calls and returns the raw responses.
+// call issues one or more JMAP method calls and returns one raw result per
+// request, in request order.
+//
+// Responses are correlated with the request's client-supplied call IDs
+// rather than trusted to arrive complete and in order: a malformed or short
+// methodResponses array previously indexed past its end and could panic a
+// background sync goroutine (audit JMAP-02). An "error" response for a
+// requested call is mapped through methodError; responses for unknown call
+// IDs (implicit server additions) are ignored.
 func (a *Adapter) call(ctx context.Context, calls ...[3]any) ([]json.RawMessage, error) {
 	body, err := json.Marshal(map[string]any{
 		"using":       []string{capCore, capMail},
@@ -104,6 +114,21 @@ func (a *Adapter) call(ctx context.Context, calls ...[3]any) ([]json.RawMessage,
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	indexes := make(map[string]int, len(calls))
+	methods := make([]string, len(calls))
+	for i, call := range calls {
+		method, ok1 := call[0].(string)
+		tag, ok2 := call[2].(string)
+		if !ok1 || !ok2 || tag == "" {
+			return nil, fmt.Errorf("jmap: invalid call %d", i)
+		}
+		if _, dup := indexes[tag]; dup {
+			return nil, fmt.Errorf("jmap: duplicate call id %q", tag)
+		}
+		indexes[tag] = i
+		methods[i] = method
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.apiURL, bytes.NewReader(body))
@@ -136,16 +161,36 @@ func (a *Adapter) call(ctx context.Context, calls ...[3]any) ([]json.RawMessage,
 		return nil, fmt.Errorf("jmap: decode response: %w", err)
 	}
 
-	results := make([]json.RawMessage, 0, len(out.MethodResponses))
+	results := make([]json.RawMessage, len(calls))
 	for _, r := range out.MethodResponses {
-		var name string
+		if len(r) != 3 {
+			return nil, fmt.Errorf("jmap: response tuple has %d parts, want 3", len(r))
+		}
+		var name, tag string
 		if err := json.Unmarshal(r[0], &name); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("jmap: decode response method: %w", err)
+		}
+		if err := json.Unmarshal(r[2], &tag); err != nil {
+			return nil, fmt.Errorf("jmap: decode response call id: %w", err)
+		}
+		i, wanted := indexes[tag]
+		if !wanted {
+			continue // implicit response for a call we did not make
 		}
 		if name == "error" {
 			return nil, a.methodError(r[1])
 		}
-		results = append(results, r[1])
+		// Correlation is by client ID; the method name is informational
+		// (some servers wrap or alias method names), so the tag decides.
+		if results[i] != nil {
+			return nil, fmt.Errorf("jmap: duplicate result for call %q", tag)
+		}
+		results[i] = r[1]
+	}
+	for i := range results {
+		if results[i] == nil {
+			return nil, fmt.Errorf("jmap: no result for %s (call %q)", methods[i], calls[i][2])
+		}
 	}
 	return results, nil
 }
@@ -229,14 +274,20 @@ func roleFrom(role string) mail.Role {
 // Sync returns changes since cur using Email/changes.
 func (a *Adapter) Sync(ctx context.Context, box mail.MailboxID, cur mail.Cursor) (*mail.Changes, error) {
 	if cur == "" {
-		return a.initialSync(ctx, box, 0)
+		return a.initialSync(ctx, box, 0, "")
+	}
+	if state, ok := decodeInitialCursor(cur); ok {
+		return a.initialSync(ctx, box, state.Position, state.Baseline)
 	}
 	if strings.HasPrefix(string(cur), "jmap-initial:") {
+		// Legacy position-only cursor from a pre-baseline build: resume the
+		// enumeration without a baseline (the old, weaker contract) rather
+		// than discarding a mid-scan mailbox.
 		position, err := strconv.Atoi(strings.TrimPrefix(string(cur), "jmap-initial:"))
 		if err != nil || position < 0 {
 			return &mail.Changes{Reset: true}, nil
 		}
-		return a.initialSync(ctx, box, position)
+		return a.initialSync(ctx, box, position, "")
 	}
 
 	res, err := a.call(ctx, [3]any{"Email/changes", map[string]any{
@@ -305,29 +356,89 @@ func (a *Adapter) Sync(ctx context.Context, box mail.MailboxID, cur mail.Cursor)
 	return changes, nil
 }
 
+// initialCursorState is the versioned JMAP enumeration cursor.
+//
+// Baseline is an Email state captured BEFORE the first query page. The
+// final page of the enumeration replays Email/changes from that baseline,
+// so a message modified or destroyed between two pages is neither skipped
+// nor duplicated: the old cursor remembered only a position and adopted the
+// LAST page's state, which could lie past changes earlier pages never saw
+// (audit JMAP-03).
+type initialCursorState struct {
+	Position int    `json:"position"`
+	Baseline string `json:"baseline,omitempty"`
+}
+
+func encodeInitialCursor(position int, baseline string) mail.Cursor {
+	raw, _ := json.Marshal(initialCursorState{Position: position, Baseline: baseline})
+	return mail.Cursor("jmap-initial-v1:" + base64.RawURLEncoding.EncodeToString(raw))
+}
+
+func decodeInitialCursor(cur mail.Cursor) (initialCursorState, bool) {
+	const prefix = "jmap-initial-v1:"
+	if !strings.HasPrefix(string(cur), prefix) {
+		return initialCursorState{}, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(string(cur), prefix))
+	if err != nil || len(raw) > 512 {
+		return initialCursorState{}, true // malformed: force a reset
+	}
+	var state initialCursorState
+	if err := json.Unmarshal(raw, &state); err != nil || state.Position < 0 {
+		return initialCursorState{}, true
+	}
+	return state, true
+}
+
 // initialSync enumerates a mailbox from empty via Email/query.
-func (a *Adapter) initialSync(ctx context.Context, box mail.MailboxID, position int) (*mail.Changes, error) {
-	res, err := a.call(ctx,
+//
+// The first call also captures a baseline state (Email/get for an empty ID
+// list in the same request). That baseline rides through every page cursor
+// and is what the final page catches up from.
+func (a *Adapter) initialSync(ctx context.Context, box mail.MailboxID, position int, baseline string) (*mail.Changes, error) {
+	calls := [][3]any{}
+	first := position == 0 && baseline == ""
+	if first {
+		calls = append(calls, [3]any{"Email/get", map[string]any{
+			"accountId":  a.accountID,
+			"ids":        []string{},
+			"properties": []string{"id"},
+		}, "b"})
+	}
+	calls = append(calls,
 		[3]any{"Email/query", map[string]any{
 			"accountId":      a.accountID,
 			"filter":         map[string]any{"inMailbox": string(box)},
 			"position":       position,
 			"limit":          500,
 			"calculateTotal": true,
-		}, "0"},
+		}, "q"},
 		[3]any{"Email/get", map[string]any{
 			"accountId": a.accountID,
 			"#ids": map[string]any{
-				"resultOf": "0", "name": "Email/query", "path": "/ids",
+				"resultOf": "q", "name": "Email/query", "path": "/ids",
 			},
 			"properties": emailProperties,
-		}, "1"},
+		}, "g"},
 	)
+	res, err := a.call(ctx, calls...)
 	if err != nil {
 		return nil, err
 	}
+	qi := 0
+	ri := 1
+	if first {
+		var base struct {
+			State string `json:"state"`
+		}
+		if err := json.Unmarshal(res[0], &base); err != nil || base.State == "" {
+			return nil, fmt.Errorf("jmap: baseline Email/get returned no state")
+		}
+		baseline = base.State
+		qi, ri = 1, 2
+	}
 
-	envs, err := decodeEmails(res[1])
+	envs, err := decodeEmails(res[ri])
 	if err != nil {
 		return nil, err
 	}
@@ -337,30 +448,118 @@ func (a *Adapter) initialSync(ctx context.Context, box mail.MailboxID, position 
 	var state struct {
 		State string `json:"state"`
 	}
-	_ = json.Unmarshal(res[1], &state)
+	_ = json.Unmarshal(res[ri], &state)
 
 	var query struct {
 		IDs      []string `json:"ids"`
 		Position int      `json:"position"`
 		Total    int      `json:"total"`
 	}
-	if err := json.Unmarshal(res[0], &query); err != nil {
+	if err := json.Unmarshal(res[qi], &query); err != nil {
 		return nil, fmt.Errorf("jmap: decode query page: %w", err)
 	}
 
 	more := len(query.IDs) > 0 && query.Position+len(query.IDs) < query.Total
-	next := mail.Cursor(state.State)
-	if more {
-		next = mail.Cursor("jmap-initial:" + strconv.Itoa(query.Position+len(query.IDs)))
-	}
-	changes := &mail.Changes{Next: next, More: more, EnumerationStart: position == 0, Complete: !more}
+	changes := &mail.Changes{EnumerationStart: position == 0}
 	for i := range envs {
 		e := envs[i]
 		changes.Changes = append(changes.Changes, mail.Change{
 			Kind: mail.ChangeCreated, ID: e.ID, Envelope: &e,
 		})
 	}
+
+	if more {
+		changes.Next = encodeInitialCursor(query.Position+len(query.IDs), baseline)
+		changes.More = true
+		changes.Complete = false
+		return changes, nil
+	}
+
+	// Final page: converge on the baseline. Email/changes from the
+	// pre-enumeration baseline replays everything that moved while the
+	// listing paginated — early-page modifications and destroys included —
+	// so the incremental cursor that survives (newState) has observed every
+	// change it claims to be past.
+	if baseline == "" {
+		// Legacy position-only cursor: no baseline exists; adopt the page's
+		// own get state as before.
+		changes.Next = mail.Cursor(state.State)
+		changes.Complete = true
+		return changes, nil
+	}
+	nextState, extra, err := a.changesSince(ctx, baseline)
+	if err != nil {
+		return nil, err
+	}
+	changes.Changes = append(changes.Changes, extra...)
+	changes.Next = mail.Cursor(nextState)
+	// The listing itself is authoritative and finished, so the engine may
+	// sweep; catch-up deltas the next incremental call could not express
+	// (hasMoreChanges) are picked up by the next scheduled sync from
+	// newState rather than deferring the sweep.
+	changes.More = false
+	changes.Complete = true
 	return changes, nil
+}
+
+// changesSince replays Email/changes from a baseline state, returning the
+// reached state and the change list (with envelopes fetched for
+// created/updated IDs).
+func (a *Adapter) changesSince(ctx context.Context, baseline string) (string, []mail.Change, error) {
+	if baseline == "" {
+		// Legacy cursor with no baseline: keep the historical behavior of
+		// adopting the page's own get state. Already-fetched pages cannot
+		// be re-verified; the next incremental sync catches up from there.
+		return "", nil, nil
+	}
+	res, err := a.call(ctx, [3]any{"Email/changes", map[string]any{
+		"accountId":  a.accountID,
+		"sinceState": baseline,
+		"maxChanges": 500,
+	}, "0"})
+	if err != nil {
+		if strings.Contains(err.Error(), "cannotCalculateChanges") {
+			return "", nil, fmt.Errorf("jmap: baseline expired during enumeration")
+		}
+		return "", nil, err
+	}
+	var out struct {
+		NewState       string   `json:"newState"`
+		HasMoreChanges bool     `json:"hasMoreChanges"`
+		Created        []string `json:"created"`
+		Updated        []string `json:"updated"`
+		Destroyed      []string `json:"destroyed"`
+	}
+	if err := json.Unmarshal(res[0], &out); err != nil {
+		return "", nil, fmt.Errorf("jmap: decode baseline catch-up: %w", err)
+	}
+	var extra []mail.Change
+	ids := append(append([]string{}, out.Created...), out.Updated...)
+	if len(ids) > 0 {
+		envs, err := a.getEmails(ctx, ids)
+		if err != nil {
+			return "", nil, err
+		}
+		created := make(map[mail.MessageID]bool, len(out.Created))
+		for _, id := range out.Created {
+			created[mail.NativeMessageID(mail.ProviderJMAP, id)] = true
+		}
+		for i := range envs {
+			kind := mail.ChangeUpdated
+			if created[envs[i].ID] {
+				kind = mail.ChangeCreated
+			}
+			e := envs[i]
+			extra = append(extra, mail.Change{Kind: kind, ID: e.ID, Envelope: &e})
+		}
+	}
+	for _, id := range out.Destroyed {
+		extra = append(extra, mail.Change{
+			Kind: mail.ChangeDestroyed,
+			ID:   mail.NativeMessageID(mail.ProviderJMAP, id),
+		})
+	}
+	return out.NewState, extra, nil
 }
 
 var emailProperties = []string{
@@ -517,7 +716,9 @@ func (a *Adapter) Body(ctx context.Context, id mail.MessageID) (*mail.Body, erro
 	var out struct {
 		List []struct {
 			BodyValues map[string]struct {
-				Value string `json:"value"`
+				Value             string `json:"value"`
+				IsTruncated       bool   `json:"isTruncated"`
+				IsEncodingProblem bool   `json:"isEncodingProblem"`
 			} `json:"bodyValues"`
 			TextBody []struct {
 				PartID string `json:"partId"`
@@ -549,11 +750,21 @@ func (a *Adapter) Body(ctx context.Context, id mail.MessageID) (*mail.Body, erro
 	body := &mail.Body{MessageID: id}
 	for _, p := range m.TextBody {
 		if v, ok := m.BodyValues[p.PartID]; ok {
+			if v.IsTruncated || v.IsEncodingProblem {
+				// A truncated or undecodable part must not be cached as the
+				// complete message: refuse so the caller can fall back to
+				// the raw blob instead of permanently storing partial
+				// content (audit JMAP-04).
+				return nil, fmt.Errorf("jmap: %w: body part %s of %s", errIncompleteBody, p.PartID, id)
+			}
 			body.Text += v.Value
 		}
 	}
 	for _, p := range m.HTMLBody {
 		if v, ok := m.BodyValues[p.PartID]; ok {
+			if v.IsTruncated || v.IsEncodingProblem {
+				return nil, fmt.Errorf("jmap: %w: body part %s of %s", errIncompleteBody, p.PartID, id)
+			}
 			body.HTML += v.Value
 		}
 	}
@@ -693,9 +904,9 @@ func (a *Adapter) Apply(ctx context.Context, op mail.Operation) error {
 		patch := map[string]any{}
 		switch op.Kind {
 		case mail.OpAddKeyword:
-			patch["keywords/"+jmapKeyword(op.Keyword)] = true
+			patch["keywords/"+pointerToken(jmapKeyword(op.Keyword))] = true
 		case mail.OpRemoveKeyword:
-			patch["keywords/"+jmapKeyword(op.Keyword)] = nil
+			patch["keywords/"+pointerToken(jmapKeyword(op.Keyword))] = nil
 		case mail.OpMove:
 			patch["mailboxIds"] = map[string]bool{string(op.Target): true}
 		case mail.OpDelete:
@@ -709,7 +920,8 @@ func (a *Adapter) Apply(ctx context.Context, op mail.Operation) error {
 	}
 
 	args := map[string]any{"accountId": a.accountID}
-	if op.Kind == mail.OpDelete {
+	destroy := op.Kind == mail.OpDelete
+	if destroy {
 		ids := make([]string, 0, len(op.IDs))
 		for _, id := range op.IDs {
 			ids = append(ids, nativeID(id))
@@ -719,8 +931,53 @@ func (a *Adapter) Apply(ctx context.Context, op mail.Operation) error {
 		args["update"] = update
 	}
 
-	_, err := a.call(ctx, [3]any{"Email/set", args, "0"})
-	return err
+	res, err := a.call(ctx, [3]any{"Email/set", args, "0"})
+	if err != nil {
+		return err
+	}
+	return checkSetResult(res[0], op.IDs, destroy)
+}
+
+// checkSetResult verifies that Email/set actually applied every requested
+// mutation. A 200 response whose payload carries notUpdated/notDestroyed
+// entries — or simply omits a requested ID — is a partial or total failure
+// that the old code reported as success (audit JMAP-01).
+func checkSetResult(raw json.RawMessage, ids []mail.MessageID, destroy bool) error {
+	var result struct {
+		Updated      map[string]json.RawMessage `json:"updated"`
+		Destroyed    []string                   `json:"destroyed"`
+		NotUpdated   map[string]json.RawMessage `json:"notUpdated"`
+		NotDestroyed map[string]json.RawMessage `json:"notDestroyed"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return fmt.Errorf("jmap: decode Email/set result: %w", err)
+	}
+	destroyed := make(map[string]bool, len(result.Destroyed))
+	for _, id := range result.Destroyed {
+		destroyed[id] = true
+	}
+	var failures []error
+	for _, id := range ids {
+		native := nativeID(id)
+		if destroy {
+			if _, failed := result.NotDestroyed[native]; failed || !destroyed[native] {
+				failures = append(failures, fmt.Errorf("jmap: destroy failed for %s", native))
+			}
+			continue
+		}
+		_, updated := result.Updated[native]
+		_, failed := result.NotUpdated[native]
+		if failed || !updated {
+			failures = append(failures, fmt.Errorf("jmap: update failed for %s", native))
+		}
+	}
+	return errors.Join(failures...)
+}
+
+// pointerToken escapes a keyword for use inside a JSON Pointer patch path
+// (RFC 6901): ~ becomes ~0 and / becomes ~1.
+func pointerToken(value string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(value, "~", "~0"), "/", "~1")
 }
 
 func jmapKeyword(k string) string {
@@ -733,3 +990,7 @@ func jmapKeyword(k string) string {
 }
 
 var _ mail.Adapter = (*Adapter)(nil)
+
+// errIncompleteBody reports a provider body value that explicitly flagged
+// itself truncated or undecodable; the engine must not cache it as complete.
+var errIncompleteBody = errors.New("provider returned incomplete body content")
