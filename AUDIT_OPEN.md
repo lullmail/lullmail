@@ -11,15 +11,21 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   2 findings partially fixed with a remainder deferred. No finding was
   assessed as a false positive — every spot-checked finding reproduced
   against the pinned source.
+- Pass 7 (2026-09-17, `AUDIT-CHATGPT-3.md`, 50 findings pinned at
+  `f172169`): 30 findings fixed (19 fully, 11 partially with the
+  remainder explicitly deferred below) across commits `ec8563d`..`4aef9e2`
+  (each message tagged `audit 3-<ID>`); 20 findings deferred against
+  standing or newly recorded decisions. No finding was assessed as a
+  false positive; several supplied materially new information that
+  narrowed or split an existing deferral (noted per entry).
 
-Open items: 25 (all deferrals; 2 of them are remainders of partial fixes)
+Open items: 26 (all deferrals; 7 of them are remainders of partial fixes)
 
-Standing decision: **SEND-03 = lullmail-10 below.** The durable-outbox
-finding in the second report is the same item as this register's one
-recorded deferral; the equivalence is noted on that entry and the
-deferral stands unchanged.
+Standing decision: **SEND-01 = SEND-03 (pass 6) = lullmail-10 below.** The
+durable-outbox finding appears in both later reports; it is the same item
+as this register's one recorded product deferral, and the deferral stands.
 
-## lullmail__lullmail-10 - P2 / SEND-03 High - DEFERRED (decision)
+## lullmail__lullmail-10 - P2 / SEND-03 (pass 6) / SEND-01 (pass 7) High - DEFERRED (decision)
 
 **Expose a durable send outcome instead of only an undo token**
 
@@ -27,83 +33,118 @@ deferral stands unchanged.
 - Evidence: enqueue immediately returns queued/undo_seconds. The worker sends its result to a buffered done channel, logs failures and removes the map entry. The inspected product routes expose undo but no delivery-status lookup; no reader of done appears in the inspected queue code.
 - Impact: The enqueue response is not a delivery acknowledgment. A later provider failure or restart during the undo window has no durable outcome in this path. The frontend draft lifecycle was not inspected, so draft loss itself is not asserted.
 - Proposed fix: Add persistent outbox states and a delivery-result event or status endpoint. Retain/recover draft content until an outcome is known; distinguish accepted, submitting, submitted, failed and ambiguous. Define retry/idempotency behavior rather than blindly retrying sends.
-- Deferral: sendqueue.go's design comment is the recorded decision this item argues against — "Five seconds is the whole feature — no queue table, no worker, just a timer map" (SPEC §6.1; the in-process undo window IS the shipped feature). A durable outbox with delivery states, a status endpoint, and retry/idempotency semantics is a product redesign of that surface, not a defect repair; reopening it is a product call, not an audit action. SEND-03 in `AUDIT-CHATGPT-2.md` (2026-09-17) restates this finding with a full outbox-state design; it is the same item, and the deferral stands. The browser-side mitigation the report asked for pending a durable outbox — a complete draft restored on undo (SEND-05) — was fixed.
+- Deferral: sendqueue.go's design comment is the recorded decision this item argues against — "Five seconds is the whole feature — no queue table, no worker, just a timer map" (SPEC §6.1; the in-process undo window IS the shipped feature). A durable outbox with delivery states, a status endpoint, and retry/idempotency semantics is a product redesign of that surface, not a defect repair; reopening it is a product call, not an audit action. Pass-7 SEND-01 restates it with a full outbox_jobs design; same item, deferral stands. SEND-04 (durable Sent-copy filing state, pass 7) is a requirement on the same replacement and is deferred with it — today a failed Sent-file is logged (never silently dropped) and the delivered message is never re-sent. Partial hardening landed in pass 7: the queue now has an aggregate admission budget and delivery holds an account-use lease, so the volatile window is bounded and fenced (commits tagged `audit 3-SEND-02`, `audit 3-SEND-03`).
 - Review commit: `49d159b6654d3dbd27866f87ac783402f19c6cb7` (last reviewed 2026-09-10)
 
-## AUTH-05 (remainder) - High - DEFERRED (contained fix landed, epoch design deferred)
+## AUTH-05 (remainder) / AUTH-01 (pass 7) - High - DEFERRED (contained fix landed, epoch design deferred)
 
 **Login can still mint a session from a credential verified before a concurrent credential change committed**
 
 - Kind: Concurrency gap (remainder)
-- Evidence: The contained half of AUTH-05 landed (revocation now runs inside the credential-change transaction, errors propagate, TOTP removal revokes, logout reports failed revocation). The remaining gap the report proves is the check/commit interleaving: a login that verifies an old credential, pauses, and inserts its session after the credential-change path deleted sessions leaves a usable stale session. Closing it requires the auth-epoch design (users.auth_epoch + auth_sessions.auth_epoch checked on every lookup, epoch bumped in the same transaction as the credential change, login re-checking the epoch under the user lock at session insert).
-- Deferral: An epoch column pair plus a changed session-lookup join is a schema and auth-pipeline change that every session read depends on; it needs its own migration window and race regression tests against real PostgreSQL, not a bolt-on inside an audit sweep. Risk accepted for now: the window requires an in-flight login during the exact change instant, single-operator deployments, and the in-transaction revocation already removes everything not mid-flight.
+- Evidence: The contained half of pass-6 AUTH-05 landed (revocation now runs inside the credential-change transaction, errors propagate, TOTP removal revokes, logout reports failed revocation). The remaining gap both reports prove is the check/commit interleaving: a login that verifies an old credential, pauses, and inserts its session after the credential-change path deleted sessions leaves a usable stale session. Pass-7 AUTH-01 adds that the TOTP path reads the secret before its step-claim lock, and that passkey login separates verification from session creation the same way.
+- Deferral: An auth-epoch column pair plus a changed session-lookup join is a schema and auth-pipeline change that every session read depends on; it needs its own migration window and race regression tests against real PostgreSQL, not a bolt-on inside an audit sweep. Risk accepted for now: the window requires an in-flight login during the exact change instant, single-operator deployments, and the in-transaction revocation already removes everything not mid-flight.
 
-## AUTH-06 - Medium - DEFERRED (hardening)
+## AUTH-06 (pass 6) / AUTH-02 (pass 7) - Medium - DEFERRED (hardening)
 
 **Long-lived sessions can enroll durable replacement credentials without fresh proof**
 
 - Kind: Hardening; requires an already compromised authenticated session
-- Evidence: Confirmed per the report — factor enrollment, recovery-code regeneration and agent-token creation require only a standing session.
+- Evidence: Confirmed per both reports — factor enrollment, recovery-code regeneration and agent-token creation require only a standing session. Password replacement and full account deletion already require fresh proof (the report credits this).
 - Deferral: The fix is a re-authentication ceremony (a dedicated password/passkey verification endpoint stamping `reauthenticated_at` on the session, a 10-minute freshness gate on security operations, and dashboard UI driving it). That is a product feature spanning API and UI, not a defect repair; record it as the security roadmap item it is.
 
-## AUTH-07 (remainder) - Medium - DEFERRED (contained fix landed, installation epoch deferred)
+## AUTH-06 (pass 7) - Medium - DEFERRED (hardening, deployment-dependent)
+
+**Standalone TOTP guessing is limited per peer, not by a shared account budget**
+
+- Evidence: Confirmed — replay protection exists (step consumption) and the per-peer limiter is the repaired fail-closed parser, but guesses from many peers against one account share no budget. TOTP is an intentional alternative credential, not a second factor.
+- Deferral: A durable per-user fixed-window budget (the report's auth_factor_windows design) plus pruning, monitoring, and an ingress story is a new subsystem with lockout tradeoffs (a shared budget is also a denial-of-service lever against the owner). Exposed deployments should rate-limit TOTP at the ingress now; the account-wide budget belongs to the AUTH-02 re-authentication/security roadmap item above rather than a sweep.
+
+## AUTH-07 (remainder) / AUTH-03 (pass 7) - Medium - DEFERRED (contained fix landed, installation design deferred)
 
 **First-run completion is not a single transactional installation transition**
 
 - Kind: Concurrency gap (remainder)
-- Evidence: The contained half landed — both bootstrap finish paths re-check `ownerConfigured` under the owner-row lock inside the credential transaction, so two in-flight ceremonies can no longer both install a first credential.
-- Deferral: The report's full design (an `installation_state` singleton with a setup epoch, ceremony-bound epochs, and immutable published config under one mutex) is a startup/config architecture change; the residual exposure after the recheck is mis-sequenced ceremony state during concurrent setup of a not-yet-configured install, which the setup token already gates.
+- Evidence: The pass-7 report proved the pass-6 recheck was insufficient for the no-owner case: two ceremonies with different names create different owner rows, lock different rows, and the global `ownerConfiguredDB` check under a row lock cannot serialize them. FIXED in pass 7: both bootstrap finish paths now take a transaction-scoped installation-wide advisory lock before the configured check, so two concurrent ceremonies can no longer both install a first credential (commit tagged `audit 3-AUTH-03`).
+- Deferral (remainder): `ensureUser` can still leave a credential-less second user row behind when two begins race or `LULL_USER_EMAIL` changes between boots, and the report's fuller design (users-single-owner unique index after operator reconciliation, ceremony-bound setup epochs, transaction-aware owner initializer, provisional ceremony input) is a startup/config architecture change. The residual is stray rows with no sign-in capability behind a setup token that retires on first completion.
 
-## WEB-04 - Medium - DEFERRED
+## AUTH-04 (remainder) - Medium - DEFERRED (contained fix landed, runtime snapshot deferred)
+
+**Setup mutates shared configuration without a consistent synchronization boundary**
+
+- Evidence: Confirmed. FIXED in pass 7: `setOriginForSetup` now validates the candidate on a Config copy and publishes origin + WebAuthn instance together only after construction succeeds, and `handleLoginFinish` reads the instance through the locked accessor (commit tagged `audit 3-AUTH-04`). Bootstrap token retirement already mutates under waMu.
+- Deferral (remainder): Other request handlers still read `a.cfg` fields directly rather than one immutable published snapshot, so a reader can mix pre- and post-swap values mid-request. The report's `atomic.Pointer[runtimeAuth]` migration of every reader is a cross-cutting refactor of the auth/config surface; defer as its own pass. The contained fix removed the dangerous case (a failed setup leaving a half-updated live config).
+
+## WEB-04 (pass 6) / WEB-03 (pass 7) - Medium - DEFERRED
 
 **Offline replay is not coordinated across tabs or made idempotent at the server**
 
 - Kind: Concurrency/uncertain-retry gap
-- Evidence: Confirmed per the report — each tab can replay the shared queue and no idempotency key exists server-side.
-- Deferral: The correctness boundary the report demands is server-side mutation idempotency (an `api_mutations` table keyed by user+key with request-hash conflict detection, plus Web Locks in the browser). That is a new API contract and table, and per-mutation response persistence across every mutable endpoint — a subsystem, not a repair. The replay classification fixes that landed (WEB-03) stop the silent data loss; duplication under multi-tab replay remains the known residual.
+- Evidence: Confirmed per both reports — each tab can replay the shared queue and no idempotency key exists server-side. Pass 7 landed the retry-scheduling and rejection-surfacing companions (WEB-04/WEB-05 there), so failures are no longer stranded or invisible; duplication under multi-tab replay or a lost acknowledgment remains.
+- Deferral: The correctness boundary the reports demand is server-side mutation idempotency (an `api_mutations` table keyed by user+key with request-hash conflict detection, plus Web Locks in the browser). That is a new API contract and table, and per-mutation response persistence across every mutable endpoint — a subsystem, not a repair. Browser-side locks alone were deliberately not added: without the server contract they only narrow the duplicate window while implying a guarantee the system does not make.
 
-## WEB-07 - Medium - DEFERRED
+## WEB-07 (pass 6) / WEB-01 (pass 7) - Medium - DEFERRED
 
 **Browser caches and drafts need an immutable owner namespace and generation fencing**
 
 - Kind: Isolation gap; exposure depends on logout/reset paths
-- Evidence: Confirmed per the report — persistent owner identity is the (mutable, reusable) email; drafts use global storage keys; in-flight reads are not fenced against an owner change.
-- Deferral: `installation_id`+`user_id` namespacing, a generation counter around every async authenticated read, and IndexedDB store/key migration for existing clients is a storage-layer redesign touching every offline call site. Requires the same product decision as WEB-04 about what logout means for offline data. Tracked as the offline-v2 storage work.
+- Evidence: Confirmed per both reports — persistent owner identity is the (mutable, reusable) email; drafts use global storage keys; in-flight reads are not fenced against an owner change. Pass 7 made the wipe itself atomic and error-propagating (WEB-02 there), which closes the "believed erased but was not" half.
+- Deferral: `installation_id`+`user_id` namespacing, a generation counter around every async authenticated read, abort-on-owner-change, and IndexedDB store/key migration for existing clients is a storage-layer redesign touching every offline call site (the report's Scope model). Requires the same product decision as WEB-04 about what logout means for offline data. Tracked as the offline-v2 storage work.
 
-## DATA-06 - Medium - DEFERRED
+## DATA-06 (pass 6) / DATA-11 (pass 7) - Medium - DEFERRED (partial fix landed)
 
 **Bucket/search result limits have no continuation contract**
 
-- Evidence: Confirmed — buckets cap at 200 threads and search at 60 with no cursor; a client cannot distinguish truncation from completeness.
-- Deferral: Keyset pagination on the outer per-thread result plus `has_more`/`next_cursor` is a versioned API change with dashboard load-more and MCP tool support landing together. Truncation today is silent but bounded, and the deterministic date+account+thread ordering it needs does not exist yet on every list query.
+- Evidence: Confirmed — buckets cap at 200 threads and search at 60 with no cursor; a client cannot distinguish truncation from completeness. FIXED in pass 7: the deterministic tie-breaker (received_at DESC, id DESC) landed on bucket and search ordering, so equal-timestamp rows no longer reorder between requests (commit tagged `audit 3-DATA-11`).
+- Deferral (remainder): Keyset pagination on the outer per-thread result plus `has_more`/`next_cursor` is a versioned API change with dashboard load-more and MCP tool support landing together. Truncation today is silent but bounded.
 
-## DATA-07 - Medium - DEFERRED
+## DATA-07 (pass 6) / DATA-05 (pass 7) - Medium - DEFERRED
 
 **Relative snooze durations make offline replay and undo change the intended date**
 
-- Evidence: Confirmed — snoozes store server-relative day counts; replay applies them later; undo reconstructs a prior snooze through rounded remaining days.
-- Deferral: Absolute-UTC snooze timestamps with `until: null` semantics, undo snapshots of the exact prior instant, and dashboard/MCP callers updated together is an API contract migration across server, dashboard and MCP; the offline-queue path only exists for the actions the dashboard already sends, so a server-side acceptance of absolute timestamps alone would change nothing users touch.
+- Evidence: Confirmed — snoozes store server-relative day counts; replay applies them later; undo reconstructs a prior snooze through rounded remaining days. Pass 7 did not change this.
+- Deferral: Absolute-UTC snooze timestamps with `until: null` semantics, undo snapshots of the exact prior instant, and dashboard/MCP callers updated together is an API contract migration across server, dashboard and MCP; the offline-queue path only exists for the actions the dashboard already sends, so a server-side acceptance of absolute timestamps alone would change nothing users touch. The queue replay timing itself got fairer in pass 7 (WEB-05 retry scheduling), but the deadline semantics remain relative.
 
-## SYNC-03 - High - DEFERRED
+## DATA-04 (pass 7) - Medium - DEFERRED (product design)
+
+**Thread-wide mutations cannot be undone exactly from one summary row**
+
+- Evidence: Confirmed — the action handler mutates every message in the resolved thread while the browser inverse is computed from one list row's flags, so mixed read/bucket state inside a thread is lost on undo. (Per-row snapshots already make single-row read/unread undo exact.)
+- Deferral: Exact undo needs server-side preimage capture (row versions, one-use undo records, conflict rejection) — the report's `message_action_undo` design is a schema + API + client change across the same surface as the idempotency work in WEB-04. Deferred as product redesign; the current undo is documented as approximate for mixed threads.
+
+## DATA-08 (pass 7) - Medium - DEFERRED (design)
+
+**Backfill and retention settings can commit before their corresponding data transition succeeds**
+
+- Evidence: Confirmed — the setting update and the pruning/classification/retention that realize it are separate operations; a later failure leaves the new policy committed with an error response and no durable reconciliation status. (DATA-10's fix in pass 7 means post-sync failures are no longer reported as healthy syncs.)
+- Deferral: The report's desired-policy vs applied-policy design (`policy_version`, `account_reconcile_jobs`, 202 responses with durable job state) is a new job/queue subsystem sharing machinery with the SYNC-03 staged-scan work below; defer with it.
+
+## SYNC-03 (pass 6) / SYNC-01 (pass 7) - High - DEFERRED
 
 **Destructive cursor reset can erase local filing state before a rebuild succeeds**
 
 - Evidence: Confirmed ordering: an invalid cursor drops local mailbox state before the replacement enumeration exists; if the rebuild then fails, orphan cleanup can read the missing mirror rows as authoritative deletions of user filing state.
-- Deferral: The report's fix is staged, resumable reconciliation — `mail_scan_runs`/`mail_scan_seen` engine tables, per-page transactional staging, and destructive pruning only at authoritative completion under the account maintenance lock. That is a new engine sync architecture (and SYNC-01, now fixed, was the report's own named amplifier). The sweep already refuses to run on incomplete listings; the residual is the reset-then-fail window. This is the largest item in the register and needs its own design pass against real PostgreSQL.
+- Deferral: The reports' fix is staged, resumable reconciliation — `mirror_scans`/`mirror_scan_seen` engine tables, per-page transactional staging, destructive pruning only at authoritative completion under the account maintenance lock. That is a new engine sync architecture and this is the largest item in the register; it needs its own design pass against real PostgreSQL. The sweep already refuses to run on incomplete listings; the residual is the reset-then-fail window. Pass-7 SYNC-02 (enumeration bookkeeping not durable across MaxPages/restarts; Graph `initial`/`Complete` flags only consistent within one call) folds into this same staged-scan machinery and is deferred with it.
 
-## SYNC-04 - Medium - DEFERRED
+## SYNC-04 (pass 6) / SYNC-04 (pass 7) - Medium - DEFERRED
 
 **Retention and mirror writes can race, leaving expired or orphaned data**
 
 - Evidence: Confirmed — retention deletes mirror rows while sync/body writes run; the mirror has no foreign keys tying bodies and memberships to messages.
 - Deferral: NOT VALID→VALIDATED foreign keys on existing production tables, an orphan audit, and a documented account-level lock order shared by retention and sync writeback is a versioned engine migration with deployment sequencing. Deferred with SYNC-03, which owns the same lock-and-stage machinery.
 
-## SYNC-05 - Medium - DEFERRED
+## SYNC-05 (pass 6) / DATA-09 (pass 7) - Medium - DEFERRED
 
 **Increasing retention does not restore older messages removed from the mirror**
 
-- Evidence: Confirmed — an incremental provider will not re-report unchanged old messages after local retention removed them.
+- Evidence: Confirmed — an incremental provider will not re-report unchanged old messages after local retention removed them; widening the window changes policy only.
 - Deferral: The fix is a durable `reconcile_requested` flag consumed only after a complete rescan — and the complete rescan is exactly the SYNC-03 staged-scan machinery. Deferred with it.
+
+## SYNC-03 (pass 7) - High - PARTIALLY FIXED (ordering), migration DEFERRED with SYNC-03 above
+
+**Identity promotion deletes the old message before its replacement is written**
+
+- Evidence: Confirmed — `apply` called `DeleteMessages` on the old identity before `PutEnvelopes` wrote the new one, so a failed write lost the only readable copy. FIXED in pass 7: the replacement envelope is now written first and the old identity retires only afterwards, so a failure leaves the old record intact and the next sync retries (commit tagged `audit 3-SYNC-03`).
+- Deferral (remainder): Product filing state keyed by the old account/message id is still not migrated on promotion (the engine cannot reach product tables; the orphan cleanup eventually drops it), and a truly transactional promotion carrying memberships, body, filing, and receipts across both pools needs the OPS-03 transaction bridge and the staged-migration design. Deferred with the SYNC family above.
 
 ## GMAIL-03 - Low - DEFERRED
 
@@ -112,61 +153,61 @@ deferral stands unchanged.
 - Evidence: Confirmed — envelope requests use format=metadata, which does not return the part tree that `payloadHasAttachment` walks.
 - Deferral: The honest fix is a tri-state attachment property (unknown/present/absent) flowing through the envelope model, the mirror schema and the dashboard badge — a model change. Requesting format=full for every envelope would multiply quota cost for every sync; the report itself says not to deploy that without measurement.
 
-## GRAPH-02 - Medium - DEFERRED
+## GRAPH-02 / PROVIDER-01 (pass 7) - Medium - DEFERRED
 
 **Graph message identity changes on folder moves because immutable IDs are not requested**
 
-- Evidence: Confirmed — no `Prefer: IdType="ImmutableId"` header on any request, while Graph default IDs are mutable on moves.
-- Deferral: The report is explicit that a header-only rollout is wrong: existing mirrors hold default-format IDs, and switching the preference without translating them changes every message's identity overnight (duplicate threads, lost filing state). The mandatory accompaniment is an ID-translation migration of mirror memberships, bodies, product filing and push receipts, plus a real Graph test mailbox regression. That migration touches production data and needs a provider integration environment; it is planned Graph work, not a sweep item.
+- Evidence: Confirmed per both reports — no `Prefer: IdType="ImmutableId"` header on any request, while Graph default IDs are mutable on moves.
+- Deferral: Both reports are explicit that a header-only rollout is wrong: existing mirrors hold default-format IDs, and switching the preference without translating them changes every message's identity overnight (duplicate threads, lost filing state). The mandatory accompaniment is an ID-translation migration of mirror memberships, bodies, product filing and push receipts, plus a real Graph test mailbox regression. That migration touches production data and needs a provider integration environment; it is planned Graph work, not a sweep item.
 
-## OPS-01 - Medium - DEFERRED (partial hardening exists)
+## OPS-01 (pass 6) / OPS-01 (pass 7) - Medium - DEFERRED (partial hardening exists)
 
 **Request, provider-response and export resource limits are incomplete**
 
-- Evidence: Confirmed scope: most JSON handlers read bodies uncapped; provider reads and export staging allocate before validation; the send queue has no aggregate admission budget. Partial bounds exist (send handler 34 MiB wire cap, push 64 KiB, per-attachment caps, engine-side 90 MB part cap added in this sweep).
-- Deferral: Route-specific body bounds, a bounded reader across every provider JSON path, export disk budgets and queue admission limits is a cross-cutting hardening pass over dozens of handlers; deferred as its own review with a table of routes and limits rather than piecemeal in this sweep.
+- Evidence: Confirmed scope: many JSON handlers read bodies uncapped; provider reads and export staging allocate before validation. Partial bounds exist (send handler 34 MiB wire cap, push 64 KiB, per-attachment caps, engine-side 90 MB part cap), and pass 7 added strict bounded single-document decoding with unknown-field rejection on the account-settings routes (commit tagged `audit 3-DATA-07`) and an aggregate send-queue admission budget.
+- Deferral: Route-specific body bounds across dozens of handlers, a bounded reader on every provider JSON path, export disk budgets and read deadlines is a cross-cutting hardening pass; deferred as its own review with a table of routes and limits rather than piecemeal in a sweep.
 
-## OPS-02 - Medium - DEFERRED
+## OPS-02 (pass 6) / OPS-02+OPS-03 (pass 7) - Medium - PARTIALLY FIXED, migration runner DEFERRED
 
 **Database connection budgeting and startup migrations are not production-safe by construction**
 
-- Evidence: Confirmed — no pool maximum on the product side, a separate engine pool, and startup reapplies all schema statements unconditionally.
-- Deferral: A versioned migration table with advisory-lock serialization, checksums and resumable phases replaces the boot-time statement list; pool budgets need deployment-specific numbers. Rewriting the migration runner that every existing database converges through is a change that can brick upgrades if rushed; deferred to its own task with a tested migration path.
+- Evidence: Confirmed. FIXED in pass 7: the product pool is bounded (16 open / 4 idle, 5-minute idle / 30-minute lifetime caps) and the per-request `last_seen_at` session write is throttled to once per minute with a read fallback that still refuses revoked sessions immediately (commit tagged `audit 3-OPS-02`).
+- Deferral (remainder = pass-7 OPS-03): startup still reapplies all schema statements unconditionally with no version ledger, checksums, or installation-wide migration lock. A versioned migration table with advisory-lock serialization replaces the boot-time statement list every existing database converges through; rewriting it can brick upgrades if rushed and needs a tested migration path (engine + product ownership split included). Deferred to its own task.
 
-## OPS-03 - Medium - DEFERRED
-
-**Creating a connected account spans separate engine/product transactions**
-
-- Evidence: Confirmed — mirror insertion (engine pgx pool) and `email_accounts` insertion (product database/sql pool) commit separately with best-effort cleanup.
-- Deferral: Atomicity needs a transaction bridge across the two pools (an engine `PutAccountSQLTx` on the product connection, or consolidating on one pool). Both are engine API/deployment changes; the existing best-effort orphan cleanup covers the common failure and the mirror is derived state.
-
-## OPS-04 - Medium - DEFERRED
+## OPS-04 (pass 6) / OPS-04 (pass 7) - Medium - DEFERRED
 
 **Shutdown does not join all application-owned background work**
 
-- Evidence: Confirmed — async sends, initial syncs and post-sync work run on background contexts; pools close after the HTTP drain without joining them.
-- Deferral: A task group owning every background launch (admission-then-join lifecycle, cancellation propagated into provider I/O) is an app-lifecycle refactor. IMAP-02 (landed) removed the worst hang (unbounded provider I/O holding account locks past shutdown); the residual is failed writeback noise at shutdown, not lost mail.
+- Evidence: Confirmed per both reports — async sends, initial syncs and post-sync work run on background contexts; pools close after the HTTP drain without joining them. Pass 7 bounded the finishSync detached context (previously bare `context.Background()`), so finalization work now carries its own deadline.
+- Deferral: A task group owning every background launch (admission-then-join lifecycle, cancellation propagated into provider I/O) is an app-lifecycle refactor. IMAP-02 (landed) removed the worst hang; the residual is failed writeback noise at shutdown, not lost mail.
 
-## OPS-05 - Medium - DEFERRED
+## OPS-05 (pass 7) - Medium - DEFERRED (design)
+
+**Deleting one account can wait behind unrelated account work and uncancellable locks**
+
+- Evidence: Confirmed — the lifecycle gate is one global owner RWMutex; a long read on account A delays account B's deletion, and engine/OAuth refresh mutexes do not observe cancellation.
+- Deferral: Per-account cancellable admission gates with an active-operation counter (the report's design) plus coalesced manual-sync requests is the same lifecycle refactor as OPS-04 above — it touches every beginAccountUse call site and the deletion transaction. Deferred with it as one app-lifecycle pass; pass 7 at least fenced sends against deletion (SEND-02 fix).
+
+## OPS-05 (pass 6) / OPS-06 (pass 7) - Medium - DEFERRED
 
 **Default port publication and URL configuration permit unintended plaintext exposure**
 
-- Evidence: Confirmed per the report (deployment hardening, not an unauthenticated-login finding): compose publishes 8080 on all interfaces, and HTTP origins away from loopback are accepted in configuration.
-- Deferral: Binding the compose default to loopback silently breaks every existing deployment whose ingress dials the published port, and enforcing HTTPS-only origins needs the same trusted-proxy decision as AUTH-01. The dashboard already surfaces a public-exposure warning; the enforcement change belongs to a release-noted deployment-policy update, not a sweep.
+- Evidence: Confirmed per both reports (deployment hardening, not an unauthenticated-login finding): compose publishes 8080 on all interfaces, HTTP origins away from loopback are accepted, origin detection trusts forwarded headers without a proxy-peer check.
+- Deferral: Binding the compose default to loopback silently breaks every existing deployment whose ingress dials the published port, and enforcing HTTPS-only origins plus trusted-proxy forwarded parsing needs the same deployment-policy decision as pass-6 AUTH-01. The dashboard already surfaces a public-exposure warning; the enforcement change belongs to a release-noted deployment-policy update, not a sweep.
 
-## OPS-07 (remainder) - Medium - DEFERRED (partial fix landed)
+## OPS-07 (remainder) - Medium - DEFERRED (CI job landed, product harness deferred)
 
 **CI lacks real SQL integration coverage**
 
-- Evidence: Confirmed — engine integration tests skip without `NEUTRON_MAIL_TEST_DATABASE_URL`; CI provides no database, so DATA-01-class schema/query mismatches cannot fail a build. The partial fix landed: pull requests now run verification, the MCP module has its own test+vet step, and publication is separated from verification.
-- Deferral: The scratch-Postgres service with isolated per-suite databases, a `LULL_TEST_DATABASE_URL` product integration harness executing the real push candidate SQL, and race runs is CI infrastructure work; it is the precondition for regression-testing several deferrals above (AUTH-05, SYNC-03/04), so it should land with them.
+- Evidence: Confirmed — engine integration tests skip without `NEUTRON_MAIL_TEST_DATABASE_URL`. FIXED in pass 7: CI now runs a disposable postgres:17 service job that executes the engine store integration suite and race runs for all three Go modules (commit tagged `audit 3-OPS-07`); the normal green build no longer excludes every database test.
+- Deferral (remainder): Isolated per-suite databases for potentially destructive suites, a `LULL_TEST_DATABASE_URL` product-side integration harness executing the real push candidate SQL, and migration-upgrade tests remain CI infrastructure work; they are the precondition for regression-testing several deferrals above (AUTH-01, SYNC-03/04), so they should land with them.
 
-## OPS-09 - Medium - DEFERRED
+## OPS-09 (pass 6) / OPS-09+PROVIDER-03-remainder (pass 7) - Medium/Low - DEFERRED
 
 **Outbound URL trust boundaries are implicit, including push endpoints and authenticated continuations**
 
-- Evidence: Confirmed as conditional hardening — push registration accepts arbitrary endpoints; Graph follows absolute continuation URLs; JMAP sends tokens to session-advertised origins.
-- Deferral: Provider-specific HTTPS allowlists, redirect policies, and resolved-address validation for configurable hosts is a deliberate egress-policy design (and user-selected private mail servers are an intentional feature, so a blanket ban is wrong). Deferred with the deployment-policy pass (OPS-05).
+- Evidence: Confirmed as conditional hardening — push registration accepts arbitrary endpoints; JMAP sends tokens to session-advertised origins. Pass 7 landed the Graph half: continuation URLs are now validated against the configured origin/path before any request (PROVIDER-02 fix), and OAuth account creation joined the owner lifecycle gate with duplicate-address rejection (the contained half of PROVIDER-03).
+- Deferral (remainder): Provider-specific HTTPS allowlists, redirect policies, and resolved-address validation for configurable hosts is a deliberate egress-policy design (and user-selected private mail servers are an intentional feature, so a blanket ban is wrong). The cross-pool transactional account creation both reports describe needs the OPS-03 bridge. Deferred with the deployment-policy pass (OPS-05 above).
 
 ## OPS-10 - Low - DEFERRED
 
