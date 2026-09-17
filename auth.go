@@ -332,11 +332,26 @@ func (a *App) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uid, session, err := a.authenticateRequest(r)
+	// A database failure is not a sign-out: answering 200 with
+	// authenticated=false here flips a healthy browser session to the
+	// login gate over a transient outage (audit 3 AUTH-05). Retryable 503
+	// instead; the dashboard keeps its last known state.
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		a.log.Error("auth status lookup failed", "err", err)
+		writeProblem(w, http.StatusServiceUnavailable, "Status Unavailable",
+			"sign-in status could not be checked — try again shortly")
+		return
+	}
 	authenticated := err == nil
 	email := ""
 	via := ""
 	if authenticated {
-		_ = a.db.QueryRowContext(r.Context(), `SELECT email FROM users WHERE id=$1`, uid).Scan(&email)
+		if err := a.db.QueryRowContext(r.Context(), `SELECT email FROM users WHERE id=$1`, uid).Scan(&email); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			a.log.Error("auth status owner lookup failed", "err", err)
+			writeProblem(w, http.StatusServiceUnavailable, "Status Unavailable",
+				"sign-in status could not be checked — try again shortly")
+			return
+		}
 		via = a.sessionLoginMethod(r.Context(), session)
 	}
 	status := map[string]any{
@@ -1321,14 +1336,33 @@ func (a *App) handleSecurity(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return
 	}
+	// Each field is a real lookup, not a default: swallowing errors here
+	// reports a healthy password/TOTP/recovery set as absent or zero
+	// (audit 3 AUTH-05).
 	var totp bool
-	_ = a.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM auth_totp WHERE user_id=$1 AND enabled_at IS NOT NULL)`, uid).Scan(&totp)
+	if err := a.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM auth_totp WHERE user_id=$1 AND enabled_at IS NOT NULL)`, uid).Scan(&totp); err != nil {
+		a.log.Error("security status (totp) failed", "err", err)
+		writeProblem(w, http.StatusServiceUnavailable, "Security Unavailable", "could not read security settings — try again shortly")
+		return
+	}
 	var passwordSet bool
-	_ = a.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM auth_passwords WHERE user_id=$1)`, uid).Scan(&passwordSet)
+	if err := a.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM auth_passwords WHERE user_id=$1)`, uid).Scan(&passwordSet); err != nil {
+		a.log.Error("security status (password) failed", "err", err)
+		writeProblem(w, http.StatusServiceUnavailable, "Security Unavailable", "could not read security settings — try again shortly")
+		return
+	}
 	var recovery int
-	_ = a.db.QueryRowContext(r.Context(), `SELECT count(*) FROM auth_recovery_codes WHERE user_id=$1 AND used_at IS NULL`, uid).Scan(&recovery)
+	if err := a.db.QueryRowContext(r.Context(), `SELECT count(*) FROM auth_recovery_codes WHERE user_id=$1 AND used_at IS NULL`, uid).Scan(&recovery); err != nil {
+		a.log.Error("security status (recovery) failed", "err", err)
+		writeProblem(w, http.StatusServiceUnavailable, "Security Unavailable", "could not read security settings — try again shortly")
+		return
+	}
 	var email string
-	_ = a.db.QueryRowContext(r.Context(), `SELECT email FROM users WHERE id=$1`, uid).Scan(&email)
+	if err := a.db.QueryRowContext(r.Context(), `SELECT email FROM users WHERE id=$1`, uid).Scan(&email); err != nil {
+		a.log.Error("security status (email) failed", "err", err)
+		writeProblem(w, http.StatusServiceUnavailable, "Security Unavailable", "could not read security settings — try again shortly")
+		return
+	}
 	writeJSON(w, map[string]any{"email": email, "passkeys": passkeys, "totp_enabled": totp, "password_set": passwordSet, "recovery_codes_remaining": recovery})
 }
 
