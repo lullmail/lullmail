@@ -939,8 +939,11 @@ func TestSyncAccountContinuesPastOneUnreadableMailbox(t *testing.T) {
 	}
 
 	reports, err := eng.SyncAccount(context.Background(), acct, ad)
-	if err != nil {
-		t.Fatalf("account sync aborted: %v", err)
+	// The readable folders still sync, and the unreadable one is still
+	// reported: a partial account sync must not masquerade as success
+	// (audit SYNC-01).
+	if err == nil || !strings.Contains(err.Error(), "Restricted") {
+		t.Fatalf("account sync hid the failed mailbox (err=%v)", err)
 	}
 	if len(reports) != 2 {
 		t.Errorf("got %d reports, want 2 (INBOX and Archive)", len(reports))

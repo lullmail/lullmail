@@ -96,11 +96,15 @@ func (e *Engine) SyncAccount(ctx context.Context, acct AccountID, ad Adapter) ([
 	}
 
 	reports := make([]SyncReport, 0, len(boxes))
+	var folderErrors []error
 	for _, box := range boxes {
 		rep, err := e.SyncMailbox(ctx, acct, box.ID, ad)
 		if err != nil {
 			// One unreadable mailbox should not abandon the rest of the
 			// account; a permission-scoped folder is common and normal.
+			// The failure is still a failure: it is accumulated and
+			// returned so the caller cannot mistake a partial sync for a
+			// healthy one (which would clear the account's error state).
 			//
 			// Two conditions are account-wide rather than per-mailbox and
 			// must propagate: a rejected credential, and throttling.
@@ -112,11 +116,15 @@ func (e *Engine) SyncAccount(ctx context.Context, acct AccountID, ad Adapter) ([
 			}
 			e.log.WarnContext(ctx, "mailbox sync failed",
 				"account", acct, "mailbox", box.ID, "err", err)
+			folderErrors = append(folderErrors, fmt.Errorf("mailbox %s: %w", box.ID, err))
+			if ctx.Err() != nil {
+				break
+			}
 			continue
 		}
 		reports = append(reports, *rep)
 	}
-	return reports, nil
+	return reports, errors.Join(folderErrors...)
 }
 
 // SyncMailbox brings one mailbox up to date.
@@ -331,15 +339,31 @@ func (e *Engine) apply(ctx context.Context, acct AccountID, box MailboxID, ad Ad
 				continue
 			}
 			if err := e.fetchBody(ctx, acct, ad, upsert[i].ID); err != nil {
-				// Warn and continue: a body that will not fetch is served
-				// on demand later, and one unreadable message must not stop
-				// the sync that carries every other one.
+				// Account-wide conditions stop the whole prefetch loop, not
+				// just this message: a provider already throttling must not
+				// receive one more request per remaining body, and a dead
+				// context means nobody is listening anyway. A message-local
+				// failure stays best-effort — one unreadable message must not
+				// stop the sync carrying every other one.
+				if stopPrefetch(err) {
+					return err
+				}
 				e.log.WarnContext(ctx, "body fetch failed",
 					"account", acct, "message", upsert[i].ID, "err", err)
 			}
 		}
 	}
 	return nil
+}
+
+// stopPrefetch reports whether a body-fetch failure is account-wide: the
+// provider rejected the credential, is throttling, or the caller went away.
+// These must halt the batch instead of being retried per message.
+func stopPrefetch(err error) bool {
+	return errors.Is(err, ErrReauthRequired) ||
+		errors.Is(err, ErrRateLimited) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded)
 }
 
 func (e *Engine) fetchBody(ctx context.Context, acct AccountID, ad Adapter, id MessageID) error {
