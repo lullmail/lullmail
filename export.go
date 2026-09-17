@@ -132,7 +132,7 @@ func (a *App) handleAccountExport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, box := range plans {
-		report := exportMailboxReport{Name: box.name, File: box.filename, Messages: len(box.messages)}
+		report := exportMailboxReport{Name: box.name, File: box.filename}
 		if adapter != nil && adapter.Provider() == nmail.ProviderIMAP {
 			if cursor, cursorErr := a.store.Cursor(r.Context(), nmail.AccountID(mirrorID), box.id); cursorErr == nil {
 				if _, selectErr := adapter.Sync(r.Context(), box.id, cursor); selectErr != nil {
@@ -145,9 +145,14 @@ func (a *App) handleAccountExport(w http.ResponseWriter, r *http.Request) {
 		h.SetModTime(time.Now())
 		entry, err := zw.CreateHeader(h)
 		if err != nil {
-			manifest.Warnings = appendExportWarning(manifest.Warnings, box.name+": could not create archive entry")
-			continue
+			// A local archive write failure is not degradation: the
+			// promised entry would be missing from the archive (audit 3
+			// EXPORT-01).
+			a.log.Error("mail export build failed", "entry", box.filename, "err", err)
+			writeProblem(w, http.StatusInternalServerError, "Export Failed", "could not create archive entry "+box.filename)
+			return
 		}
+		written := 0
 		for _, msg := range box.messages {
 			var raw []byte
 			var rawErr error
@@ -168,20 +173,35 @@ func (a *App) handleAccountExport(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if err := writeMboxRD(entry, msg.envelope, raw); err != nil {
-				manifest.Warnings = appendExportWarning(manifest.Warnings,
-					fmt.Sprintf("%s/%s could not be written: %v", box.name, msg.id, err))
+				// Local I/O failure with headers not yet committed: fatal,
+				// not a warning — the message would be silently absent
+				// from a "successful" archive (audit 3 EXPORT-01).
+				a.log.Error("mail export write failed", "mailbox", box.name, "message", msg.id, "err", err)
+				writeProblem(w, http.StatusInternalServerError, "Export Failed",
+					fmt.Sprintf("could not write %s/%s to the archive", box.name, msg.id))
+				return
 			}
+			written++
 		}
+		// Counts reflect confirmed writes, not the plan (audit 3 EXPORT-01).
+		report.Messages = written
 		manifest.Mailboxes = append(manifest.Mailboxes, report)
 	}
 
 	manifestHeader := &zip.FileHeader{Name: "export-manifest.json", Method: zip.Deflate}
 	manifestHeader.SetModTime(time.Now())
 	manifestEntry, err := zw.CreateHeader(manifestHeader)
-	if err == nil {
-		enc := json.NewEncoder(manifestEntry)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(manifest)
+	if err != nil {
+		a.log.Error("mail export manifest entry failed", "err", err)
+		writeProblem(w, http.StatusInternalServerError, "Export Failed", "could not create the manifest entry")
+		return
+	}
+	enc := json.NewEncoder(manifestEntry)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(manifest); err != nil {
+		a.log.Error("mail export manifest encode failed", "err", err)
+		writeProblem(w, http.StatusInternalServerError, "Export Failed", "could not encode the manifest")
+		return
 	}
 	if err := zw.Close(); err != nil {
 		a.log.Error("mail export build failed", "err", err)
