@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -51,6 +52,7 @@ func serve() {
 			w.Write([]byte("dashboard not built — run: cd dashboard && npm i && npm run build\n"))
 		})
 	} else {
+		shell := newShellRenderer(dist)
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			name := strings.Trim(r.URL.Path, "/")
 			if name == "" {
@@ -63,11 +65,11 @@ func serve() {
 				if name == "service-worker.js" {
 					w.Header().Set("Cache-Control", "no-cache")
 					w.Header().Set("Service-Worker-Allowed", "/")
-					serveServiceWorker(w, r, dist)
+					serveServiceWorker(w, r, shell)
 					return
 				}
 				if strings.HasSuffix(name, ".html") {
-					serveHTML(w, r, dist, name)
+					serveHTML(w, r, shell, name)
 					return
 				}
 				http.ServeFileFS(w, r, dist, name)
@@ -81,7 +83,7 @@ func serve() {
 				return
 			}
 			// Extensionless fallback = client route: serve the root page.
-			serveHTML(w, r, dist, "index.html")
+			serveHTML(w, r, shell, "index.html")
 		})
 	}
 	mux.Handle("/", handler)
@@ -167,18 +169,43 @@ func securityHeaders(next http.Handler) http.Handler {
 // version to whatever the build shipped, so a deploy that changes only an
 // icon or the manifest still re-installs and re-caches the shell: no
 // manual VERSION bumps to forget.
-func serveServiceWorker(w http.ResponseWriter, r *http.Request, fsys fs.FS) {
-	data, err := fs.ReadFile(fsys, "service-worker.js")
+// shellRenderer renders the deterministic-per-build artifacts once per
+// filesystem: the fingerprinted service worker and the stylesheet digest.
+// Embedded assets cannot change while the process runs, so per-request
+// hashing repeated identical work on unauthenticated paths (audit 3
+// OPS-09). One renderer per filesystem instance: a fresh embed tree gets
+// a fresh renderer, so no result ever leaks across builds.
+type shellRenderer struct {
+	fsys        fs.FS
+	mu          sync.Mutex
+	workerBody  string
+	workerReady bool
+	styleHref   string
+	styleReady  bool
+}
+
+func newShellRenderer(fsys fs.FS) *shellRenderer {
+	return &shellRenderer{fsys: fsys}
+}
+
+// worker returns the worker bytes with the content-derived VERSION
+// stamped in, computing them at most once.
+func (c *shellRenderer) worker() (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.workerReady {
+		return c.workerBody, nil
+	}
+	data, err := fs.ReadFile(c.fsys, "service-worker.js")
 	if err != nil {
-		http.NotFound(w, r)
-		return
+		return "", err
 	}
 	h := sha256.New()
-	fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+	fs.WalkDir(c.fsys, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || path == "service-worker.js" {
 			return nil
 		}
-		file, err := fs.ReadFile(fsys, path)
+		file, err := fs.ReadFile(c.fsys, path)
 		if err != nil {
 			return nil
 		}
@@ -190,6 +217,35 @@ func serveServiceWorker(w http.ResponseWriter, r *http.Request, fsys fs.FS) {
 	body := strings.Replace(string(data),
 		`const VERSION = "lull-shell-v1";`,
 		`const VERSION = "lull-shell-`+hex.EncodeToString(sum[:6])+`";`, 1)
+	c.workerBody = body
+	c.workerReady = true
+	return body, nil
+}
+
+// stylesheetHref returns the versioned stylesheet link, hashing
+// styles.css at most once.
+func (c *shellRenderer) stylesheetHref() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.styleReady {
+		return c.styleHref
+	}
+	href := "/styles.css"
+	if stylesheet, err := fs.ReadFile(c.fsys, "styles.css"); err == nil {
+		sum := sha256.Sum256(stylesheet)
+		href += fmt.Sprintf("?v=%x", sum[:6])
+	}
+	c.styleHref = href
+	c.styleReady = true
+	return href
+}
+
+func serveServiceWorker(w http.ResponseWriter, r *http.Request, shell *shellRenderer) {
+	body, err := shell.worker()
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 	io.WriteString(w, body)
 }
@@ -198,19 +254,15 @@ func serveServiceWorker(w http.ResponseWriter, r *http.Request, fsys fs.FS) {
 // static preset emits bare pages (title only); the CSS link is added here at
 // serve time — the same convention akiroo's static.go uses — so routes never
 // each have to remember it.
-func serveHTML(w http.ResponseWriter, r *http.Request, fsys fs.FS, name string) {
-	data, err := fs.ReadFile(fsys, name)
+func serveHTML(w http.ResponseWriter, r *http.Request, shell *shellRenderer, name string) {
+	data, err := fs.ReadFile(shell.fsys, name)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
 	s := string(data)
 	const plainHref = `href="/styles.css"`
-	href := "/styles.css"
-	if stylesheet, err := fs.ReadFile(fsys, "styles.css"); err == nil {
-		sum := sha256.Sum256(stylesheet)
-		href += fmt.Sprintf("?v=%x", sum[:6])
-	}
+	href := shell.stylesheetHref()
 	link := `<link rel="stylesheet" href="` + href + `">`
 	if strings.Contains(s, plainHref) {
 		s = strings.Replace(s, plainHref, `href="`+href+`"`, 1)

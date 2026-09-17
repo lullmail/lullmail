@@ -47,7 +47,7 @@ func TestServeHTMLVersionsStylesheet(t *testing.T) {
 		"styles.css": &fstest.MapFile{Data: []byte(`body { color: red; }`)},
 	}
 	w := httptest.NewRecorder()
-	serveHTML(w, httptest.NewRequest("GET", "/", nil), files, "index.html")
+	serveHTML(w, httptest.NewRequest("GET", "/", nil), newShellRenderer(files), "index.html")
 	response := w.Result()
 	body, _ := io.ReadAll(response.Body)
 	if response.StatusCode != 200 {
@@ -62,7 +62,7 @@ func TestServeHTMLVersionsStylesheet(t *testing.T) {
 func workerVersion(t *testing.T, files fstest.MapFS) string {
 	t.Helper()
 	w := httptest.NewRecorder()
-	serveServiceWorker(w, httptest.NewRequest("GET", "/service-worker.js", nil), files)
+	serveServiceWorker(w, httptest.NewRequest("GET", "/service-worker.js", nil), newShellRenderer(files))
 	if w.Code != 200 {
 		t.Fatalf("status = %d", w.Code)
 	}
