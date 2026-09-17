@@ -6,10 +6,14 @@ import (
 	"database/sql/driver"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/neutron-build/neutron/mail"
 )
 
 func TestHTMLFallbackText(t *testing.T) {
@@ -233,5 +237,78 @@ func TestHandleSendRejectsGraphOversizeAttachmentsPreQueue(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), "queued") {
 		t.Fatal("an oversize Graph attachment was queued anyway")
+	}
+}
+
+// The delivery lease must fence account deletion: once deletion begins,
+// an admitted send holds it and a new send fails admission instead of
+// submitting for a mailbox that is going away (audit 3 SEND-02).
+func TestGuardDeliveryFencesAccountDeletion(t *testing.T) {
+	a := &App{
+		log:           discardLogger(),
+		accountStates: map[mail.AccountID]*accountLifecycle{},
+	}
+	acct := mail.AccountID("mirror-1")
+
+	delivered := make(chan struct{})
+	guarded := a.guardDelivery(acct, func(ctx context.Context, _ *mail.Outgoing) error {
+		close(delivered)
+		<-ctx.Done() // hold the lease like a slow submission would
+		return ctx.Err()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = guarded(ctx, &mail.Outgoing{}) }()
+	<-delivered
+
+	// Deletion cannot COMPLETE while the admitted delivery holds the lease...
+	deletionDone := make(chan struct{})
+	go func() {
+		finish, ok := a.beginAccountDeletion(acct)
+		if !ok {
+			t.Error("deletion reported in-progress twice")
+			return
+		}
+		finish(true) // committed: stays tombstoned
+		close(deletionDone)
+	}()
+	select {
+	case <-deletionDone:
+		t.Fatal("deletion completed while a delivery held the account lease")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancel()
+	<-deletionDone
+
+	// ...and after deletion began, new sends fail admission.
+	if err := guarded(context.Background(), &mail.Outgoing{}); err == nil || !strings.Contains(err.Error(), "being deleted") {
+		t.Fatalf("post-deletion delivery admitted: %v", err)
+	}
+}
+
+// The aggregate budget rejects beyond maxJobs and releases exactly once
+// (audit 3 SEND-03).
+func TestSendBudgetAdmission(t *testing.T) {
+	var b sendBudget
+	var releases []func()
+	for i := 0; i < sendMaxJobs; i++ {
+		release, err := b.acquire(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		releases = append(releases, release)
+	}
+	if _, err := b.acquire(1); !errors.Is(err, errSendCapacity) {
+		t.Fatalf("job limit not enforced: %v", err)
+	}
+	for _, release := range releases {
+		release()
+		release() // double release must not double-count
+	}
+	if b.jobs != 0 || b.bytes != 0 {
+		t.Fatalf("budget leaked: jobs=%d bytes=%d", b.jobs, b.bytes)
+	}
+	if _, err := b.acquire(sendMaxBytes + 1); !errors.Is(err, errSendCapacity) {
+		t.Fatalf("byte limit not enforced: %v", err)
 	}
 }

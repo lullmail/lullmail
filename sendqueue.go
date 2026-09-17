@@ -39,6 +39,59 @@ const (
 type sendQueue struct {
 	mu    sync.Mutex
 	sends map[string]*pendingSend
+	// Aggregate admission budget: per-request caps alone do not bound how
+	// many accepted compositions (decoded attachments included) can sit in
+	// the process at once (audit 3 SEND-03).
+	budget sendBudget
+}
+
+// sendBudget bounds concurrently accepted sends by job count and estimated
+// retained bytes. Zero value is ready; acquire/release are the whole API.
+type sendBudget struct {
+	mu    sync.Mutex
+	jobs  int
+	bytes int64
+}
+
+const (
+	sendMaxJobs         = 8
+	sendMaxBytes int64  = 128 << 20
+	sendOverhead int64  = 1 << 10
+)
+
+var errSendCapacity = errors.New("send capacity exhausted")
+
+func (b *sendBudget) acquire(n int64) (func(), error) {
+	if n < 0 {
+		n = 0
+	}
+	b.mu.Lock()
+	if b.jobs >= sendMaxJobs || b.bytes+n > sendMaxBytes {
+		b.mu.Unlock()
+		return nil, errSendCapacity
+	}
+	b.jobs++
+	b.bytes += n
+	b.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			b.mu.Lock()
+			b.jobs--
+			b.bytes -= n
+			b.mu.Unlock()
+		})
+	}, nil
+}
+
+// outgoingWeight estimates what one accepted composition retains until its
+// worker finishes: text and HTML bodies plus decoded attachment bytes.
+func outgoingWeight(out *mail.Outgoing) int64 {
+	n := sendOverhead + int64(len(out.Text)) + int64(len(out.HTML))
+	for _, att := range out.Attachments {
+		n += int64(len(att.Data))
+	}
+	return n
 }
 
 type deliverFunc func(context.Context, *mail.Outgoing) error
@@ -325,22 +378,26 @@ func stripTags(s string) string {
 // Credentials are resolved at DELIVERY time, not enqueue time: the undo
 // timer can outlive an account deletion, and a captured sender holding the
 // old password must not submit mail for an account that no longer exists
-// (audit SEND-04).
+// (audit SEND-04). The whole delivery additionally holds an account-use
+// lease from before credential resolution until filing completes, so a
+// concurrent deletion cannot commit between the credential lookup and the
+// network submission (audit 3 SEND-02).
 func (a *App) deliveryFor(ctx context.Context, account mail.AccountID, replyParent string) (deliverFunc, mail.Address, bool) {
 	var provider, address string
 	if err := a.db.QueryRowContext(ctx, `SELECT provider,address FROM email_accounts WHERE mirror_account_id=$1`, string(account)).Scan(&provider, &address); err != nil {
 		return nil, mail.Address{}, false
 	}
 	if provider == "gmail" || provider == "graph" {
-		return func(ctx context.Context, outgoing *mail.Outgoing) error {
+		deliver := func(ctx context.Context, outgoing *mail.Outgoing) error {
 			return a.sendOAuth(ctx, provider, string(account), outgoing, replyParent)
-		}, mail.Address{Email: address}, true
+		}
+		return a.guardDelivery(account, deliver), mail.Address{Email: address}, true
 	}
 	from, ok := a.accountSendAddress(ctx, account)
 	if !ok {
 		return nil, mail.Address{}, false
 	}
-	return func(ctx context.Context, outgoing *mail.Outgoing) error {
+	deliver := func(ctx context.Context, outgoing *mail.Outgoing) error {
 		sender, _, ok := a.SMTPFor(ctx, account)
 		if !ok {
 			return fmt.Errorf("account %s is no longer connected or has no send credential", account)
@@ -351,7 +408,30 @@ func (a *App) deliveryFor(ctx context.Context, account mail.AccountID, replyPare
 		}
 		a.fileSent(ctx, account, raw)
 		return nil
-	}, from, true
+	}
+	return a.guardDelivery(account, deliver), from, true
+}
+
+// guardDelivery holds the account-use lease across the entire outbound
+// transport: admission, credential resolution, submission, and Sent-copy
+// filing. Deletion therefore waits for an admitted send, and a send whose
+// account has started deleting fails admission instead of submitting for a
+// disconnected mailbox. The gate key in the context makes nested
+// beginAccountUse calls (fileSent -> accountResolver) no-ops instead of
+// recursively taking the owner read lock while a deletion writer waits.
+func (a *App) guardDelivery(account mail.AccountID, next deliverFunc) deliverFunc {
+	return func(ctx context.Context, outgoing *mail.Outgoing) error {
+		release, ok := a.beginAccountUse(account)
+		if !ok {
+			return fmt.Errorf("account %s is being deleted", account)
+		}
+		defer release()
+		ctx = context.WithValue(ctx, accountGateKey{}, true)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return next(ctx, outgoing)
+	}
 }
 
 // accountSendAddress reads the sender identity without the credential.
@@ -406,6 +486,15 @@ func (a *App) fileSent(ctx context.Context, account mail.AccountID, raw []byte) 
 }
 
 func (a *App) enqueue(w http.ResponseWriter, deliver deliverFunc, outgoing *mail.Outgoing) {
+	// Admission before acceptance: a full budget answers 429 rather than
+	// accepting work the process cannot responsibly hold (audit 3 SEND-03).
+	release, err := a.sendq.budget.acquire(outgoingWeight(outgoing))
+	if err != nil {
+		w.Header().Set("Retry-After", "5")
+		writeProblem(w, http.StatusTooManyRequests, "Too Many Sends",
+			"too many sends are already in flight — try again in a few seconds")
+		return
+	}
 	a.sendq.mu.Lock()
 	id := time.Now().Format("150405.000") + "-" + newID()[:6]
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -419,6 +508,7 @@ func (a *App) enqueue(w http.ResponseWriter, deliver deliverFunc, outgoing *mail
 			delete(a.sendq.sends, id)
 			a.sendq.mu.Unlock()
 			cancel()
+			release()
 		}()
 		select {
 		case <-ctx.Done():
