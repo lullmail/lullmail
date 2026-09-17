@@ -140,3 +140,29 @@ func TestAppendExportWarningIsBounded(t *testing.T) {
 		t.Fatalf("missing truncation marker: %q", warnings[100])
 	}
 }
+
+// Distinct folders whose sanitized bases collide (a, a, a-2) must yield
+// three distinct ZIP filenames, not a duplicated entry an extractor would
+// overwrite (audit EXPORT-02).
+func TestUniqueMboxNameNeverDuplicates(t *testing.T) {
+	used := map[string]bool{}
+	got := []string{
+		uniqueMboxName("a", used),
+		uniqueMboxName("a", used),
+		uniqueMboxName("a-2", used),
+		uniqueMboxName("A", used), // case-only collision
+	}
+	seen := map[string]bool{}
+	for _, name := range got {
+		if seen[name] {
+			t.Fatalf("duplicate allocation %q in %v", name, got)
+		}
+		seen[name] = true
+	}
+	want := []string{"a.mbox", "a-2.mbox", "a-2-2.mbox", "a-3.mbox"}
+	for i := range want {
+		if !strings.EqualFold(got[i], want[i]) {
+			t.Fatalf("allocation %d = %q, want %q (all: %v)", i, got[i], want[i], got)
+		}
+	}
+}

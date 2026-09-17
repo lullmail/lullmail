@@ -35,6 +35,7 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
 		WHERE h.message_id IS NULL
 		  AND (ea.backfill_days = 0
+		       OR m.received_at IS NULL
 		       OR (m.received_at AT TIME ZONE 'UTC') > now() - make_interval(days => ea.backfill_days))`, uid)
 	if err != nil {
 		return err
@@ -72,12 +73,24 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		return `CASE WHEN json_typeof(COALESCE(` + col + `, '[]')::json) = 'array'
 		       THEN COALESCE(` + col + `, '[]')::json ELSE '[]'::json END`
 	}
+	// Outbound evidence requires genuine Sent-folder membership: a forged
+	// From header equals the owner's address on inbound mail too, and
+	// trusting it let anyone seed correspondents by self-spoofing (audit
+	// DATA-03). Still a heuristic — From on mail the provider filed as
+	// Sent — but no longer spoofable by arbitrary senders.
+	sentMembership := `
+		AND EXISTS (
+		  SELECT 1 FROM mail_message_mailboxes mm
+		  JOIN mail_mailboxes mb
+		    ON mb.account_id = mm.account_id AND mb.id = mm.mailbox_id
+		  WHERE mm.account_id = m.account_id AND mm.message_id = m.id
+		    AND mb.role = 'sent')`
 	if err := collect(`
 		SELECT DISTINCT lower(t->>'email')
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		CROSS JOIN LATERAL json_array_elements(` + arrayOf("m.to_addrs") + `) t
-		WHERE lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = lower(ea.address)`); err != nil {
+		WHERE lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = lower(ea.address)` + sentMembership); err != nil {
 		a.log.Error("correspondent extraction (recipients) failed", "err", err)
 	}
 	if err := collect(`
@@ -85,7 +98,7 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		CROSS JOIN LATERAL json_array_elements(` + arrayOf("m.cc_addrs") + `) t
-		WHERE lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = lower(ea.address)`); err != nil {
+		WHERE lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = lower(ea.address)` + sentMembership); err != nil {
 		a.log.Error("correspondent extraction (cc) failed", "err", err)
 	}
 	if err := collect(`SELECT DISTINCT lower(address) FROM email_accounts WHERE user_id = $1`); err != nil {
@@ -124,15 +137,19 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if len(batch) == 0 {
-		return nil
-	}
 
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	// Serialize classification against sender decisions: the owner row
+	// lock orders this pass against a concurrent decide/undecide, so a
+	// decision cannot commit between the batch read and the self-heal
+	// below and strand decided mail in the Screener (audit DATA-02).
+	if err := lockAuthUser(ctx, tx, uid); err != nil {
+		return err
+	}
 	for _, p := range batch {
 		var route string
 		var allowed bool
@@ -152,9 +169,10 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 			return err
 		}
 	}
-	// Self-heal the decide-vs-classify race: a decision committed while this
-	// batch was being read parks mail in 'screener' that the re-route already
-	// missed. Re-running the re-route here closes the window.
+	// Self-heal runs even when this pass classified nothing new: a decision
+	// that raced an earlier batch's insert is repaired by the next pass,
+	// but only if the repair query still executes when the batch is empty
+	// (audit DATA-02).
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE hey_messages h SET bucket = CASE WHEN s.allowed THEN s.route ELSE 'dropped' END
 		FROM hey_senders s, mail_messages m
@@ -475,6 +493,13 @@ func (a *App) handleDecide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	// The owner-row lock serializes the decision with classification's
+	// batch insert, closing the window where both commit and neither sees
+	// the other (audit DATA-02).
+	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Decide Failed", err.Error())
+		return
+	}
 	if _, err := tx.ExecContext(r.Context(), `
 		INSERT INTO hey_senders (user_id, sender_key, allowed, route, decided_at)
 		VALUES ($1, $2, $3, $4, now())
@@ -555,6 +580,10 @@ func (a *App) handleUndecide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Undecide Failed", err.Error())
+		return
+	}
 	if _, err := tx.ExecContext(r.Context(),
 		`DELETE FROM hey_senders WHERE user_id = $1 AND sender_key = $2`,
 		uid, req.Sender); err != nil {
@@ -787,11 +816,16 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// On-demand body fetch for messages the sync never fetched. Bounded to
-	// keep one huge thread from turning into a mailbox download. The engine
-	// selects the message's mailbox first on IMAP (mail.MailboxSelector), so
-	// a freshly dialed adapter works here.
+	// On-demand body fetch for messages the sync never fetched. Bounded two
+	// ways — at most threadEagerBodyLimit fetches, all inside an overall
+	// deadline — so one huge thread cannot turn into a mailbox download or
+	// hold request resources indefinitely; the rest arrive on the next sync
+	// or an explicit open (audit DATA-05). The engine selects the message's
+	// mailbox first on IMAP (mail.MailboxSelector), so a freshly dialed
+	// adapter works here.
 	if len(refs) > 0 {
+		fetchCtx, cancelFetch := context.WithTimeout(r.Context(), 8*time.Second)
+		defer cancelFetch()
 		adapters := map[string]mail.Adapter{}
 		releases := map[string]func(){}
 		defer func() {
@@ -799,17 +833,21 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 				rel()
 			}
 		}()
+		fetched := 0
 		for _, rf := range refs {
+			if fetched >= threadEagerBodyLimit || fetchCtx.Err() != nil {
+				break
+			}
 			ad, ok := adapters[rf.acct]
 			if !ok {
-				cred, err := a.Token(r.Context(), mail.AccountID(rf.acct))
+				cred, err := a.Token(fetchCtx, mail.AccountID(rf.acct))
 				if err != nil {
 					a.log.Error("body fetch: token", "err", err)
 					continue
 				}
 				resolve := newResolver()
 				var release func()
-				ad, release, err = resolve(r.Context(), mail.AccountID(rf.acct), cred)
+				ad, release, err = resolve(fetchCtx, mail.AccountID(rf.acct), cred)
 				if err != nil {
 					a.log.Error("body fetch: dial", "err", err)
 					continue
@@ -817,7 +855,8 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 				adapters[rf.acct] = ad
 				releases[rf.acct] = release
 			}
-			b, err := a.eng.Body(r.Context(), mail.AccountID(rf.acct), mail.MessageID(rf.id), ad)
+			fetched++
+			b, err := a.eng.Body(fetchCtx, mail.AccountID(rf.acct), mail.MessageID(rf.id), ad)
 			if err != nil {
 				a.log.Error("body fetch: engine", "msg", rf.id, "err", err)
 				continue
@@ -1085,3 +1124,7 @@ func (a *App) handlePrefs(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{"screening_enabled": *req.ScreeningEnabled, "released": moved})
 }
+
+// threadEagerBodyLimit caps how many uncached bodies one thread open will
+// fetch before answering; the rest stay lazy (audit DATA-05).
+const threadEagerBodyLimit = 8

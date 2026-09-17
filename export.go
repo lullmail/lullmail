@@ -85,19 +85,23 @@ func (a *App) handleAccountExport(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Export Failed", err.Error())
 		return
 	}
-	cred, err := a.Token(r.Context(), nmail.AccountID(mirrorID))
-	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "Credential Failed", err.Error())
-		return
+	// Credential failure is provider-source failure here, not an abort:
+	// the export contract promises a mirror-rendered archive when the
+	// upstream is unavailable, and an expired OAuth token with an
+	// unreachable token endpoint is exactly that (audit EXPORT-01).
+	var adapter nmail.Adapter
+	var release func()
+	var resolveErr error
+	if cred, credErr := a.Token(r.Context(), nmail.AccountID(mirrorID)); credErr != nil {
+		resolveErr = credErr
+	} else if adapter, release, resolveErr = newResolver()(r.Context(), nmail.AccountID(mirrorID), cred); resolveErr == nil {
+		defer release()
 	}
-	adapter, release, resolveErr := newResolver()(r.Context(), nmail.AccountID(mirrorID), cred)
 	if resolveErr != nil {
 		// The export contract is provider-independent: with no adapter the
 		// whole archive is rendered from the local mirror instead of
 		// failing the user's exit on an unhealthy upstream.
 		a.log.Warn("mail export degraded to local mirror", "account", address, "err", resolveErr)
-	} else {
-		defer release()
 	}
 
 	filename := safeExportName(address) + "-mail-export.zip"
@@ -312,16 +316,17 @@ func (a *App) exportPlan(ctx context.Context, account nmail.AccountID) ([]export
 		return nil, nil, err
 	}
 
-	usedNames := map[string]int{}
+	// Allocation tracks the FINAL filenames (case-insensitively, for
+	// extracting tools that collide-case), not sanitized bases: bases "a",
+	// "a", "a-2" used to allocate "a.mbox", "a-2.mbox", "a-2.mbox" — two
+	// identical ZIP entries that overwrite each other on extraction
+	// (audit EXPORT-02).
+	usedNames := map[string]bool{}
 	var out []exportMailbox
 	var warnings []string
 	for _, box := range boxes {
 		base := safeExportName(box.name)
-		usedNames[base]++
-		filename := base + ".mbox"
-		if usedNames[base] > 1 {
-			filename = fmt.Sprintf("%s-%d.mbox", base, usedNames[base])
-		}
+		filename := uniqueMboxName(base, usedNames)
 		plan := exportMailbox{id: nmail.MailboxID(box.id), name: box.name, filename: filename}
 		ids, err := a.db.QueryContext(ctx, `
 			SELECT mm.message_id FROM mail_message_mailboxes mm
@@ -353,6 +358,23 @@ func (a *App) exportPlan(ctx context.Context, account nmail.AccountID) ([]export
 		out = append(out, plan)
 	}
 	return out, warnings, nil
+}
+
+// uniqueMboxName allocates the next free filename for a sanitized base,
+// keeping trying suffixes until one is unused so distinct folders that
+// sanitize to overlapping names can never produce duplicate ZIP entries.
+func uniqueMboxName(base string, used map[string]bool) string {
+	for suffix := 1; ; suffix++ {
+		name := base + ".mbox"
+		if suffix > 1 {
+			name = fmt.Sprintf("%s-%d.mbox", base, suffix)
+		}
+		key := strings.ToLower(name)
+		if !used[key] {
+			used[key] = true
+			return name
+		}
+	}
 }
 
 func readProviderRaw(ctx context.Context, adapter nmail.Adapter, id nmail.MessageID) ([]byte, error) {
