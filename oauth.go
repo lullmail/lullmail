@@ -141,17 +141,43 @@ func (a *App) handleOAuthCallback(w http.ResponseWriter, r *http.Request, provid
 		writeProblem(w, 500, "Encrypt Failed", err.Error())
 		return
 	}
+	// The callback runs on a public route, but account creation must join
+	// the same owner lifecycle gate as the authenticated connect flow: a
+	// full-owner deletion that enumerated its mirrors while this callback
+	// was mid-flight must not come back to a freshly inserted mirror row
+	// (audit 3 PROVIDER-03). Duplicate addresses answer the same 409 the
+	// connect flow uses.
+	var exists bool
+	if err := a.db.QueryRowContext(r.Context(),
+		`SELECT EXISTS(SELECT 1 FROM email_accounts WHERE user_id=$1 AND lower(address)=lower($2))`,
+		uid, email).Scan(&exists); err != nil {
+		writeProblem(w, 500, "Connect Failed", err.Error())
+		return
+	}
+	if exists {
+		writeProblem(w, http.StatusConflict, "Already Connected", "that address is already connected")
+		return
+	}
 	mirror := newID()
+	a.accountOwnerMu.RLock()
+	defer a.accountOwnerMu.RUnlock()
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = a.db.ExecContext(context.Background(),
+				`DELETE FROM mail_accounts ma WHERE id=$1 AND NOT EXISTS (SELECT 1 FROM email_accounts ea WHERE ea.mirror_account_id=ma.id)`, mirror)
+		}
+	}()
 	if err := a.store.PutAccount(r.Context(), &mail.Account{ID: mail.AccountID(mirror), Provider: mail.Provider(provider), Email: email, Name: label}); err != nil {
 		writeProblem(w, 500, "Mirror Failed", err.Error())
 		return
 	}
 	_, err = a.db.ExecContext(r.Context(), `INSERT INTO email_accounts(user_id,mirror_account_id,provider,address,label,username,host,port,smtp_host,smtp_port,cred_ciphertext,backfill_days) VALUES($1,$2,$3,$4,$5,$4,'',0,'',0,$6,90)`, uid, mirror, provider, email, label, sealed)
 	if err != nil {
-		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM mail_accounts WHERE id=$1`, mirror)
 		writeProblem(w, 500, "Connect Failed", err.Error())
 		return
 	}
+	committed = true
 	go func() {
 		ctx := context.Background()
 		_ = a.syncAccount(ctx, mail.AccountID(mirror))
