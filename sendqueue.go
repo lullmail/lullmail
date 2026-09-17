@@ -114,16 +114,24 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
 		return
 	}
-	var mirror string
-	q := `SELECT mirror_account_id FROM email_accounts WHERE user_id = $1`
+	var mirror, provider string
+	q := `SELECT mirror_account_id, provider FROM email_accounts WHERE user_id = $1`
 	args := []any{uid}
 	if req.AccountID != "" {
 		q += ` AND (id::text = $2 OR mirror_account_id = $2)`
 		args = append(args, req.AccountID)
 	}
 	q += ` ORDER BY created_at LIMIT 1`
-	if err := a.db.QueryRowContext(r.Context(), q, args...).Scan(&mirror); err != nil {
+	if err := a.db.QueryRowContext(r.Context(), q, args...).Scan(&mirror, &provider); err != nil {
 		writeProblem(w, http.StatusPreconditionFailed, "No Account", "connect an account first")
+		return
+	}
+	// Transport limits are enforced before the job is accepted, not inside
+	// delivery: a request the chosen transport is guaranteed to reject
+	// locally must fail synchronously and leave the draft alone
+	// (audit SEND-06).
+	if problem := validateTransportAttachments(provider, attachments); problem != "" {
+		writeProblem(w, http.StatusUnprocessableEntity, "Attachment Rejected", problem)
 		return
 	}
 
@@ -134,14 +142,18 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 	// first.
 	var outgoing *mail.Outgoing
 	if req.ReplyToID != "" {
-		var parentAcct string
+		var parentAcct, parentProvider string
 		err := a.db.QueryRowContext(r.Context(), `
-			SELECT m.account_id FROM mail_messages m
-			JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-			WHERE m.id = $2 AND (ea.id::text = $3 OR m.account_id = $3)`,
-			uid, req.ReplyToID, req.AccountID).Scan(&parentAcct)
+		SELECT m.account_id, ea.provider FROM mail_messages m
+		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+		WHERE m.id = $2 AND (ea.id::text = $3 OR m.account_id = $3)`,
+			uid, req.ReplyToID, req.AccountID).Scan(&parentAcct, &parentProvider)
 		if err != nil {
 			writeProblem(w, http.StatusNotFound, "Parent Not Found", "reply_to_message_id does not resolve")
+			return
+		}
+		if problem := validateTransportAttachments(parentProvider, attachments); problem != "" {
+			writeProblem(w, http.StatusUnprocessableEntity, "Attachment Rejected", problem)
 			return
 		}
 		parent, err := a.store.Envelope(r.Context(), mail.AccountID(parentAcct), mail.MessageID(req.ReplyToID))
@@ -191,6 +203,19 @@ type sendAttachmentRequest struct {
 	Filename    string `json:"filename"`
 	ContentType string `json:"content_type"`
 	DataB64     string `json:"data_base64"`
+}
+
+// validateTransportAttachments runs the chosen transport's attachment
+// validator ahead of queue acceptance, reusing the exact delivery-time
+// check so the two limits can never drift (audit SEND-06).
+func validateTransportAttachments(provider string, attachments []mail.Attachment) string {
+	if provider != "graph" || len(attachments) == 0 {
+		return ""
+	}
+	if _, err := graphAttachments(attachments); err != nil {
+		return err.Error()
+	}
+	return ""
 }
 
 // decodeAttachments turns JSON-carried base64 attachments into engine
@@ -296,6 +321,11 @@ func stripTags(s string) string {
 // IMAP, port 587 STARTTLS, unless the account overrides it. replyParent is
 // the mirror message id being answered ("" for fresh sends); OAuth
 // providers that cannot set threading headers on a flat send need it.
+//
+// Credentials are resolved at DELIVERY time, not enqueue time: the undo
+// timer can outlive an account deletion, and a captured sender holding the
+// old password must not submit mail for an account that no longer exists
+// (audit SEND-04).
 func (a *App) deliveryFor(ctx context.Context, account mail.AccountID, replyParent string) (deliverFunc, mail.Address, bool) {
 	var provider, address string
 	if err := a.db.QueryRowContext(ctx, `SELECT provider,address FROM email_accounts WHERE mirror_account_id=$1`, string(account)).Scan(&provider, &address); err != nil {
@@ -306,11 +336,15 @@ func (a *App) deliveryFor(ctx context.Context, account mail.AccountID, replyPare
 			return a.sendOAuth(ctx, provider, string(account), outgoing, replyParent)
 		}, mail.Address{Email: address}, true
 	}
-	sender, from, ok := a.SMTPFor(ctx, account)
+	from, ok := a.accountSendAddress(ctx, account)
 	if !ok {
 		return nil, mail.Address{}, false
 	}
 	return func(ctx context.Context, outgoing *mail.Outgoing) error {
+		sender, _, ok := a.SMTPFor(ctx, account)
+		if !ok {
+			return fmt.Errorf("account %s is no longer connected or has no send credential", account)
+		}
 		_, raw, err := sender.Send(ctx, outgoing)
 		if err != nil {
 			return err
@@ -318,6 +352,18 @@ func (a *App) deliveryFor(ctx context.Context, account mail.AccountID, replyPare
 		a.fileSent(ctx, account, raw)
 		return nil
 	}, from, true
+}
+
+// accountSendAddress reads the sender identity without the credential.
+func (a *App) accountSendAddress(ctx context.Context, account mail.AccountID) (mail.Address, bool) {
+	var address, displayName string
+	err := a.db.QueryRowContext(ctx,
+		`SELECT ea.address, u.display_name FROM email_accounts ea JOIN users u ON u.id = ea.user_id
+		 WHERE ea.mirror_account_id = $1`, string(account)).Scan(&address, &displayName)
+	if err != nil {
+		return mail.Address{}, false
+	}
+	return mail.Address{Email: address, Name: displayName}, true
 }
 
 // fileSent appends the exact submitted bytes to the provider's Sent mailbox.

@@ -152,10 +152,6 @@ func TestDecodeAttachments(t *testing.T) {
 // refuse anything past it as too large rather than malformed JSON.
 func TestHandleSendEnvelopeCoversAdvertisedAttachmentTotals(t *testing.T) {
 	cfg := &Config{SecretKey: "0123456789abcdef0123456789abcdef"}
-	sealed, err := sealSecret(cfg, "app-password")
-	if err != nil {
-		t.Fatal(err)
-	}
 	sendApp := func() *App {
 		return &App{
 			cfg:   cfg,
@@ -163,16 +159,16 @@ func TestHandleSendEnvelopeCoversAdvertisedAttachmentTotals(t *testing.T) {
 			sendq: newSendQueue(),
 			db: openStepDB(t,
 				dbStep{kind: "query", rows: &testRows{
-					columns: []string{"mirror_account_id"},
-					values:  [][]driver.Value{{"mirror-1"}},
+					columns: []string{"mirror_account_id", "provider"},
+					values:  [][]driver.Value{{"mirror-1", "imap"}},
 				}},
 				dbStep{kind: "query", rows: &testRows{
 					columns: []string{"provider", "address"},
 					values:  [][]driver.Value{{"imap", "owner@example.com"}},
 				}},
 				dbStep{kind: "query", rows: &testRows{
-					columns: []string{"address", "username", "host", "cred_ciphertext", "smtp_host", "smtp_port", "display_name"},
-					values:  [][]driver.Value{{"owner@example.com", "", "mail.example.com", sealed, "", int64(0), "Owner"}},
+					columns: []string{"address", "display_name"},
+					values:  [][]driver.Value{{"owner@example.com", "Owner"}},
 				}},
 			),
 		}
@@ -204,5 +200,38 @@ func TestHandleSendEnvelopeCoversAdvertisedAttachmentTotals(t *testing.T) {
 	// Past the wire cap the reader refuses with 413, not a JSON complaint.
 	if w := post(file(15<<20), file(15<<20), file(6<<20)); w.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("over wire cap: status = %d body = %s", w.Code, w.Body.String())
+	}
+}
+
+// Graph's 3 MB per-file limit must reject the request BEFORE queue
+// acceptance, not inside delivery after the browser draft is gone
+// (audit SEND-06).
+func TestHandleSendRejectsGraphOversizeAttachmentsPreQueue(t *testing.T) {
+	cfg := &Config{SecretKey: "0123456789abcdef0123456789abcdef"}
+	a := &App{
+		cfg:   cfg,
+		log:   discardLogger(),
+		sendq: newSendQueue(),
+		db: openStepDB(t,
+			dbStep{kind: "query", rows: &testRows{
+				columns: []string{"mirror_account_id", "provider"},
+				values:  [][]driver.Value{{"mirror-1", "graph"}},
+			}},
+		),
+	}
+	big := base64.StdEncoding.EncodeToString(make([]byte, 3<<20+1))
+	body, _ := json.Marshal(map[string]any{
+		"to": "dest@example.com", "subject": "big", "text": "hi",
+		"attachments": []sendAttachmentRequest{{Filename: "f.bin", DataB64: big}},
+	})
+	r := httptest.NewRequest(http.MethodPost, "/api/send", bytes.NewReader(body))
+	r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, "owner-1"))
+	w := httptest.NewRecorder()
+	a.handleSend(w, r)
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "3 MB") {
+		t.Fatalf("graph oversize attachment: status = %d body = %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "queued") {
+		t.Fatal("an oversize Graph attachment was queued anyway")
 	}
 }

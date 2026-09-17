@@ -236,6 +236,20 @@ func (a *App) purgeExpired() {
 	}
 }
 
+// readOnlyEngine denies every non-read method on the wrapped handler: the
+// raw engine surface must not offer an alternate mutation/send pipeline
+// beside the product's own semantics.
+func readOnlyEngine(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeProblem(w, http.StatusMethodNotAllowed, "Use Product API",
+				"mail mutations and sends must use the owner-scoped product endpoints")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // ownedMirror fences the engine's account-keyed surface behind
 // email_accounts ownership. The bare account list answers directly (it has
 // no {account} segment to check) with only the caller's accounts.
@@ -302,7 +316,14 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	// neutron-mail surface. Owned-envelope middleware first: the engine is
 	// account-id keyed with no user concept of its own, so ownership is
 	// enforced here before any handler sees a request.
-	api.Handle("/mail/", http.StripPrefix("/mail", a.ownedMirror(a.svc.Handler())))
+	//
+	// The mount is read-only (audit SEND-07): the raw engine API is a
+	// second send/sync/mutation pipeline that bypasses the product's undo
+	// window, Sent-copy filing, and post-sync classification. Reads
+	// (accounts, mailboxes, messages, bodies, attachments) remain available
+	// for tooling; mutations and sends belong to the owner-scoped product
+	// endpoints.
+	api.Handle("/mail/", http.StripPrefix("/mail", a.ownedMirror(readOnlyEngine(a.svc.Handler()))))
 
 	api.HandleFunc("GET /accounts", a.handleAccounts)
 	api.HandleFunc("POST /accounts", a.handleAccounts)

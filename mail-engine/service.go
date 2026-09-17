@@ -101,6 +101,11 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 		if len(req.To) > 0 {
 			msg.To = req.To
 		}
+		// A reply carries the caller's Cc/Bcc explicitly: the parent's
+		// lists are NOT inherited, and dropping them here silently
+		// misaddressed every library reply that added recipients.
+		msg.Cc = req.Cc
+		msg.Bcc = req.Bcc
 		msg.HTML = req.HTML
 	} else {
 		msg = &Outgoing{
