@@ -251,9 +251,10 @@ func (e *Engine) sweepAbsent(ctx context.Context, acct AccountID, box MailboxID,
 // apply writes one page of deltas.
 func (e *Engine) apply(ctx context.Context, acct AccountID, box MailboxID, ad Adapter, changes *Changes, rep *SyncReport, seen map[MessageID]bool) error {
 	var (
-		upsert  []Envelope
-		fetch   []MessageID
-		destroy []MessageID
+		upsert   []Envelope
+		fetch    []MessageID
+		destroy  []MessageID
+		promoted []MessageID
 	)
 
 	for _, c := range changes.Changes {
@@ -286,10 +287,12 @@ func (e *Engine) apply(ctx context.Context, acct AccountID, box MailboxID, ad Ad
 		// positional identity, which the next UIDVALIDITY change would
 		// invalidate. Promoting it now, while the header is in hand, is
 		// what keeps that message from reappearing as a duplicate later.
+		// The OLD identity is deleted only after the replacement envelope
+		// is written: deleting first turned a failed write into the loss
+		// of the only readable copy (audit 3 SYNC-03). A failure between
+		// the two now leaves the old record intact; the next sync retries.
 		if upgraded, ok := UpgradeIdentity(env.ID, env.MessageIDHeader); ok {
-			if err := e.store.DeleteMessages(ctx, acct, []MessageID{env.ID}); err != nil {
-				return err
-			}
+			promoted = append(promoted, env.ID)
 			env.ID = upgraded
 			rep.Upgraded++
 		}
@@ -308,6 +311,14 @@ func (e *Engine) apply(ctx context.Context, acct AccountID, box MailboxID, ad Ad
 
 	if err := e.store.PutEnvelopes(ctx, acct, upsert); err != nil {
 		return err
+	}
+
+	// Old identities retire only after their replacements are stored (see
+	// the promotion note above).
+	if len(promoted) > 0 {
+		if err := e.store.DeleteMessages(ctx, acct, promoted); err != nil {
+			return err
+		}
 	}
 
 	// Destroyed means "gone from this mailbox", which for a multi-mailbox
