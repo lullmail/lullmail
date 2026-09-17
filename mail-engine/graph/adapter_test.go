@@ -128,18 +128,18 @@ func TestNextLinkPagesBeforeDeltaLink(t *testing.T) {
 }
 
 func TestMailboxesFollowsEveryNextLink(t *testing.T) {
-	var paths []string
+	var pages []string
 	a := New(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		paths = append(paths, r.URL.String())
-		body := `{"value":[{"id":"inbox","displayName":"Inbox","wellKnownName":"inbox"}],"@odata.nextLink":"https://graph.test/page2"}`
-		if len(paths) == 2 {
-			body = `{"value":[{"id":"archive","displayName":"Archive","wellKnownName":"archive"}]}`
+		if strings.Contains(r.URL.RawQuery, "$select=id") {
+			// Well-known alias lookups carry no nextLink.
+			return respondJSON(`{"id":"x"}`)
 		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(body)),
-		}, nil
+		pages = append(pages, r.URL.String())
+		body := `{"value":[{"id":"inbox","displayName":"Inbox"}],"@odata.nextLink":"https://graph.test/page2"}`
+		if len(pages) == 2 {
+			body = `{"value":[{"id":"archive","displayName":"Archive"}]}`
+		}
+		return respondJSON(body)
 	})})
 
 	boxes, err := a.Mailboxes(context.Background())
@@ -149,9 +149,17 @@ func TestMailboxesFollowsEveryNextLink(t *testing.T) {
 	if len(boxes) != 2 || boxes[0].ID != "inbox" || boxes[1].ID != "archive" {
 		t.Fatalf("mailboxes = %+v, want both pages", boxes)
 	}
-	if len(paths) != 2 || paths[1] != "https://graph.test/page2" {
-		t.Fatalf("requests = %v, want nextLink page", paths)
+	if len(pages) != 2 || pages[1] != "https://graph.test/page2" {
+		t.Fatalf("listing requests = %v, want the nextLink page", pages)
 	}
+}
+
+func respondJSON(body string) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}, nil
 }
 
 func TestStatusMapping(t *testing.T) {
@@ -187,21 +195,159 @@ func TestSuccessStatusesAreNotErrors(t *testing.T) {
 	}
 }
 
-func TestRoleFromWellKnownName(t *testing.T) {
-	tests := map[string]mail.Role{
-		"inbox":        mail.RoleInbox,
-		"sentitems":    mail.RoleSent,
-		"drafts":       mail.RoleDrafts,
-		"deleteditems": mail.RoleTrash,
-		"junkemail":    mail.RoleJunk,
-		"archive":      mail.RoleArchive,
-		"":             mail.RoleNone,
-		"somefolder":   mail.RoleNone,
-	}
-	for in, want := range tests {
-		if got := roleFrom(in); got != want {
-			t.Errorf("roleFrom(%q) = %q, want %q", in, got, want)
+func TestMailboxesTraversesNestedFoldersAndAliases(t *testing.T) {
+	// Root lists one direct child plus a parent with children; roles must
+	// come from well-known alias lookups, not display names (audit
+	// GRAPH-01).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/mailFolders/inbox"):
+			_, _ = w.Write([]byte(`{"id":"folder-inbox"}`))
+		case strings.HasSuffix(r.URL.Path, "/mailFolders/sentitems"):
+			_, _ = w.Write([]byte(`{"id":"folder-sent"}`))
+		case strings.HasSuffix(r.URL.Path, "/mailFolders/drafts"):
+			_, _ = w.Write([]byte(`{"id":"folder-drafts"}`))
+		case strings.HasSuffix(r.URL.Path, "/mailFolders/deleteditems"):
+			_, _ = w.Write([]byte(`{"id":"folder-trash"}`))
+		case strings.HasSuffix(r.URL.Path, "/mailFolders/junkemail"):
+			_, _ = w.Write([]byte(`{"id":"folder-junk"}`))
+		case strings.HasSuffix(r.URL.Path, "/mailFolders/archive"):
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":"ErrorFolderNotFound"}}`))
+		case strings.Contains(r.URL.Path, "/childFolders"):
+			_, _ = w.Write([]byte(`{"value":[{"id":"nested-1","displayName":"Deep","parentFolderId":"parent-1","childFolderCount":0}]}`))
+		case strings.HasSuffix(r.URL.Path, "/mailFolders"):
+			_, _ = w.Write([]byte(`{"value":[
+				{"id":"folder-inbox","displayName":"Posteingang","parentFolderId":"","childFolderCount":0},
+				{"id":"folder-sent","displayName":"Gesendete Objekte","parentFolderId":"","childFolderCount":0},
+				{"id":"parent-1","displayName":"Archive","parentFolderId":"","childFolderCount":1}
+			]}`))
+		default:
+			http.NotFound(w, r)
 		}
+	}))
+	t.Cleanup(srv.Close)
+	oldBase := baseURL
+	baseURL = srv.URL
+	t.Cleanup(func() { baseURL = oldBase })
+	a := New(srv.Client())
+
+	boxes, err := a.Mailboxes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[mail.MailboxID]mail.Mailbox{}
+	for _, b := range boxes {
+		byID[b.ID] = b
+	}
+	if len(byID) != 4 {
+		t.Fatalf("got %d folders (%v), want 4 including the nested one", len(byID), byID)
+	}
+	nested, ok := byID["nested-1"]
+	if !ok {
+		t.Fatal("nested folder was not discovered")
+	}
+	if nested.ParentID != "parent-1" {
+		t.Errorf("nested parent = %q", nested.ParentID)
+	}
+	if byID["folder-inbox"].Role != mail.RoleInbox {
+		t.Errorf("localised inbox display name lost its role: %+v", byID["folder-inbox"])
+	}
+	if byID["folder-sent"].Role != mail.RoleSent {
+		t.Errorf("sent role = %q", byID["folder-sent"].Role)
+	}
+	if _, hasArchive := byID["folder-archive"]; hasArchive {
+		t.Error("a 404 alias lookup materialized a folder")
+	}
+}
+
+// A traversal failure mid-walk must surface as an error, never as a
+// partial-but-authoritative listing the store would prune to.
+func TestMailboxesFailsOnTraversalError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "?") {
+			return
+		}
+		if strings.Contains(r.URL.Path, "/mailFolders/") && !strings.Contains(r.URL.Path, "/childFolders") {
+			_, _ = w.Write([]byte(`{"id":"x"}`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/childFolders") {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`{"value":[{"id":"parent-1","displayName":"P","parentFolderId":"","childFolderCount":1}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	oldBase := baseURL
+	baseURL = srv.URL
+	t.Cleanup(func() { baseURL = oldBase })
+	a := New(srv.Client())
+	if _, err := a.Mailboxes(context.Background()); err == nil {
+		t.Fatal("a failed child traversal returned a successful folder list")
+	}
+}
+
+// Attachment metadata is paginated; every page must land and a failure must
+// fail the body rather than caching an attachment-less "complete" copy
+// (audit GRAPH-03).
+func TestBodyFollowsAttachmentPaginationAndFailsHard(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/attachments") {
+			if strings.Contains(r.URL.RawQuery, "page=2") || strings.HasSuffix(r.URL.Path, "page2") {
+				_, _ = w.Write([]byte(`{"value":[{"id":"att-2","name":"b.txt","contentType":"text/plain","size":2}]}`))
+				return
+			}
+			next := srv.URL + r.URL.Path + "?$select=id,name,contentType,size,isInline,contentId&page=2"
+			_, _ = w.Write([]byte(`{"value":[{"id":"att-1","name":"a.txt","contentType":"text/plain","size":1}],"@odata.nextLink":"` + next + `"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"body":{"contentType":"text","content":"hi"}}`))
+	}))
+	t.Cleanup(srv.Close)
+	oldBase := baseURL
+	baseURL = srv.URL
+	t.Cleanup(func() { baseURL = oldBase })
+	a := New(srv.Client())
+
+	body, err := a.Body(context.Background(), mail.NativeMessageID(mail.ProviderGraph, "m1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Parts) != 2 {
+		t.Fatalf("got %d attachment parts, want both pages", len(body.Parts))
+	}
+
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/attachments") {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(`{"body":{"contentType":"text","content":"hi"}}`))
+	}))
+	t.Cleanup(srv2.Close)
+	baseURL = srv2.URL
+	if _, err := a.Body(context.Background(), mail.NativeMessageID(mail.ProviderGraph, "m1")); err == nil {
+		t.Fatal("an attachment-metadata failure produced a successful body")
+	}
+}
+
+// Only seen/flagged have real single-property mappings; an arbitrary
+// keyword must be refused rather than overwriting the whole category
+// collection (audit GRAPH-04).
+func TestApplyRejectsArbitraryKeywords(t *testing.T) {
+	a := serve(t, func(w http.ResponseWriter, r *http.Request) {})
+	err := a.Apply(context.Background(), mail.Operation{
+		Kind: mail.OpAddKeyword, Keyword: "custom",
+		IDs: []mail.MessageID{mail.NativeMessageID(mail.ProviderGraph, "m1")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("arbitrary keyword mutation was accepted: %v", err)
 	}
 }
 
