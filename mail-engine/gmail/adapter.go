@@ -17,11 +17,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	netmail "net/mail"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/neutron-build/neutron/mail"
+	"golang.org/x/text/encoding/htmlindex"
 	"google.golang.org/api/gmail/v1"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
@@ -222,6 +225,11 @@ func (a *Adapter) Sync(ctx context.Context, box mail.MailboxID, cur mail.Cursor)
 func (a *Adapter) initialSync(ctx context.Context, box mail.MailboxID, pageToken string, historyID uint64) (*mail.Changes, error) {
 	call := a.svc.Users.Messages.List(a.user).
 		LabelIds(string(box)).
+		// Spam and Trash are discoverable mailboxes in the mirror; the API
+		// excludes them from listings unless explicitly included, so a
+		// first scan of those labels would silently see nothing (audit
+		// GMAIL-04). The label filter still selects the intended mailbox.
+		IncludeSpamTrash(true).
 		MaxResults(500)
 	if pageToken != "" {
 		call = call.PageToken(pageToken)
@@ -388,7 +396,11 @@ func toEnvelope(m *gmail.Message) mail.Envelope {
 			case "references":
 				env.References = mail.ParseReferences(h.Value)
 			case "date":
-				if t, err := time.Parse(time.RFC1123Z, h.Value); err == nil {
+				// RFC 5322 permits named zones, obsolete comment forms and
+				// one-digit days; net/mail's parser accepts them all where a
+				// single layout string rejected most real mail (audit
+				// GMAIL-01).
+				if t, err := netmail.ParseDate(h.Value); err == nil {
 					env.SentAt = t
 				}
 			}
@@ -421,24 +433,21 @@ func payloadHasAttachment(p *gmail.MessagePart) bool {
 	return false
 }
 
+// parseAddrs parses an address header with Go's RFC 5322 parser. Splitting
+// on commas mangled every quoted display name containing one ("Doe, Jane"
+// became two broken addresses), which corrupted the first sender used by
+// screening and replies (audit GMAIL-01). A parse failure yields no
+// addresses rather than invented ones; callers already treat a missing
+// sender as unscreenable.
 func parseAddrs(header string) []mail.Address {
-	var out []mail.Address
-	for _, raw := range strings.Split(header, ",") {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			continue
-		}
-		if open := strings.LastIndex(raw, "<"); open >= 0 {
-			if close := strings.Index(raw[open:], ">"); close >= 0 {
-				name := strings.Trim(strings.TrimSpace(raw[:open]), `"`)
-				out = append(out, mail.Address{
-					Name:  name,
-					Email: raw[open+1 : open+close],
-				})
-				continue
-			}
-		}
-		out = append(out, mail.Address{Email: raw})
+	parser := netmail.AddressParser{WordDecoder: &mime.WordDecoder{}}
+	addresses, err := parser.ParseList(header)
+	if err != nil {
+		return nil
+	}
+	out := make([]mail.Address, 0, len(addresses))
+	for _, address := range addresses {
+		out = append(out, mail.Address{Name: address.Name, Email: address.Address})
 	}
 	return out
 }
@@ -453,23 +462,39 @@ func (a *Adapter) Body(ctx context.Context, id mail.MessageID) (*mail.Body, erro
 
 	body := &mail.Body{MessageID: id}
 	if m.Payload != nil {
-		collectParts(m.Payload, body)
+		if err := a.collectParts(ctx, nativeID(id), m.Payload, body); err != nil {
+			return nil, err
+		}
 	}
 	return body, nil
 }
 
 // collectParts walks the MIME tree, decoding text and cataloguing the rest.
-func collectParts(p *gmail.MessagePart, body *mail.Body) {
+// Errors propagate: a body assembled while one part is unfetchable would be
+// cached forever as the complete message (audit GMAIL-02).
+func (a *Adapter) collectParts(ctx context.Context, messageID string, p *gmail.MessagePart, body *mail.Body) error {
 	switch {
 	case strings.HasPrefix(p.MimeType, "multipart/"):
 		for _, child := range p.Parts {
-			collectParts(child, body)
+			if err := a.collectParts(ctx, messageID, child, body); err != nil {
+				return err
+			}
 		}
-		return
+		return nil
 	case p.MimeType == "text/plain" && p.Filename == "":
-		body.Text += decodeBody(p)
+		text, err := a.partText(ctx, messageID, p)
+		if err != nil {
+			return err
+		}
+		body.Text += text
+		return nil
 	case p.MimeType == "text/html" && p.Filename == "":
-		body.HTML += decodeBody(p)
+		html, err := a.partText(ctx, messageID, p)
+		if err != nil {
+			return err
+		}
+		body.HTML += html
+		return nil
 	}
 
 	if p.Filename != "" || p.Body != nil && p.Body.AttachmentId != "" {
@@ -494,18 +519,84 @@ func collectParts(p *gmail.MessagePart, body *mail.Body) {
 			ContentID:   cid,
 		})
 	}
+	return nil
 }
 
-func decodeBody(p *gmail.MessagePart) string {
-	if p.Body == nil || p.Body.Data == "" {
-		return ""
+// decodeURLBytes decodes Gmail's base64url payload, padded or not. A
+// hard size bound stops a hostile encoded literal from allocating before
+// validation.
+func decodeURLBytes(value string) ([]byte, error) {
+	if len(value) > 90<<20 {
+		return nil, fmt.Errorf("gmail: encoded MIME part exceeds the 90 MB limit")
 	}
-	// Gmail uses base64url without padding.
-	raw, err := base64.URLEncoding.WithPadding(base64.NoPadding).DecodeString(p.Body.Data)
+	if strings.HasSuffix(value, "=") {
+		return base64.URLEncoding.DecodeString(value)
+	}
+	return base64.RawURLEncoding.DecodeString(value)
+}
+
+// partBytes resolves one part's bytes from either representation Gmail
+// uses: inline Body.Data or a separate attachment fetch by AttachmentId
+// (audit GMAIL-02).
+func (a *Adapter) partBytes(ctx context.Context, messageID string, p *gmail.MessagePart) ([]byte, error) {
+	if p == nil || p.Body == nil {
+		return nil, fmt.Errorf("gmail: missing MIME part body")
+	}
+	if p.Body.Data != "" {
+		return decodeURLBytes(p.Body.Data)
+	}
+	if p.Body.AttachmentId != "" {
+		result, err := a.svc.Users.Messages.Attachments.
+			Get(a.user, messageID, p.Body.AttachmentId).Context(ctx).Do()
+		if err != nil {
+			return nil, classify(err)
+		}
+		return decodeURLBytes(result.Data)
+	}
+	if p.Body.Size == 0 {
+		return []byte{}, nil
+	}
+	return nil, fmt.Errorf("gmail: nonempty MIME part has no data source")
+}
+
+// partText resolves and charset-decodes one textual part.
+func (a *Adapter) partText(ctx context.Context, messageID string, p *gmail.MessagePart) (string, error) {
+	raw, err := a.partBytes(ctx, messageID, p)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return string(raw)
+	charset := "utf-8"
+	for _, h := range p.Headers {
+		if strings.EqualFold(h.Name, "Content-Type") {
+			if _, params, err := mime.ParseMediaType(h.Value); err == nil && params["charset"] != "" {
+				charset = params["charset"]
+			}
+		}
+	}
+	decoded, err := decodeCharset(raw, charset)
+	if err != nil {
+		return "", fmt.Errorf("gmail: decode %s part: %w", charset, err)
+	}
+	return decoded, nil
+}
+
+// decodeCharset converts part bytes to UTF-8 when the declared charset says
+// they are not already. Unknown charsets surface as errors instead of being
+// silently misread as UTF-8.
+func decodeCharset(raw []byte, charset string) (string, error) {
+	name := strings.ToLower(strings.TrimSpace(charset))
+	if name == "" || name == "utf-8" || name == "us-ascii" || name == "ascii" {
+		return string(raw), nil
+	}
+	enc, err := htmlindex.Get(name)
+	if err != nil {
+		return "", fmt.Errorf("unsupported charset %q", charset)
+	}
+	out, err := enc.NewDecoder().Bytes(raw)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
 // Raw returns the original RFC 5322 message.
@@ -522,7 +613,9 @@ func (a *Adapter) Raw(ctx context.Context, id mail.MessageID) (io.ReadCloser, er
 	return io.NopCloser(strings.NewReader(string(raw))), nil
 }
 
-// Attachment streams one part's decoded content.
+// Attachment streams one part's decoded content. The part object — not
+// merely its attachment id — is what carries the data: a named attachment
+// can hold inline Body.Data with no attachment id at all (audit GMAIL-02).
 func (a *Adapter) Attachment(ctx context.Context, id mail.MessageID, partID string) (io.ReadCloser, error) {
 	m, err := a.svc.Users.Messages.Get(a.user, nativeID(id)).
 		Format("full").Context(ctx).Do()
@@ -530,36 +623,30 @@ func (a *Adapter) Attachment(ctx context.Context, id mail.MessageID, partID stri
 		return nil, classify(err)
 	}
 
-	attachID := findAttachmentID(m.Payload, partID)
-	if attachID == "" {
+	part := findPart(m.Payload, partID)
+	if part == nil {
 		return nil, fmt.Errorf("gmail: %w: part %s of %s", mail.ErrNotFound, partID, id)
 	}
-
-	att, err := a.svc.Users.Messages.Attachments.
-		Get(a.user, nativeID(id), attachID).Context(ctx).Do()
+	raw, err := a.partBytes(ctx, nativeID(id), part)
 	if err != nil {
-		return nil, classify(err)
-	}
-	raw, err := base64.URLEncoding.WithPadding(base64.NoPadding).DecodeString(att.Data)
-	if err != nil {
-		return nil, fmt.Errorf("gmail: decode attachment: %w", err)
+		return nil, err
 	}
 	return io.NopCloser(strings.NewReader(string(raw))), nil
 }
 
-func findAttachmentID(p *gmail.MessagePart, partID string) string {
+func findPart(p *gmail.MessagePart, partID string) *gmail.MessagePart {
 	if p == nil {
-		return ""
+		return nil
 	}
-	if p.PartId == partID && p.Body != nil {
-		return p.Body.AttachmentId
+	if p.PartId == partID {
+		return p
 	}
 	for _, child := range p.Parts {
-		if id := findAttachmentID(child, partID); id != "" {
-			return id
+		if found := findPart(child, partID); found != nil {
+			return found
 		}
 	}
-	return ""
+	return nil
 }
 
 // Apply pushes a mutation by modifying labels.
