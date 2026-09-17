@@ -1,13 +1,13 @@
 name: ci
 
 on:
+  pull_request:
   push:
     branches: [main]
     tags: ["v*"]
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   verify:
@@ -20,6 +20,7 @@ jobs:
           cache-dependency-path: |
             go.sum
             mail-engine/go.sum
+            mcp/go.sum
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -30,6 +31,9 @@ jobs:
       - name: Mail-engine tests and vet
         working-directory: mail-engine
         run: go test ./... && go vet ./...
+      - name: MCP tests and vet
+        working-directory: mcp
+        run: go test ./... && go vet ./...
       - name: Dashboard tests and production build
         working-directory: dashboard
         run: npm ci && npm test && npm run typecheck && npm run build
@@ -37,23 +41,46 @@ jobs:
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /tmp/lullmail .
       - name: Production container
         run: docker build -t lullmail:ci .
+
+  publish:
+    needs: verify
+    # Only pushes publish. A v* tag on an older commit must never move
+    # `latest` backwards (audit OPS-08): main publishes latest, a version
+    # tag publishes only its own immutable tags.
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Choose tags without rolling latest back from a historical tag
+        id: tags
+        shell: bash
+        run: |
+          image=ghcr.io/lullmail/lullmail
+          {
+            echo 'value<<EOF'
+            echo "$image:${GITHUB_SHA}"
+            if [[ "$GITHUB_REF" == refs/heads/main ]]; then
+              echo "$image:latest"
+            elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+              echo "$image:${GITHUB_REF_NAME}"
+            fi
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
       - name: Set up buildx
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         uses: docker/setup-buildx-action@v3
       - name: Login to GHCR
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Push multi-arch image
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ghcr.io/lullmail/lullmail:latest
-            ghcr.io/lullmail/lullmail:${{ github.sha }}
+          tags: ${{ steps.tags.outputs.value }}
