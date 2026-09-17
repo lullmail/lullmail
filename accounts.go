@@ -637,9 +637,12 @@ func (a *App) syncAccount(ctx context.Context, acct mail.AccountID) error {
 
 func (a *App) finishSync(ctx context.Context, acct mail.AccountID, reports []mail.SyncReport, syncErr error) {
 	// A wait=1 browser request may vanish mid-sync; the outcome still has to
-	// land durably, so finish on a detached context rather than not at all.
+	// land durably, so finish on a detached context rather than not at all —
+	// but a BOUNDED one, so finalization cannot outlive shutdown forever.
 	if ctx.Err() != nil {
-		ctx = context.Background()
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
 	}
 	changed := false
 	for _, report := range reports {
@@ -662,23 +665,51 @@ func (a *App) finishSync(ctx context.Context, acct mail.AccountID, reports []mai
 		return
 	}
 	var accountID, uid string
+	// The provider sync succeeded, but the local view is not usable until
+	// reconciliation ran: recording a healthy, error-free sync BEFORE the
+	// post-sync phases let a failed cleanup/retention/classify pass read
+	// as fully healthy (audit 3 DATA-10). last_error stays untouched
+	// until the phases answer.
 	if err := a.db.QueryRowContext(ctx,
-		`UPDATE email_accounts SET last_sync_at=now(), last_error=NULL WHERE mirror_account_id=$1 RETURNING id,user_id`,
+		`UPDATE email_accounts SET last_sync_at=now() WHERE mirror_account_id=$1 RETURNING id,user_id`,
 		string(acct)).Scan(&accountID, &uid); err != nil {
 		a.log.Error("record sync success failed", "account", acct, "err", err)
 		return
 	}
+	var reconErrs []error
 	if err := a.cleanupMirrorOrphans(ctx, uid, acct); err != nil {
 		a.log.Error("post-sync orphan cleanup failed", "account", acct, "err", err)
+		reconErrs = append(reconErrs, fmt.Errorf("orphan cleanup: %w", err))
 	}
 	var retentionDays int
 	if err := a.db.QueryRowContext(ctx, `SELECT retention_days FROM email_accounts WHERE mirror_account_id=$1`, string(acct)).Scan(&retentionDays); err == nil {
 		if err := a.applyAccountRetention(ctx, uid, acct, retentionDays); err != nil {
 			a.log.Error("post-sync retention failed", "account", acct, "err", err)
+			reconErrs = append(reconErrs, fmt.Errorf("retention: %w", err))
 		}
+	} else {
+		reconErrs = append(reconErrs, fmt.Errorf("retention policy: %w", err))
 	}
 	if err := a.classifyUser(ctx, uid); err != nil {
 		a.log.Error("post-sync classify failed", "account", acct, "err", err)
+		reconErrs = append(reconErrs, fmt.Errorf("classification: %w", err))
+	}
+	if reconErr := errors.Join(reconErrs...); reconErr != nil {
+		// The sync itself succeeded; the residual is a reconciliation
+		// failure, recorded as such instead of being logged away.
+		if _, err := a.db.ExecContext(ctx,
+			`UPDATE email_accounts SET last_error=$1 WHERE mirror_account_id=$2`,
+			"reconcile failed after sync: "+reconErr.Error(), string(acct)); err != nil {
+			a.log.Error("record reconcile error failed", "account", acct, "err", err)
+		}
+		ev.AccountID = accountID
+		ev.Error = "reconcile failed after sync"
+		a.events.publish(uid, ev)
+		return
+	}
+	if _, err := a.db.ExecContext(ctx,
+		`UPDATE email_accounts SET last_error=NULL WHERE mirror_account_id=$1`, string(acct)); err != nil {
+		a.log.Error("clear sync error failed", "account", acct, "err", err)
 	}
 	// Publish only after classification completes, so a reloading browser
 	// never lands between envelope insertion and bucket insertion.
