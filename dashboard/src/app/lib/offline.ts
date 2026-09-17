@@ -10,7 +10,17 @@ const ATTACHMENTS = "attachments";
 const OWNER = "es-offline-owner";
 
 interface Cached { key: string; owner: string; savedAt: number; value: unknown }
-interface Queued { id: string; owner: string; path: string; method: string; body?: unknown; queuedAt: number }
+interface Queued {
+  id: string;
+  owner: string;
+  path: string;
+  method: string;
+  body?: unknown;
+  queuedAt: number;
+  /** Set when replay concluded this action can never succeed; kept for
+   * visibility instead of being silently discarded (audit WEB-03). */
+  failed?: string;
+}
 interface DraftAttachmentRow { id: string; owner: string; files: unknown[] }
 
 function openDB(): Promise<IDBDatabase> {
@@ -27,13 +37,29 @@ function openDB(): Promise<IDBDatabase> {
   });
 }
 
+/** One transaction, resolved only when it COMMITS. Resolving on the
+ * request's onsuccess reported saves that a later abort (quota, another
+ * operation's failure) silently rolled back (audit WEB-02). */
 function transaction<T>(store: string, mode: IDBTransactionMode, run: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> {
   return openDB().then((db) => new Promise<T>((resolve, reject) => {
     const tx = db.transaction(store, mode);
-    const request = run(tx.objectStore(store));
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-    tx.oncomplete = () => db.close();
+    let value!: T;
+    let requestError: DOMException | null = null;
+    tx.oncomplete = () => { db.close(); resolve(value); };
+    tx.onabort = () => {
+      db.close();
+      reject(tx.error ?? requestError ?? new Error("Storage transaction aborted"));
+    };
+    tx.onerror = () => { requestError = tx.error; };
+    try {
+      const request = run(tx.objectStore(store));
+      request.onsuccess = () => { value = request.result; };
+      request.onerror = () => { requestError = request.error; };
+    } catch (error) {
+      try { tx.abort(); } catch { /* already inactive */ }
+      db.close();
+      reject(error);
+    }
   }));
 }
 
@@ -73,11 +99,26 @@ export async function queueMutation(path: string, method: string, body?: unknown
   await transaction(QUEUE, "readwrite", (store) => store.put({ id, owner, path, method, body, queuedAt: Date.now() } as Queued));
 }
 
+export type ReplayDecision = "committed" | "reauth" | "retry" | "failed";
+
+/** How one replayed mutation's response classifies. Only "committed"
+ * counts as replayed: a broad 4xx used to be deleted and counted as
+ * success, silently discarding the user's intended change and then
+ * triggering cache invalidation that concealed the loss (audit WEB-03). */
+export function replayDecision(status: number): ReplayDecision {
+  if (status >= 200 && status < 300) return "committed";
+  if (status === 401) return "reauth";
+  if ([408, 425, 429].includes(status) || status >= 500) return "retry";
+  return "failed"; // 400/404/409/412/422...: this action can never apply
+}
+
 export async function replayMutations(): Promise<number> {
   if (!navigator.onLine || !offlineOwner()) return 0;
   const all = await transaction<Queued[]>(QUEUE, "readonly", (store) => store.getAll());
   let replayed = 0;
-  for (const item of all.filter((entry) => entry.owner === offlineOwner()).sort((a, b) => a.queuedAt - b.queuedAt)) {
+  for (const item of all
+    .filter((entry) => entry.owner === offlineOwner() && !entry.failed)
+    .sort((a, b) => a.queuedAt - b.queuedAt)) {
     let response: Response;
     try {
       response = await fetch("/api" + item.path, {
@@ -85,13 +126,24 @@ export async function replayMutations(): Promise<number> {
         headers: item.body === undefined ? undefined : { "Content-Type": "application/json" },
         body: item.body === undefined ? undefined : JSON.stringify(item.body),
       });
-    } catch { break; }
-    if (response.status === 401) break;
-    // A stale action should not poison the whole queue. 2xx succeeds; 4xx is
-    // permanently invalid after reconnect; 5xx stays for the next attempt.
-    if (response.ok || (response.status >= 400 && response.status < 500)) {
-      await transaction(QUEUE, "readwrite", (store) => store.delete(item.id)); replayed++;
-    } else break;
+    } catch { break; } // network failed mid-replay: keep the rest queued
+    const decision = replayDecision(response.status);
+    if (decision === "reauth") break;
+    if (decision === "retry") break;
+    if (decision === "failed") {
+      // Permanently invalid: keep a marked record for visibility instead
+      // of counting it as replayed, and let detail show what rejected it.
+      let detail = String(response.status);
+      try {
+        const problem = await response.json();
+        detail = problem.detail || problem.title || detail;
+      } catch { /* non-JSON error body */ }
+      console.warn("Offline action rejected by the server and dropped from retry:", item.path, detail);
+      await transaction(QUEUE, "readwrite", (store) => store.put({ ...item, failed: detail }));
+      continue;
+    }
+    await transaction(QUEUE, "readwrite", (store) => store.delete(item.id));
+    replayed++;
   }
   return replayed;
 }
@@ -136,17 +188,22 @@ export async function clearDraftAttachments(id: string): Promise<void> {
 
 export function startOfflineData(): () => void {
   // A replay changed real state; whatever is on screen should catch up now,
-  // not on the next navigation or the 45s counts tick. Dynamic import:
-  // actions imports this module's cache helpers, and a static back-edge
-  // would cycle.
+  // not on the next navigation or the 45s counts tick. Zero committed
+  // mutations means NOTHING changed: clearing the response cache then
+  // would wipe the offline mailbox the next offline launch needs to read
+  // (audit WEB-01). Dynamic import: actions imports this module's cache
+  // helpers, and a static back-edge would cycle.
   const replay = () => {
-    replayMutations().then(async (n) => {
-      if (n > 0) {
-        const { reload, refreshCounts } = await import("./actions");
-        reload(); refreshCounts();
-      }
-      return clearResponseCache();
-    }).catch(() => {});
+    replayMutations().then(async (committed) => {
+      if (committed === 0) return;
+      await clearResponseCache();
+      const { reload, refreshCounts } = await import("./actions");
+      reload(); refreshCounts();
+    }).catch((error) => {
+      // Queued work and cached mail stay intact; the next online event
+      // retries.
+      console.error("Offline replay failed", error);
+    });
   };
   window.addEventListener("online", replay); replay();
   return () => window.removeEventListener("online", replay);

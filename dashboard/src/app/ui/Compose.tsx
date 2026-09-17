@@ -48,62 +48,93 @@ function DraftForm({ seed }: { seed: ComposeState }) {
   const draftKey = "es-draft-" + seed.id;
   let saved: { to?: string; cc?: string; bcc?: string; subject?: string; body?: string; htmlMode?: boolean; accountId?: string } = {};
   try { saved = JSON.parse(localStorage.getItem(draftKey) || "{}"); } catch { /* private mode */ }
+  // Cc/Bcc initialize from the saved slot, then the seed: an undo-restored
+  // draft must not lose its copied recipients to an empty default
+  // (audit SEND-05).
   const [to, setTo] = useState(saved.to ?? seed.to ?? "");
-  const [cc, setCc] = useState(saved.cc ?? "");
-  const [bcc, setBcc] = useState(saved.bcc ?? "");
-  const [showCc, setShowCc] = useState(!!(saved.cc || saved.bcc));
+  const [cc, setCc] = useState(saved.cc ?? seed.cc ?? "");
+  const [bcc, setBcc] = useState(saved.bcc ?? seed.bcc ?? "");
+  const [showCc, setShowCc] = useState(!!(saved.cc || saved.bcc || seed.cc || seed.bcc));
   const [subject, setSubject] = useState(saved.subject ?? seed.subject ?? "");
   const [body, setBody] = useState(saved.body ?? seed.body ?? "");
   const [htmlMode, setHtmlMode] = useState(saved.htmlMode ?? seed.htmlMode ?? false);
   const [preview, setPreview] = useState(false);
   const [busy, setBusy] = useState(false);
   const [accountId, setAccountId] = useState(saved.accountId ?? seed.accountId ?? "");
-  const [attachments, setAttachments] = useState<SendAttachment[]>([]);
-  const [fileBytes, setFileBytes] = useState(0);
+  const [attachments, setAttachments] = useState<SendAttachment[]>(seed.attachments ? [...seed.attachments] : []);
+  // Send stays disabled until any saved/seeded attachment set is restored:
+  // sending before restoration would ship a draft missing its files
+  // (audit WEB-06).
+  const [attachmentsReady, setAttachmentsReady] = useState(!seed.attachments);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+
+  const fileBytes = attachments.reduce((n, a) => n + Math.round(a.dataBase64.length * 3 / 4), 0);
 
   const addFiles = async (files: FileList | null) => {
     if (!files) return;
     const next: SendAttachment[] = [];
-    let bytes = 0;
     for (const f of files) {
       const att = await fileToAttachment(f);
-      if (att) { next.push(att); bytes += f.size; }
+      if (att) { next.push(att); }
     }
     if (next.length) {
-      const merged = [...attachments, ...next];
-      setAttachments(merged);
-      setFileBytes((n) => n + bytes);
-      void saveDraftAttachments(seed.id, merged);
+      // Functional merge: two selections decoding concurrently must not
+      // overwrite one another (audit WEB-06).
+      setAttachments((current) => [...current, ...next]);
     }
   };
 
   const removeAttachment = (i: number) => {
-    const next = attachments.filter((_, idx) => idx !== i);
-    setAttachments(next);
-    setFileBytes(next.reduce((n, a) => n + Math.round(a.dataBase64.length * 3 / 4), 0));
-    void saveDraftAttachments(seed.id, next);
+    setAttachments((current) => current.filter((_, idx) => idx !== i));
   };
 
-  // Parked drafts keep their attachments: restore from IndexedDB on mount.
+  // Parked drafts keep their attachments: restore from IndexedDB on mount
+  // and merge with anything selected while loading. An undo-restored seed
+  // carries its attachments in memory; they are re-persisted here.
   useEffect(() => {
     let alive = true;
+    if (seed.attachments) {
+      void saveDraftAttachments(seed.id, [...seed.attachments]).catch(() => {});
+      setAttachmentsReady(true);
+      return () => { alive = false; };
+    }
     loadDraftAttachments<SendAttachment>(seed.id).then((files) => {
-      if (alive && files && files.length && attachments.length === 0) {
-        setAttachments(files);
-        setFileBytes(files.reduce((n, a) => n + Math.round(a.dataBase64.length * 3 / 4), 0));
+      if (!alive) return;
+      if (files && files.length) {
+        setAttachments((current) => {
+          const present = new Set(current.map((item) => item.filename + "\u0000" + item.dataBase64));
+          return [...current, ...files.filter((item) => !present.has(item.filename + "\u0000" + item.dataBase64))];
+        });
       }
-    }).catch(() => {});
+      setAttachmentsReady(true);
+    }).catch(() => {
+      if (alive) {
+        showToast("Saved attachments could not be loaded — re-attach any missing files");
+        setAttachmentsReady(true);
+      }
+    });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Persistence follows the settled list, never a snapshot captured mid-race.
   useEffect(() => {
-    const timer = setTimeout(() => {
-      try { localStorage.setItem(draftKey, JSON.stringify({ to, cc, bcc, subject, body, htmlMode, accountId })); } catch { /* private mode */ }
-    }, 250);
-    return () => clearTimeout(timer);
+    if (!attachmentsReady) return; // don't clobber the stored set with the pre-restore empty list
+    void saveDraftAttachments(seed.id, attachments);
+  }, [attachments, attachmentsReady, seed.id]);
+
+  // Debounced autosave that FLUSHES on unmount: clearing the timer and
+  // dropping a pending write left the per-draft snapshot older than the
+  // draft stack, so switching back resurrected stale text (audit WEB-05).
+  const latest = useRef({ to, cc, bcc, subject, body, htmlMode, accountId });
+  latest.current = { to, cc, bcc, subject, body, htmlMode, accountId };
+  useEffect(() => {
+    const write = () => {
+      try { localStorage.setItem(draftKey, JSON.stringify(latest.current)); } catch { /* private mode */ }
+    };
+    const timer = setTimeout(write, 250);
+    return () => { clearTimeout(timer); write(); };
   }, [draftKey, to, cc, bcc, subject, body, htmlMode, accountId]);
 
   const send = async () => {
@@ -232,8 +263,8 @@ function DraftForm({ seed }: { seed: ComposeState }) {
       <div class="compose-btns">
         <span class="hint"><span class="kbd">⌘↵</span> send · <span class="kbd">Esc</span> park · <span class="kbd">c</span> new draft · {undoSeconds}s to undo</span>
         <button class="btn btn-ghost btn-sm" type="button" onClick={() => { localStorage.removeItem(draftKey); void clearDraftAttachments(seed.id); retireDraft(seed.id); }}>Discard</button>
-        <button class="btn btn-accent" type="button" disabled={!to.trim() || busy} onClick={send}>
-          {busy ? "Sending…" : "Send"}
+        <button class="btn btn-accent" type="button" disabled={!to.trim() || busy || !attachmentsReady} onClick={send}>
+          {busy ? "Sending…" : attachmentsReady ? "Send" : "Restoring…"}
         </button>
       </div>
     </>

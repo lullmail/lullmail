@@ -469,13 +469,16 @@ export async function sendMail(input: SendInput): Promise<boolean> {
         try {
           await api("/outbox/" + encodeURIComponent(res.queued), { method: "DELETE" });
           // The toast promised the draft comes back — so it has to actually
-          // come back, seeded exactly as it was sent.
+          // come back complete: recipients, Cc/Bcc, body mode, sending
+          // account, reply parent, and every attachment (audit SEND-05).
           openCompose({
-            to: input.to, subject: input.subject,
+            to: input.to, cc: input.cc || "", bcc: input.bcc || "",
+            subject: input.subject,
             body: input.html || input.text,
             htmlMode: !!input.html,
             accountId: input.accountId,
             replyToId: input.replyToId,
+            attachments: input.attachments || [],
           });
           showToast("Send cancelled — your draft is back");
         } catch (e) {

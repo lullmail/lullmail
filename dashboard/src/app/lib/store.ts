@@ -485,6 +485,11 @@ export interface ComposeState {
   replyToId?: string;
   /** Shown above the fields so a reply never looks like a fresh message. */
   context?: string;
+  /** Full attachment set, carried by undo-send so a restored draft is
+   * complete rather than a hand-picked subset of fields (audit SEND-05).
+   * Structural twin of actions.SendAttachment; typed inline to keep this
+   * module free of an actions import cycle. */
+  attachments?: Array<{ filename: string; contentType: string; dataBase64: string }>;
 }
 
 let draftSeq = 0;

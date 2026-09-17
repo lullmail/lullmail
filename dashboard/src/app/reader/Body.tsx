@@ -124,10 +124,16 @@ export function stripRemoteImages(html: string): { html: string; blocked: number
 }
 
 const TRACKING_PARAMS = /^(utm_.+|mc_cid|mc_eid|mkt_tok|vero_id|oly_anon_id|oly_enc_id|rb_clickid)$/i;
-const REDIRECT_PARAMS = ["url", "u", "target", "redirect", "redirect_url", "dest", "destination", "to"];
 
-/** Removes common click-measurement wrappers and campaign query parameters.
-    Parsing is deliberately browser-native: malformed mail remains unchanged. */
+/** Removes common click-measurement parameters. Parsing is deliberately
+    browser-native: malformed mail remains unchanged.
+
+    Generic redirect unwrapping is gone (audit WEB-08): treating query
+    parameters like `to`, `url`, `u` or `target` as redirects on arbitrary
+    hosts rewrote legitimate links (`?to=alice` became `/alice`), breaking
+    signed action links. Redirect targets are attacker-influencable and a
+    parameter name is not evidence of redirect semantics; a specific
+    tracker unwrapper would need per-hostname tests. */
 export function cleanLinks(html: string): string {
   if (typeof DOMParser === "undefined") return html;
   const doc = new DOMParser().parseFromString(html, "text/html");
@@ -146,22 +152,24 @@ export function cleanLinks(html: string): string {
 	sanitizeImageResources(doc, true);
   doc.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((anchor) => {
     try {
-      let target = new URL(anchor.href);
-		if (!["http:", "https:", "mailto:"].includes(target.protocol)) { anchor.removeAttribute("href"); return; }
-      for (const key of REDIRECT_PARAMS) {
-        const nested = target.searchParams.get(key);
-        if (!nested) continue;
-        const decoded = new URL(nested, target);
-        if (decoded.protocol === "http:" || decoded.protocol === "https:") { target = decoded; break; }
-      }
-		if (target.protocol === "http:" || target.protocol === "https:") {
-			for (const key of [...target.searchParams.keys()]) if (TRACKING_PARAMS.test(key)) target.searchParams.delete(key);
-		}
+      const target = new URL(anchor.href);
+			if (!["http:", "https:", "mailto:"].includes(target.protocol)) { anchor.removeAttribute("href"); return; }
+			if (target.protocol === "http:" || target.protocol === "https:") {
+				for (const key of [...target.searchParams.keys()]) if (TRACKING_PARAMS.test(key)) target.searchParams.delete(key);
+			}
       anchor.href = target.toString();
       anchor.rel = "noopener noreferrer";
       anchor.target = "_blank";
     } catch { anchor.removeAttribute("href"); }
   });
+  // Head <style> rules are vetted presentation, not executable content;
+  // carrying them keeps legitimate email layout instead of discarding it
+  // with the rest of the head (audit WEB-09). They move ahead of the body
+  // content inside the same sanitized document the caller serializes.
+  const headStyles = [...doc.head.querySelectorAll("style")]
+    .filter((node) => !/@\s*import\b/i.test(node.textContent || ""))
+    .map((node) => node.cloneNode(true));
+  for (const style of headStyles.reverse()) doc.body.prepend(style);
   return doc.body.innerHTML;
 }
 

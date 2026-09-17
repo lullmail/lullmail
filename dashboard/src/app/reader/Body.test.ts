@@ -26,17 +26,31 @@ describe("mail privacy", () => {
 		expect(result.html).toContain('href="#local"');
 	});
 
-  it("unwraps measured links, drops campaign parameters, and strips active content", () => {
+  it("keeps wrapper links intact, drops campaign parameters, and strips active content", () => {
     const nested = encodeURIComponent("https://example.com/story?utm_source=newsletter&keep=yes");
-    const result = cleanLinks(`<script>alert(1)</script><iframe src="https://track.test"></iframe><a onclick="steal()" href="https://click.test/r?url=${nested}">Read</a><a id="bad" href="javascript:alert(1)">Bad</a>`);
+    const result = cleanLinks(`<script>alert(1)</script><iframe src="https://track.test"></iframe><a onclick="steal()" href="https://click.test/r?url=${nested}">Read</a><a id="bad" href="javascript:alert(1)">Bad</a><a id="legit" href="https://example.com/report?to=alice">Report</a><a id="utm" href="https://example.com/x?utm_source=n&amp;keep=1">U</a>`);
     const doc = new DOMParser().parseFromString(result, "text/html");
     const link = doc.querySelector("a")!;
     expect(doc.querySelector("script")).toBeNull();
 		expect(doc.querySelector("iframe")).toBeNull();
 		expect(doc.querySelector("#bad")?.hasAttribute("href")).toBe(false);
     expect(link.hasAttribute("onclick")).toBe(false);
-    expect(link.href).toBe("https://example.com/story?keep=yes");
+    // Generic redirect unwrapping is gone: a `url` query parameter is not
+    // evidence of redirect semantics, and rewriting broke signed links
+    // (audit WEB-08). The wrapper survives untouched.
+    expect(link.href).toBe("https://click.test/r?url=" + nested);
     expect(link.rel).toContain("noreferrer");
+    // A legitimate `to` parameter is a value, not a redirect.
+    expect(doc.querySelector("#legit")?.getAttribute("href")).toBe("https://example.com/report?to=alice");
+    // Campaign parameters on ordinary links still scrub.
+    expect(doc.querySelector("#utm")?.getAttribute("href")).toBe("https://example.com/x?keep=1");
+  });
+
+  it("carries vetted head styles into the sanitized body (audit WEB-09)", () => {
+    const result = cleanLinks(`<html><head><style>.card{color:red}</style><style>@import "https://track.test/x.css"</style></head><body><p class="card">x</p></body></html>`);
+    expect(result).toContain(".card{color:red}");
+    expect(result).not.toContain("@import");
+    expect(result).toContain('<p class="card">x</p>');
   });
 
 	it("removes imports, event handlers, and resource-capable active elements", () => {
