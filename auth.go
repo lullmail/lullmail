@@ -203,14 +203,29 @@ func (a *App) authenticateRequest(r *http.Request) (string, string, error) {
 	if cookie, err := r.Cookie(sessionCookie); err == nil && cookie.Value != "" {
 		hash := tokenHash(cookie.Value)
 		var uid string
+		// Validation and the last-seen touch are separate concerns: an
+		// authenticated read should not write the same session row on
+		// every request (row contention and write amplification for a
+		// busy browser), and a failed touch must not fabricate a logout.
+		// The touch only fires when the row is more than a minute stale,
+		// so a revoked session is still refused immediately by the SELECT
+		// (audit 3 OPS-02).
 		err := a.db.QueryRowContext(r.Context(), `
 			UPDATE auth_sessions SET last_seen_at = now()
-			WHERE id_hash = $1 AND expires_at > now()
+			WHERE id_hash = $1 AND expires_at > now() AND last_seen_at < now() - interval '1 minute'
 			RETURNING user_id`, hash).Scan(&uid)
 		if err == nil {
 			return uid, hash, nil
 		}
-		if err != sql.ErrNoRows {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", "", err
+		}
+		err = a.db.QueryRowContext(r.Context(), `
+			SELECT user_id FROM auth_sessions WHERE id_hash = $1 AND expires_at > now()`, hash).Scan(&uid)
+		if err == nil {
+			return uid, hash, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
 			return "", "", err
 		}
 	}

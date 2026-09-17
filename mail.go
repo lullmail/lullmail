@@ -42,6 +42,15 @@ func connectApp(cfg *Config) *App {
 		log.Printf("app: open failed — API disabled: %v", err)
 		return nil
 	}
+	// The product pool needs a budget: unbounded, a burst of concurrent
+	// requests could consume the deployment's entire connection allowance
+	// (the engine keeps a separate pool). Single-operator scale leaves
+	// generous headroom for migrations and admin sessions (audit 3
+	// OPS-02).
+	db.SetMaxOpenConns(16)
+	db.SetMaxIdleConns(4)
+	db.SetConnMaxIdleTime(5 * time.Minute)
+	db.SetConnMaxLifetime(30 * time.Minute)
 	for {
 		if err := db.PingContext(ctx); err == nil {
 			break
@@ -408,8 +417,21 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	// protected. The bootstrap token stops working after the first credential.
 	// Agent Bearer tokens enter through requireAgent, which additionally
 	// fences them away from the auth/security surface.
+	//
+	// Everything under /api carries a no-store policy: authenticated mail,
+	// session, and problem responses have no business living in shared or
+	// persisted caches (audit 3 OPS-08). Individual download handlers set
+	// the same header themselves; this is the backstop for everything else.
 	public.Handle("/", a.requireAgent(api))
-	mux.Handle("/api/", http.StripPrefix("/api", public))
+	mux.Handle("/api/", http.StripPrefix("/api", noStoreAPI(public)))
+}
+
+// noStoreAPI marks every API response uncacheable by intermediaries.
+func noStoreAPI(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // apiUnavailable keeps API paths JSON-shaped (RFC 7807) instead of letting
