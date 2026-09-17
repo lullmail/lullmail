@@ -2,6 +2,8 @@
 // caches only the shell; API data is account-namespaced here so owner changes
 // and account deletion can provably evict it.
 
+import { showError } from "./store";
+
 const DB = "lullmail-offline-v1";
 const VERSION = 2;
 const CACHE = "responses";
@@ -17,23 +19,40 @@ interface Queued {
   method: string;
   body?: unknown;
   queuedAt: number;
+  /** Failed-attempt bookkeeping for bounded exponential retry (audit 3 WEB-05). */
+  attempts?: number;
+  nextAttemptAt?: number;
   /** Set when replay concluded this action can never succeed; kept for
    * visibility instead of being silently discarded (audit WEB-03). */
   failed?: string;
 }
 interface DraftAttachmentRow { id: string; owner: string; files: unknown[] }
 
+/** Storage-layer failure, distinct from a network/auth failure so callers
+ *  can report it accurately instead of claiming the server is unreachable
+ *  (audit 3 WEB-08). */
+export class OfflineStorageError extends Error {}
+
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB, VERSION);
+    // A held connection in another tab must surface as an actionable
+    // storage error, not a silent hang (audit 3 WEB-08).
+    request.onblocked = () => reject(new OfflineStorageError("Close other Lullmail tabs to update offline storage"));
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(CACHE)) db.createObjectStore(CACHE, { keyPath: "key" });
       if (!db.objectStoreNames.contains(QUEUE)) db.createObjectStore(QUEUE, { keyPath: "id" });
       if (!db.objectStoreNames.contains(ATTACHMENTS)) db.createObjectStore(ATTACHMENTS, { keyPath: "id" });
     };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    request.onerror = () => reject(new OfflineStorageError(request.error?.message ?? "Storage unavailable"));
+    request.onsuccess = () => {
+      const db = request.result;
+      // Another tab wants to upgrade: close so it can, rather than
+      // blocking it forever (audit 3 WEB-08).
+      db.onversionchange = () => db.close();
+      resolve(db);
+    };
   });
 }
 
@@ -112,13 +131,51 @@ export function replayDecision(status: number): ReplayDecision {
   return "failed"; // 400/404/409/412/422...: this action can never apply
 }
 
-export async function replayMutations(): Promise<number> {
-  if (!navigator.onLine || !offlineOwner()) return 0;
+/** Retry-After in milliseconds; seconds form or HTTP-date form. 0 when
+ * absent or unparseable (audit 3 WEB-05). */
+export function retryAfterMs(value: string | null, now = Date.now()): number {
+  if (!value) return 0;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - now) : 0;
+}
+
+/** Bounded exponential backoff with jitter, never shorter than the
+ * server's Retry-After (audit 3 WEB-05). */
+export function retryDelay(attempts: number, retryAfter: string | null): number {
+  const base = Math.min(300_000, 1000 * 2 ** Math.min(attempts, 8));
+  const jittered = base * (0.8 + Math.random() * 0.4);
+  return Math.max(jittered, retryAfterMs(retryAfter));
+}
+
+export interface ReplaySummary {
+  committed: number;
+  /** Actions the server permanently rejected (audit 3 WEB-04). */
+  rejected: number;
+  /** Epoch ms when a retryable failure may resume; set while online so a
+   * transient outage does not strand the queue until the next navigation
+   * (audit 3 WEB-05). */
+  retryAt?: number;
+}
+
+export async function replayMutations(): Promise<ReplaySummary> {
+  if (!navigator.onLine || !offlineOwner()) return { committed: 0, rejected: 0 };
   const all = await transaction<Queued[]>(QUEUE, "readonly", (store) => store.getAll());
-  let replayed = 0;
-  for (const item of all
+  const now = Date.now();
+  let committed = 0;
+  let rejected = 0;
+  let retryAt: number | undefined;
+  const due = all
     .filter((entry) => entry.owner === offlineOwner() && !entry.failed)
-    .sort((a, b) => a.queuedAt - b.queuedAt)) {
+    .sort((a, b) => a.queuedAt - b.queuedAt);
+  for (const item of due) {
+    if (item.nextAttemptAt && item.nextAttemptAt > now) {
+      // Not due yet (persisted backoff from an earlier attempt): remember
+      // when it becomes due so a timer can resume replay (audit 3 WEB-05).
+      retryAt = retryAt === undefined ? item.nextAttemptAt : Math.min(retryAt, item.nextAttemptAt);
+      continue;
+    }
     let response: Response;
     try {
       response = await fetch("/api" + item.path, {
@@ -129,7 +186,13 @@ export async function replayMutations(): Promise<number> {
     } catch { break; } // network failed mid-replay: keep the rest queued
     const decision = replayDecision(response.status);
     if (decision === "reauth") break;
-    if (decision === "retry") break;
+    if (decision === "retry") {
+      const attempts = (item.attempts ?? 0) + 1;
+      const delay = retryDelay(attempts, response.headers.get("Retry-After"));
+      retryAt = retryAt === undefined ? now + delay : Math.min(retryAt, now + delay);
+      await transaction(QUEUE, "readwrite", (store) => store.put({ ...item, attempts, nextAttemptAt: now + delay }));
+      break; // keep the rest queued behind this one, in order
+    }
     if (decision === "failed") {
       // Permanently invalid: keep a marked record for visibility instead
       // of counting it as replayed, and let detail show what rejected it.
@@ -140,12 +203,13 @@ export async function replayMutations(): Promise<number> {
       } catch { /* non-JSON error body */ }
       console.warn("Offline action rejected by the server and dropped from retry:", item.path, detail);
       await transaction(QUEUE, "readwrite", (store) => store.put({ ...item, failed: detail }));
+      rejected++;
       continue;
     }
     await transaction(QUEUE, "readwrite", (store) => store.delete(item.id));
-    replayed++;
+    committed++;
   }
-  return replayed;
+  return retryAt === undefined ? { committed, rejected } : { committed, rejected, retryAt };
 }
 
 export async function clearResponseCache(): Promise<void> {
@@ -153,13 +217,29 @@ export async function clearResponseCache(): Promise<void> {
   await transaction(CACHE, "readwrite", (store) => store.clear());
 }
 
+/** Wipes every private store in ONE transaction. The owner marker is
+ * removed only if that transaction commits: swallowing a partial failure
+ * used to report erased data while cached responses, queued commands, or
+ * attachments survived — dangerous exactly when the same namespace is
+ * reused later (audit 3 WEB-02). */
 export async function clearOfflineData(): Promise<void> {
-  if (typeof indexedDB !== "undefined") {
-    await Promise.all([
-      transaction(CACHE, "readwrite", (store) => store.clear()),
-      transaction(QUEUE, "readwrite", (store) => store.clear()),
-      transaction(ATTACHMENTS, "readwrite", (store) => store.clear()),
-    ]).catch(() => {});
+  if (typeof indexedDB === "undefined") {
+    localStorage.removeItem(OWNER);
+    return;
+  }
+  const db = await openDB();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction([CACHE, QUEUE, ATTACHMENTS], "readwrite");
+      tx.oncomplete = () => resolve();
+      tx.onabort = () => reject(tx.error ?? new OfflineStorageError("Private-data reset aborted"));
+      tx.onerror = () => { /* the abort handler owns rejection */ };
+      tx.objectStore(CACHE).clear();
+      tx.objectStore(QUEUE).clear();
+      tx.objectStore(ATTACHMENTS).clear();
+    });
+  } finally {
+    db.close();
   }
   localStorage.removeItem(OWNER);
 }
@@ -187,24 +267,41 @@ export async function clearDraftAttachments(id: string): Promise<void> {
 }
 
 export function startOfflineData(): () => void {
-  // A replay changed real state; whatever is on screen should catch up now,
-  // not on the next navigation or the 45s counts tick. Zero committed
-  // mutations means NOTHING changed: clearing the response cache then
-  // would wipe the offline mailbox the next offline launch needs to read
-  // (audit WEB-01). Dynamic import: actions imports this module's cache
-  // helpers, and a static back-edge would cycle.
+  // Replayed state refreshes whatever is on screen; the persisted offline
+  // snapshots STAY — a mutation is invalidation, not a reason to delete
+  // the only offline copy of the mailbox (audit 3 WEB-06). Fresh GETs
+  // overwrite the snapshots they replace.
+  let timer: number | undefined;
   const replay = () => {
-    replayMutations().then(async (committed) => {
-      if (committed === 0) return;
-      await clearResponseCache();
-      const { reload, refreshCounts } = await import("./actions");
-      reload(); refreshCounts();
+    replayMutations().then(async (summary) => {
+      if (summary.committed > 0) {
+        const { reload, refreshCounts } = await import("./actions");
+        reload(); refreshCounts();
+      }
+      if (summary.rejected > 0) {
+        showError(`${summary.rejected} offline action${summary.rejected === 1 ? "" : "s"} could not be applied — check the browser console for what the server rejected`);
+      }
+      if (summary.retryAt !== undefined) scheduleRetry(summary.retryAt);
     }).catch((error) => {
       // Queued work and cached mail stay intact; the next online event
       // retries.
       console.error("Offline replay failed", error);
     });
   };
+  const scheduleRetry = (at: number) => {
+    if (timer !== undefined) window.clearTimeout(timer);
+    const delay = Math.max(0, at - Date.now());
+    // A transient failure while still online must schedule its own next
+    // attempt instead of waiting for a navigation or network transition
+    // (audit 3 WEB-05).
+    timer = window.setTimeout(() => {
+      timer = undefined;
+      if (navigator.onLine) replay();
+    }, delay);
+  };
   window.addEventListener("online", replay); replay();
-  return () => window.removeEventListener("online", replay);
+  return () => {
+    window.removeEventListener("online", replay);
+    if (timer !== undefined) window.clearTimeout(timer);
+  };
 }

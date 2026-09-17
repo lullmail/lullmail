@@ -4,7 +4,7 @@
 // final. Previously only "send" had an undo, so a mis-click in a bucket row
 // silently relocated a thread with no way back. Each verb here captures the
 // state it replaced and hands it to the toast.
-import { api, ApiError, clearMemoryCache } from "./api";
+import { api, ApiError, clearMemoryCache, QueuedOffline } from "./api";
 import type { BoardCard, Bucket, Counts, ListBucket, Message, Row, StickyNote } from "./types";
 import {
   accountCount, accountFilter, accountQS, accounts, closeReader, counts, list, type Mailbox, mailboxes, openCompose, reader, rememberListScroll, resetSelection, screeningEnabled, setAccountFilter, showError, showToast, undoSeconds,
@@ -92,26 +92,35 @@ async function actMany(rows: Row[], action: ActionName, untilDays?: number) {
   await Promise.all(rows.map((r) => actOn(r.account, r.message_id, action, untilDays)));
 }
 
-/** Per-row outcome of a bulk mutation: which rows actually changed and
-    which requests failed, so a partial success is never reported as a
-    total failure (the list would show stale state with no undo) nor as a
-    total success (failed rows would look done and never be retried). */
+/** Per-row outcome of a bulk mutation: which rows actually changed, which
+ * requests failed, and which were parked for offline replay. A queued
+ * mutation is neither — it has NOT committed, so it must not be reported
+ * as done (no false undo) nor as failed (it will apply on reconnect)
+ * (audit 3 WEB-07). */
 async function actManySettled(rows: Row[], action: ActionName, untilDays?: number) {
   const results = await Promise.allSettled(rows.map((r) => actOn(r.account, r.message_id, action, untilDays)));
   const changed: Row[] = [];
   const failed: Row[] = [];
-  results.forEach((res, i) => (res.status === "fulfilled" ? changed : failed).push(rows[i]));
-  return { changed, failed };
+  const queued: Row[] = [];
+  results.forEach((res, i) => {
+    if (res.status === "fulfilled") changed.push(rows[i]);
+    else if (res.reason instanceof QueuedOffline) queued.push(rows[i]);
+    else failed.push(rows[i]);
+  });
+  return { changed, failed, queued };
 }
 
-/** Reconcile the view after a (possibly partial) bulk mutation and say
-    which subset failed. Returns the rows the user can still undo. */
-function settleMutation(changed: Row[], failed: Row[], verb: string): Row[] {
+/** Reconcile the view after a (possibly partial or fully offline) bulk
+ * mutation and say which subset failed. Returns the rows the user can
+ * still undo, plus whether the whole action is merely parked offline. */
+function settleMutation(changed: Row[], failed: Row[], queued: Row[], verb: string): { done: Row[]; allQueued: boolean } {
   afterMutation();
   if (failed.length) {
-    showError(`Could not ${verb} ${failed.length} of ${failed.length + changed.length} threads`);
+    showError(`Could not ${verb} ${failed.length} of ${failed.length + changed.length + queued.length} threads`);
+  } else if (queued.length > 0 && changed.length === 0) {
+    showToast(`Offline — ${queued.length === 1 ? "saved" : queued.length + " actions saved"} for when you're back online`);
   }
-  return changed;
+  return { done: changed, allQueued: queued.length > 0 && changed.length === 0 && failed.length === 0 };
 }
 
 /** Where a row should go back to if the user undoes.
@@ -142,8 +151,8 @@ function describe(rows: Row[], verbPhrase: string): string {
 /** Done = read and out of the way. The inverse is exact, so the undo is honest. */
 export async function markDone(rows: Row[]) {
   if (!rows.length) return;
-  const { changed, failed } = await actManySettled(rows, "read");
-  const done = settleMutation(changed, failed, "mark done");
+  const { changed, failed, queued } = await actManySettled(rows, "read");
+  const { done } = settleMutation(changed, failed, queued, "mark done");
   if (!done.length) return;
   if (rows.some((r) => r.thread_id === reader.value.threadId && r.account === reader.value.account)) closeReader();
   // Only rows that were unread before the action flip back on undo; rows
@@ -165,8 +174,8 @@ async function undoRead(rows: Row[]) {
 
 export async function markRead(rows: Row[], read: boolean) {
   if (!rows.length) return;
-  const { changed, failed } = await actManySettled(rows, read ? "read" : "unread");
-  const done = settleMutation(changed, failed, "update");
+  const { changed, failed, queued } = await actManySettled(rows, read ? "read" : "unread");
+  const { done } = settleMutation(changed, failed, queued, "update");
   if (!done.length) return;
   // Snapshot the flipped rows' original state: undo restores what each row
   // was, never a blanket inverse that would unread rows the user had
@@ -208,8 +217,8 @@ function snoozeUndoState(r: Row): { from: Bucket; days?: number } {
 export async function moveTo(rows: Row[], to: Bucket) {
   if (!rows.length) return;
   const before = new Map(rows.map((r) => [r, snoozeUndoState(r)] as const));
-  const { changed, failed } = await actManySettled(rows, to);
-  const done = settleMutation(changed, failed, "move");
+  const { changed, failed, queued } = await actManySettled(rows, to);
+  const { done } = settleMutation(changed, failed, queued, "move");
   if (!done.length) return;
   if (rows.some((r) => r.thread_id === reader.value.threadId && r.account === reader.value.account)) closeReader();
   showToast(describe(done, "Moved to " + BUCKET_LABEL[to]), () =>
@@ -221,8 +230,8 @@ export async function moveTo(rows: Row[], to: Bucket) {
 export async function snooze(rows: Row[], days: number) {
   if (!rows.length) return;
   const before = new Map(rows.map((r) => [r, snoozeUndoState(r)] as const));
-  const { changed, failed } = await actManySettled(rows, days > 0 ? "set_aside" : "later", days > 0 ? days : undefined);
-  const done = settleMutation(changed, failed, "snooze");
+  const { changed, failed, queued } = await actManySettled(rows, days > 0 ? "set_aside" : "later", days > 0 ? days : undefined);
+  const { done } = settleMutation(changed, failed, queued, "snooze");
   if (!done.length) return;
   if (rows.some((r) => r.thread_id === reader.value.threadId && r.account === reader.value.account)) closeReader();
   const when = days === 0 ? "for someday" : days === 1 ? "until tomorrow" : "for " + days + " days";
@@ -392,7 +401,13 @@ export async function openThread(threadId: string, account: string, bucket: List
     reader.value = { ...reader.value, loading: false, messages };
     const last = messages[messages.length - 1];
     if (last) {
-      await actOn(last.account, last.id, "read");
+      try {
+        await actOn(last.account, last.id, "read");
+      } catch (e) {
+        // Queued offline is a parked intent, not a failed thread open; the
+        // mark-read replays with everything else (audit 3 WEB-07).
+        if (!(e instanceof QueuedOffline)) console.warn("could not mark thread read", e);
+      }
       refreshCounts();
       markRowRead(threadId, account);
     }
@@ -498,5 +513,9 @@ export async function sendMail(input: SendInput): Promise<boolean> {
 
 function fail(e: unknown, fallback: string) {
   if (e instanceof ApiError && e.status === 401) return; // the gate takes over
+  if (e instanceof QueuedOffline) {
+    showToast("Offline — saved for when you're back online");
+    return;
+  }
   showError(e instanceof Error && e.message ? fallback + ": " + e.message : fallback);
 }

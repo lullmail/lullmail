@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canQueue, replayDecision } from "./offline";
+import { canQueue, replayDecision, retryAfterMs, retryDelay } from "./offline";
 
 describe("replay classification (audit WEB-03)", () => {
   it("counts only 2xx as committed", () => {
@@ -24,5 +24,28 @@ describe("queueable mutations", () => {
   it("still matches the supported action surface", () => {
     expect(canQueue("/messages/m1/action", "POST")).toBe(true);
     expect(canQueue("/buckets/imbox", "GET")).toBe(false);
+  });
+});
+
+describe("retry scheduling (audit 3 WEB-05)", () => {
+  it("parses seconds-form and HTTP-date Retry-After", () => {
+    const now = Date.parse("2026-09-17T00:00:00Z");
+    expect(retryAfterMs(null, now)).toBe(0);
+    expect(retryAfterMs("30", now)).toBe(30_000);
+    expect(retryAfterMs("2026-09-17T00:00:30Z", now)).toBe(30_000);
+    expect(retryAfterMs("garbage", now)).toBe(0);
+  });
+  it("never backs off shorter than Retry-After", () => {
+    for (let i = 0; i < 10; i++) {
+      expect(retryDelay(0, "120")).toBeGreaterThanOrEqual(120_000);
+    }
+  });
+  it("bounds exponential backoff with jitter", () => {
+    for (let attempts = 0; attempts <= 10; attempts++) {
+      const delay = retryDelay(attempts, null);
+      const base = Math.min(300_000, 1000 * 2 ** Math.min(attempts, 8));
+      expect(delay).toBeGreaterThanOrEqual(base * 0.8);
+      expect(delay).toBeLessThanOrEqual(base * 1.2);
+    }
   });
 });

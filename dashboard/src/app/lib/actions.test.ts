@@ -9,6 +9,7 @@ vi.mock("./api", () => ({
       this.status = status;
     }
   },
+  QueuedOffline: class QueuedOffline extends Error {},
   clearMemoryCache: vi.fn(),
   api: vi.fn(),
 }));

@@ -1,7 +1,7 @@
 // The one place that talks to the server. Product calls use the HttpOnly
 // session cookie; JavaScript never sees a long-lived authentication secret.
 import { signal } from "@preact/signals";
-import { cacheResponse, cachedResponse, canQueue, clearResponseCache, offlineOwner, prepareOfflineOwner, queueMutation } from "./offline";
+import { cacheResponse, cachedResponse, canQueue, offlineOwner, prepareOfflineOwner, queueMutation } from "./offline";
 
 export const authed = signal(false);
 export const authReady = signal(false);
@@ -34,6 +34,16 @@ export class ApiError extends Error {
   constructor(message: string, status: number) {
     super(message);
     this.status = status;
+  }
+}
+
+/** Thrown when a mutation could not reach the server and was queued for
+ *  offline replay instead. It has NOT committed: callers must not treat a
+ *  fulfilled promise as a server-side change or build success/undo
+ *  feedback on top of it (audit 3 WEB-07). */
+export class QueuedOffline extends Error {
+  constructor() {
+    super("saved offline — will apply when the connection returns");
   }
 }
 
@@ -81,7 +91,7 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
     }
     if (protectedRoute && canQueue(path, method)) {
       await queueMutation(path, method, opts.body);
-      return { queued: true } as T;
+      throw new QueuedOffline();
     }
     throw error;
   }
@@ -105,8 +115,12 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
     memoryResponses.set(path, { savedAt: Date.now(), value: copyValue(value) });
     cacheResponse(path, value).catch(() => {});
   } else if (protectedRoute && res.ok) {
+    // A mutation invalidates the in-memory cache only. The persisted
+    // offline snapshots are the ONLY offline copy of the mailbox —
+    // deleting them on every note or read-state change made the next
+    // offline visit start empty. Fresh GETs overwrite the snapshots they
+    // replace (audit 3 WEB-06).
     memoryResponses.clear();
-    clearResponseCache().catch(() => {});
   }
   return value;
 }
@@ -126,7 +140,15 @@ export async function refreshAuth(): Promise<AuthStatus> {
     authStatus.value = status;
     authed.value = status.authenticated;
     if (!status.authenticated) memoryResponses.clear();
-    if (status.authenticated && status.email) await prepareOfflineOwner(status.email);
+    if (status.authenticated && status.email) {
+      try {
+        await prepareOfflineOwner(status.email);
+      } catch (storageError) {
+        // A storage failure is not an unreachable server: the session is
+        // known-good, only offline persistence is disabled (audit 3 WEB-08).
+        console.warn("Offline storage unavailable; offline mailbox disabled", storageError);
+      }
+    }
     return status;
   } catch (error) {
     if (error instanceof ApiError && error.status < 500) throw error;
