@@ -394,3 +394,41 @@ func TestEmptyListParses(t *testing.T) {
 		t.Errorf("FLAGS = %v, want an empty list", flags)
 	}
 }
+
+// IMAP INTERNALDATE may carry a space-padded single-digit day; "_2" accepts
+// both forms where "02" silently dropped the date (audit DATA-04).
+func TestInternalDateAcceptsSpacePaddedDay(t *testing.T) {
+	a := &Adapter{conn: &Conn{}, boxes: map[mail.MailboxID]string{}, locations: map[mail.MessageID]location{}}
+	for _, raw := range []string{
+		`(UID 7 INTERNALDATE "01-Jan-2026 09:00:00 +0000")`,
+		`(UID 8 INTERNALDATE " 1-Jan-2026 09:00:00 +0000")`,
+	} {
+		toks, err := tokenize(raw)
+		if err != nil {
+			t.Fatalf("tokenize %q: %v", raw, err)
+		}
+		env, ok := a.parseFetch("INBOX", toks[0])
+		if !ok {
+			t.Fatalf("parseFetch rejected %q", raw)
+		}
+		if env.ReceivedAt.IsZero() {
+			t.Errorf("INTERNALDATE in %q was dropped", raw)
+		}
+	}
+}
+
+// Custom keywords must survive as IMAP atoms; anything with CR/LF,
+// parentheses or spaces is refused before it can reach a command line
+// (audit IMAP-03).
+func TestKeywordAtomRejectsCommandInjection(t *testing.T) {
+	for _, ok := range []string{"custom", "Custom_Flag-2", "a.b"} {
+		if _, err := keywordAtom(ok); err != nil {
+			t.Errorf("keywordAtom(%q) rejected a legal atom: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "has space", "carriage\rreturn", "new\nline", "(paren)", strings.Repeat("x", 65)} {
+		if _, err := keywordAtom(bad); err == nil {
+			t.Errorf("keywordAtom(%q) accepted a hostile keyword", bad)
+		}
+	}
+}

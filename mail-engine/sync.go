@@ -420,6 +420,9 @@ func (e *Engine) Locate(ctx context.Context, acct AccountID, id MessageID, ad Ad
 	if err != nil {
 		return err
 	}
+	if len(boxes) == 0 {
+		return fmt.Errorf("mail: message %s is not filed in any mailbox", id)
+	}
 	return sel.SelectMailbox(ctx, boxes[0])
 }
 
@@ -433,6 +436,15 @@ func (e *Engine) Locate(ctx context.Context, acct AccountID, id MessageID, ad Ad
 func (e *Engine) Apply(ctx context.Context, acct AccountID, op Operation, ad Adapter) error {
 	unlock := e.lockAccount(acct)
 	defer unlock()
+	// Protocols that need a selected mailbox get one before mutating: a
+	// freshly resolved adapter has not selected anything, and resolution
+	// of identities inside Apply is only meaningful in the message's own
+	// mailbox (audit IMAP-03). No-op for adapters that do not care.
+	if len(op.IDs) > 0 {
+		if err := e.Locate(ctx, acct, op.IDs[0], ad); err != nil {
+			return err
+		}
+	}
 	if err := ad.Apply(ctx, op); err != nil {
 		return e.classify(ctx, acct, err)
 	}
