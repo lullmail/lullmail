@@ -24,10 +24,6 @@ import (
 // only mail arriving after connection screens. Senders the owner has already
 // emailed skip the Screener entirely; replying to someone is a decision.
 func (a *App) classifyUser(ctx context.Context, uid string) error {
-	screening, err := a.screeningEnabled(ctx, uid)
-	if err != nil {
-		return err
-	}
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT m.account_id, m.id, COALESCE(m.from_addrs, ''), m.received_at, ea.created_at
 		FROM mail_messages m
@@ -77,32 +73,36 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 	// From header equals the owner's address on inbound mail too, and
 	// trusting it let anyone seed correspondents by self-spoofing (audit
 	// DATA-03). Still a heuristic — From on mail the provider filed as
-	// Sent — but no longer spoofable by arbitrary senders.
-	sentMembership := `
+	// Sent — but no longer spoofable by arbitrary senders. The SAME
+	// predicate guards every outbound-evidence query, the thread query
+	// included (audit 3 DATA-01).
+	sentMembership := func(alias string) string {
+		return `
 		AND EXISTS (
 		  SELECT 1 FROM mail_message_mailboxes mm
 		  JOIN mail_mailboxes mb
 		    ON mb.account_id = mm.account_id AND mb.id = mm.mailbox_id
-		  WHERE mm.account_id = m.account_id AND mm.message_id = m.id
+		  WHERE mm.account_id = ` + alias + `.account_id AND mm.message_id = ` + alias + `.id
 		    AND mb.role = 'sent')`
+	}
 	if err := collect(`
 		SELECT DISTINCT lower(t->>'email')
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		CROSS JOIN LATERAL json_array_elements(` + arrayOf("m.to_addrs") + `) t
-		WHERE lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = lower(ea.address)` + sentMembership); err != nil {
-		a.log.Error("correspondent extraction (recipients) failed", "err", err)
+		WHERE lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = lower(ea.address)` + sentMembership("m")); err != nil {
+		return fmt.Errorf("classify: correspondent evidence (recipients): %w", err)
 	}
 	if err := collect(`
 		SELECT DISTINCT lower(t->>'email')
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		CROSS JOIN LATERAL json_array_elements(` + arrayOf("m.cc_addrs") + `) t
-		WHERE lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = lower(ea.address)` + sentMembership); err != nil {
-		a.log.Error("correspondent extraction (cc) failed", "err", err)
+		WHERE lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = lower(ea.address)` + sentMembership("m")); err != nil {
+		return fmt.Errorf("classify: correspondent evidence (cc): %w", err)
 	}
 	if err := collect(`SELECT DISTINCT lower(address) FROM email_accounts WHERE user_id = $1`); err != nil {
-		a.log.Error("correspondent extraction (own addresses) failed", "err", err)
+		return fmt.Errorf("classify: correspondent evidence (own addresses): %w", err)
 	}
 	if err := collect(`
 		SELECT DISTINCT lower(COALESCE(other.from_addrs, '[]')::json->0->>'email')
@@ -110,10 +110,10 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		JOIN email_accounts ea ON ea.mirror_account_id = mine.account_id AND ea.user_id = $1
 		JOIN mail_messages other ON other.account_id = mine.account_id AND other.thread_id = mine.thread_id
 		WHERE mine.thread_id IS NOT NULL
-		  AND lower(COALESCE(mine.from_addrs, '[]')::json->0->>'email') = lower(ea.address)
+		  AND lower(COALESCE(mine.from_addrs, '[]')::json->0->>'email') = lower(ea.address)` + sentMembership("mine") + `
 		  AND lower(COALESCE(other.from_addrs, '[]')::json->0->>'email') <> lower(ea.address)
 		  AND COALESCE(other.from_addrs, '') <> ''`); err != nil {
-		a.log.Error("correspondent extraction (threads) failed", "err", err)
+		return fmt.Errorf("classify: correspondent evidence (threads): %w", err)
 	}
 
 	type pending struct {
@@ -146,8 +146,15 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 	// Serialize classification against sender decisions: the owner row
 	// lock orders this pass against a concurrent decide/undecide, so a
 	// decision cannot commit between the batch read and the self-heal
-	// below and strand decided mail in the Screener (audit DATA-02).
+	// below and strand decided mail in the Screener (audit DATA-02). The
+	// screening preference is read under the SAME lock: a classifier that
+	// read "off" before the lock must not drain the Screener after the
+	// user re-enabled it (audit 3 DATA-03).
 	if err := lockAuthUser(ctx, tx, uid); err != nil {
+		return err
+	}
+	screening, err := a.screeningEnabledTx(ctx, tx, uid)
+	if err != nil {
 		return err
 	}
 	for _, p := range batch {
@@ -554,15 +561,35 @@ func (a *App) handleUndecide(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
 		return
 	}
+	// The previous rule is read INSIDE the transaction, under the same
+	// owner lock the decision path uses: reading it before the lock let a
+	// competing decision commit in between, so undecide could delete the
+	// NEW rule while recalling mail bucketed by the OLD one (audit 3
+	// DATA-02).
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Begin Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Undecide Failed", err.Error())
+		return
+	}
 	// The recall set is the buckets the decision itself placed (its route, or
 	// 'dropped' for blocked) plus anything still sitting in the Screener —
 	// mail the user filed by hand afterwards keeps the bucket they chose.
 	var prevRoute string
 	var prevAllowed bool
-	err = a.db.QueryRowContext(r.Context(),
+	err = tx.QueryRowContext(r.Context(),
 		`SELECT route, allowed FROM hey_senders WHERE user_id = $1 AND sender_key = $2`,
 		uid, req.Sender).Scan(&prevRoute, &prevAllowed)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
+		// Already absent: commit the no-op and answer the documented shape.
+		if err := tx.Commit(); err != nil {
+			writeProblem(w, http.StatusInternalServerError, "Commit Failed", err.Error())
+			return
+		}
 		writeJSON(w, map[string]any{"sender": req.Sender, "route": "screener"})
 		return
 	}
@@ -573,16 +600,6 @@ func (a *App) handleUndecide(w http.ResponseWriter, r *http.Request) {
 	wasParked := prevRoute
 	if !prevAllowed {
 		wasParked = "dropped"
-	}
-	tx, err := a.db.BeginTx(r.Context(), nil)
-	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "Begin Failed", err.Error())
-		return
-	}
-	defer tx.Rollback()
-	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
-		writeProblem(w, http.StatusInternalServerError, "Undecide Failed", err.Error())
-		return
 	}
 	if _, err := tx.ExecContext(r.Context(),
 		`DELETE FROM hey_senders WHERE user_id = $1 AND sender_key = $2`,
@@ -1074,6 +1091,19 @@ func (a *App) screeningEnabled(ctx context.Context, uid string) (bool, error) {
 	return on, err
 }
 
+// screeningEnabledTx is screeningEnabled inside a transaction the caller
+// already holds the owner lock on, so the read cannot race a preference
+// change (audit 3 DATA-03).
+func (a *App) screeningEnabledTx(ctx context.Context, tx *sql.Tx, uid string) (bool, error) {
+	var on bool
+	err := tx.QueryRowContext(ctx,
+		`SELECT screening_enabled FROM users WHERE id = $1 FOR UPDATE`, uid).Scan(&on)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	return on, err
+}
+
 // handlePrefs reads and writes the owner's product preferences. Only the
 // Screener switch lives here today; appearance stays client-side.
 func (a *App) handlePrefs(w http.ResponseWriter, r *http.Request) {
@@ -1103,7 +1133,21 @@ func (a *App) handlePrefs(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusUnprocessableEntity, "Missing Field", "screening_enabled is required")
 		return
 	}
-	if _, err := a.db.ExecContext(r.Context(),
+	// Preference and drain are ONE transition under the owner lock: a
+	// failure between them used to leave the preference flipped with the
+	// waiting room intact, and the drain raced a concurrent classifier
+	// reading the old value (audit 3 DATA-03).
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Begin Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Update Failed", err.Error())
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(),
 		`UPDATE users SET screening_enabled = $2 WHERE id = $1`, uid, *req.ScreeningEnabled); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Update Failed", err.Error())
 		return
@@ -1113,7 +1157,7 @@ func (a *App) handlePrefs(w http.ResponseWriter, r *http.Request) {
 	// Blocked senders are in 'dropped', so nothing rejected is resurrected.
 	moved := int64(0)
 	if !*req.ScreeningEnabled {
-		res, err := a.db.ExecContext(r.Context(), `
+		res, err := tx.ExecContext(r.Context(), `
 			UPDATE hey_messages SET bucket = 'imbox'
 			WHERE user_id = $1 AND bucket = 'screener'`, uid)
 		if err != nil {
@@ -1121,6 +1165,10 @@ func (a *App) handlePrefs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		moved, _ = res.RowsAffected()
+	}
+	if err := tx.Commit(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Commit Failed", err.Error())
+		return
 	}
 	writeJSON(w, map[string]any{"screening_enabled": *req.ScreeningEnabled, "released": moved})
 }
