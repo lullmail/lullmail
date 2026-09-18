@@ -22,9 +22,12 @@ func writeJSON(w http.ResponseWriter, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-// connectApp opens both pools (product database/sql + engine pgx) and runs
-// both migrations, so a fresh deploy converges from zero. The mail_* mirror
-// tables are neutron-mail's; our schema.sql never creates or alters them.
+// connectApp opens both pools (product database/sql + engine pgx) and
+// runs both versioned migrations, so a fresh deploy converges from zero
+// and an existing one converges through the ledger (audit OPS-02). The
+// mail_* mirror tables are neutron-mail's; our migrations never create
+// or alter them. Engine first: the product's account-scope migration
+// reads mail_messages.
 func connectApp(cfg *Config) *App {
 	if cfg.DatabaseURL == "" {
 		log.Println("app: DATABASE_URL not set — API disabled")
@@ -64,11 +67,6 @@ func connectApp(cfg *Config) *App {
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
-	if err := applyProductSchema(ctx, db); err != nil {
-		db.Close()
-		log.Printf("app: product migration failed — API disabled: %v", err)
-		return nil
-	}
 
 	store, err := mail.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -82,10 +80,10 @@ func connectApp(cfg *Config) *App {
 		log.Printf("app: mail migration failed — API disabled: %v", err)
 		return nil
 	}
-	if err := migrateAccountScopedState(ctx, db); err != nil {
+	if err := runProductMigrations(ctx, db); err != nil {
 		store.Close()
 		db.Close()
-		log.Printf("app: account-scope migration failed — API disabled: %v", err)
+		log.Printf("app: product migration failed — API disabled: %v", err)
 		return nil
 	}
 
@@ -152,47 +150,8 @@ func connectApp(cfg *Config) *App {
 	return app
 }
 
-// migrateAccountScopedState runs after the mail mirror exists. Early builds
-// keyed product state by message id alone, but every provider only guarantees
-// ids within an account. Preserve the old row on one matching account and let
-// the next classifier pass create state for any additional copy.
-func migrateAccountScopedState(ctx context.Context, db *sql.DB) error {
-	statements := []string{
-		`UPDATE hey_messages h SET account_id = (
-			SELECT min(m.account_id) FROM mail_messages m
-			JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = h.user_id
-			WHERE m.id = h.message_id
-		) WHERE h.account_id IS NULL`,
-		`DELETE FROM hey_messages WHERE account_id IS NULL`,
-		`ALTER TABLE hey_messages ALTER COLUMN account_id SET NOT NULL`,
-		`ALTER TABLE hey_messages DROP CONSTRAINT IF EXISTS hey_messages_pkey`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS hey_messages_identity ON hey_messages (user_id, account_id, message_id)`,
-		`UPDATE push_deliveries p SET account_id = (
-			SELECT min(m.account_id) FROM mail_messages m
-			JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = p.user_id
-			WHERE m.id = p.message_id
-		) WHERE p.account_id IS NULL`,
-		`DELETE FROM push_deliveries WHERE account_id IS NULL`,
-		`ALTER TABLE push_deliveries ALTER COLUMN account_id SET NOT NULL`,
-		`ALTER TABLE push_deliveries DROP CONSTRAINT IF EXISTS push_deliveries_pkey`,
-		`DROP INDEX IF EXISTS push_deliveries_identity`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS push_deliveries_per_subscription
-			ON push_deliveries (user_id, account_id, message_id, subscription_hash)`,
-		`UPDATE board_cards b SET account_id = (
-			SELECT min(m.account_id) FROM mail_messages m
-			JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = b.user_id
-			WHERE m.thread_id = b.thread_key
-		) WHERE b.thread_key IS NOT NULL AND b.account_id IS NULL`,
-		`DROP INDEX IF EXISTS board_cards_one_pin`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS board_cards_one_account_pin ON board_cards (user_id, account_id, thread_key) WHERE thread_key IS NOT NULL`,
-	}
-	for _, stmt := range statements {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return err
-		}
-	}
-	return nil
-}
+// migrateAccountScopedState now lives in migrate.go as product migration
+// version 2 (audit OPS-02).
 
 // startBackground runs the sync scheduler and a classification pass on the
 // app's own cadence. Classification is idempotent; a slightly stale bucket

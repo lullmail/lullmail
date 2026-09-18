@@ -32,17 +32,17 @@ func testDatabaseURL(t *testing.T) string {
 	return url
 }
 
-// productTables names every table schema.sql creates. The reset drops
-// exactly these — product-owned state only. The engine-owned mail_* mirror
-// is never dropped here; suites that need it reset through the engine's
-// own Drop/Migrate so a shared scratch database loses nothing this suite
-// does not own.
+// productTables names every table the product migrations create. The
+// reset drops exactly these — product-owned state only. The engine-owned
+// mail_* mirror is never dropped here; suites that need it reset through
+// the engine's own Drop/Migrate so a shared scratch database loses
+// nothing this suite does not own.
 var productTables = []string{
-	"agent_tokens", "app_settings", "board_cards", "sticky_notes",
-	"email_accounts", "hey_messages", "hey_senders", "oauth_states",
-	"push_deliveries", "push_subscriptions",
+	"account_reconcile_jobs", "agent_tokens", "app_settings", "board_cards",
+	"sticky_notes", "email_accounts", "hey_messages", "hey_senders",
+	"oauth_states", "push_deliveries", "push_subscriptions",
 	"auth_passwords", "auth_totp", "auth_recovery_codes", "auth_challenges",
-	"auth_sessions", "auth_credentials", "users",
+	"auth_sessions", "auth_credentials", "users", "app_migrations",
 }
 
 func resetProductSchema(ctx context.Context, db *sql.DB) error {
@@ -59,7 +59,7 @@ func resetProductSchema(ctx context.Context, db *sql.DB) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	return applyProductSchema(ctx, db)
+	return runProductMigrations(ctx, db)
 }
 
 // productPG is a fresh install: clean schema through the real migration
@@ -80,6 +80,23 @@ func newProductPG(t *testing.T) productPG {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
+
+	// Engine migrations run first — the same fixed boot order connectApp
+	// uses — because the product's account-scope migration reads
+	// mail_messages. The engine mirror is reset through the engine's own
+	// Drop/Migrate, never by the product reset.
+	store, err := mail.Open(ctx, url)
+	if err != nil {
+		t.Fatalf("engine open: %v", err)
+	}
+	t.Cleanup(store.Close)
+	if err := store.Drop(ctx); err != nil {
+		t.Fatalf("engine drop: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("engine migrate: %v", err)
+	}
+
 	if err := resetProductSchema(ctx, db); err != nil {
 		t.Fatalf("product schema reset: %v", err)
 	}
@@ -88,6 +105,8 @@ func newProductPG(t *testing.T) productPG {
 		cfg:          cfg,
 		db:           db,
 		log:          discardLogger(),
+		store:        store,
+		eng:          mail.NewEngine(store, discardLogger()),
 		authAttempts: map[string]authAttempt{},
 		pwFails:      map[string]passwordFails{},
 	}
@@ -114,11 +133,20 @@ func jsonBody(t *testing.T, method, target, body string) *http.Request {
 }
 
 func TestProductTableResetMirrorsSchema(t *testing.T) {
-	// A table created by schema.sql but missing from the reset list would
-	// leak rows between integration tests. Offline on purpose.
+	// A table created by a product migration but missing from the reset
+	// list would leak rows between integration tests. Offline on purpose.
+	var all strings.Builder
+	for _, m := range productMigrations {
+		for _, stmt := range m.Statements {
+			all.WriteString(stmt)
+			all.WriteString("\n")
+		}
+	}
+	joined := all.String() + productLedgerDDL
 	for _, tbl := range productTables {
-		if !strings.Contains(schemaSQL, "CREATE TABLE IF NOT EXISTS "+tbl+" ") {
-			t.Errorf("table %q is reset but not created by schema.sql", tbl)
+		if !strings.Contains(joined, tbl+" ") &&
+			!strings.Contains(joined, "CREATE TABLE IF NOT EXISTS "+tbl+" ") {
+			t.Errorf("table %q is reset but not created by any product migration", tbl)
 		}
 	}
 }
