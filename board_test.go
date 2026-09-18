@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql/driver"
 	"errors"
 	"net/http"
@@ -134,16 +135,21 @@ func TestBoardPinReportsCreatedAndLeavesExistingCardsAlone(t *testing.T) {
 		return steps
 	}
 
+	pinRequest := func() *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/api/board/pin", strings.NewReader(`{"account":"mirror-1","thread_id":"thread-1"}`))
+		return r.WithContext(context.WithValue(r.Context(), authContextKey{}, "owner-1"))
+	}
+
 	a := &App{log: discardLogger(), db: openStepDB(t, pinSteps(true)...)}
 	w := httptest.NewRecorder()
-	a.handleBoardPin(w, requestAsOwner(http.MethodPost, "/api/board/pin"))
+	a.handleBoardPin(w, pinRequest())
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"created":true`) {
 		t.Fatalf("new pin: status = %d body = %s", w.Code, w.Body.String())
 	}
 
 	a = &App{log: discardLogger(), db: openStepDB(t, pinSteps(false)...)}
 	w = httptest.NewRecorder()
-	a.handleBoardPin(w, requestAsOwner(http.MethodPost, "/api/board/pin"))
+	a.handleBoardPin(w, pinRequest())
 	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), `"created":true`) {
 		t.Fatalf("existing pin: status = %d body = %s", w.Code, w.Body.String())
 	}
