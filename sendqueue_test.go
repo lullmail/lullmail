@@ -312,3 +312,93 @@ func TestSendBudgetAdmission(t *testing.T) {
 		t.Fatalf("byte limit not enforced: %v", err)
 	}
 }
+
+// A database failure while resolving the send account must be a retryable
+// 503, not the 412 "connect an account first" that sends the user chasing a
+// setup problem which does not exist (audit 4 F23).
+func TestHandleSendAccountLookupFailureIsRetryable(t *testing.T) {
+	a := &App{
+		cfg:   &Config{SecretKey: "0123456789abcdef0123456789abcdef"},
+		log:   discardLogger(),
+		sendq: newSendQueue(),
+		db:    openStepDB(t, dbStep{kind: "query", err: errors.New("database unavailable")}),
+	}
+	body, _ := json.Marshal(map[string]any{"to": "dest@example.com", "subject": "s", "text": "hi"})
+	r := httptest.NewRequest(http.MethodPost, "/api/send", bytes.NewReader(body))
+	r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, "owner-1"))
+	w := httptest.NewRecorder()
+	a.handleSend(w, r)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body = %s", w.Code, w.Body.String())
+	}
+	if w.Header().Get("Retry-After") == "" {
+		t.Fatal("retryable lookup failure did not advertise Retry-After")
+	}
+}
+
+// A JMAP account's API token is not an SMTP submission credential; the send
+// must fail synchronously before the queue accepts it, not asynchronously
+// after the undo window has closed (audit 4 F07).
+func TestHandleSendRejectsJMAPWithoutSubmissionTransport(t *testing.T) {
+	for _, fresh := range []bool{true, false} {
+		t.Run(map[bool]string{true: "fresh send", false: "reply"}[fresh], func(t *testing.T) {
+			steps := []dbStep{{
+				kind:  "query",
+				rows:  &testRows{columns: []string{"mirror_account_id", "provider"}, values: [][]driver.Value{{"mirror-1", "jmap"}}},
+			}}
+			payload := map[string]any{"to": "dest@example.com", "subject": "s", "text": "hi"}
+			if !fresh {
+				payload["account_id"] = "mirror-1"
+				payload["reply_to_message_id"] = "msg-1"
+				steps = append(steps,
+					dbStep{kind: "query", rows: &testRows{
+						columns: []string{"account_id", "provider"},
+						values:  [][]driver.Value{{"mirror-1", "jmap"}},
+					}},
+				)
+			}
+			a := &App{
+				cfg:   &Config{SecretKey: "0123456789abcdef0123456789abcdef"},
+				log:   discardLogger(),
+				sendq: newSendQueue(),
+				db:    openStepDB(t, steps...),
+			}
+			body, _ := json.Marshal(payload)
+			r := httptest.NewRequest(http.MethodPost, "/api/send", bytes.NewReader(body))
+			r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, "owner-1"))
+			w := httptest.NewRecorder()
+			a.handleSend(w, r)
+			if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "no verified send transport") {
+				t.Fatalf("status = %d, want 422 naming the missing transport; body = %s", w.Code, w.Body.String())
+			}
+			if strings.Contains(w.Body.String(), "\"queued\"") {
+				t.Fatal("a JMAP send was queued without a submission transport")
+			}
+		})
+	}
+}
+
+// The admission weight must count the retained header fields, not only the
+// bodies: a huge subject used to weigh exactly as much as a tiny one
+// (audit 4 F14).
+func TestOutgoingWeightCountsRetainedHeaderFields(t *testing.T) {
+	small := &mail.Outgoing{Subject: "s", Text: "body"}
+	large := &mail.Outgoing{Subject: strings.Repeat("a", 1<<20), Text: "body"}
+	if outgoingWeight(small) >= outgoingWeight(large) {
+		t.Fatalf("subject bytes do not count: small = %d, large = %d", outgoingWeight(small), outgoingWeight(large))
+	}
+	namey := &mail.Outgoing{
+		Text: "body",
+		To:   []mail.Address{{Name: strings.Repeat("n", 4096), Email: "dest@example.com"}},
+	}
+	plain := &mail.Outgoing{
+		Text: "body",
+		To:   []mail.Address{{Email: "dest@example.com"}},
+	}
+	if outgoingWeight(namey) <= outgoingWeight(plain) {
+		t.Fatalf("display names do not count: namey = %d, plain = %d", outgoingWeight(namey), outgoingWeight(plain))
+	}
+	if outgoingWeight(plain) <= sendOverhead+int64(len("body")) {
+		t.Fatalf("recipient addresses do not count: plain = %d", outgoingWeight(plain))
+	}
+}

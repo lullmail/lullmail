@@ -8,6 +8,7 @@ import (
 	"database/sql/driver"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -149,5 +150,24 @@ func TestPushClaimsPerSubscriptionAndRetriesOnlyFailures(t *testing.T) {
 	}
 	if updates != 1 {
 		t.Fatalf("delivered receipts written in retry round = %d, want 1 (B only)", updates)
+	}
+}
+
+// A failed subscription count must surface as unavailable, not as a
+// confident "not subscribed" that would offer to enable what may already be
+// registered (audit 4 F23).
+func TestPushStatusReportsCountFailureAsUnavailable(t *testing.T) {
+	a := &App{
+		cfg: &Config{},
+		log: discardLogger(),
+		db:  openStepDB(t, dbStep{kind: "query", err: errors.New("database unavailable")}),
+	}
+	w := httptest.NewRecorder()
+	a.handlePush(w, requestAsOwner(http.MethodGet, "/api/push"))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body = %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "subscribed") {
+		t.Fatalf("a failed count query still reported subscription state: %s", w.Body.String())
 	}
 }

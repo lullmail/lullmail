@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -85,11 +86,22 @@ func (b *sendBudget) acquire(n int64) (func(), error) {
 }
 
 // outgoingWeight estimates what one accepted composition retains until its
-// worker finishes: text and HTML bodies plus decoded attachment bytes.
+// worker finishes. Every field the job keeps for the delivery call counts,
+// not just the bodies: a large subject or a long recipient list consumes
+// real memory while the job waits, and omitting them let compositions slip
+// past the admission budget untouched (audit 4 F14).
 func outgoingWeight(out *mail.Outgoing) int64 {
-	n := sendOverhead + int64(len(out.Text)) + int64(len(out.HTML))
+	n := sendOverhead + int64(len(out.Subject)+len(out.Text)+len(out.HTML)+len(out.InReplyTo))
+	for _, addresses := range [][]mail.Address{{out.From}, out.To, out.Cc, out.Bcc} {
+		for _, address := range addresses {
+			n += int64(len(address.Name)+len(address.Email)) + 64
+		}
+	}
+	for _, ref := range out.References {
+		n += int64(len(ref)) + 16
+	}
 	for _, att := range out.Attachments {
-		n += int64(len(att.Data))
+		n += int64(len(att.Data)+len(att.Filename)+len(att.ContentType)) + 64
 	}
 	return n
 }
@@ -176,7 +188,15 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 	q += ` ORDER BY created_at LIMIT 1`
 	if err := a.db.QueryRowContext(r.Context(), q, args...).Scan(&mirror, &provider); err != nil {
-		writeProblem(w, http.StatusPreconditionFailed, "No Account", "connect an account first")
+		if errors.Is(err, sql.ErrNoRows) {
+			writeProblem(w, http.StatusPreconditionFailed, "No Account", "connect an account first")
+			return
+		}
+		// A database failure is not "no account connected": masking it as
+		// 412 sends the user chasing a setup problem that does not exist
+		// and teaches offline replay to drop the draft (audit 4 F23).
+		a.log.Error("send account lookup failed", "err", err)
+		writeLookupProblem(w, err, "account")
 		return
 	}
 	// Transport limits are enforced before the job is accepted, not inside
@@ -185,6 +205,18 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 	// (audit SEND-06).
 	if problem := validateTransportAttachments(provider, attachments); problem != "" {
 		writeProblem(w, http.StatusUnprocessableEntity, "Attachment Rejected", problem)
+		return
+	}
+	// A JMAP account's API token authorizes JMAP reads; it is not a
+	// verified SMTP submission credential, and deliveryFor would otherwise
+	// fall through to SMTPFor and dial the API host on port 587 with the
+	// token as a password. The send would be accepted and then fail
+	// asynchronously after the undo window — the draft silently lost.
+	// Fail synchronously until a real JMAP submission transport exists
+	// (audit 4 F07).
+	if provider == string(mail.ProviderJMAP) {
+		writeProblem(w, http.StatusUnprocessableEntity, "Sending Not Configured",
+			"this JMAP account has no verified send transport — the draft was not queued")
 		return
 	}
 
@@ -197,16 +229,27 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 	if req.ReplyToID != "" {
 		var parentAcct, parentProvider string
 		err := a.db.QueryRowContext(r.Context(), `
-		SELECT m.account_id, ea.provider FROM mail_messages m
-		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-		WHERE m.id = $2 AND (ea.id::text = $3 OR m.account_id = $3)`,
+	SELECT m.account_id, ea.provider FROM mail_messages m
+	JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+	WHERE m.id = $2 AND (ea.id::text = $3 OR m.account_id = $3)`,
 			uid, req.ReplyToID, req.AccountID).Scan(&parentAcct, &parentProvider)
 		if err != nil {
-			writeProblem(w, http.StatusNotFound, "Parent Not Found", "reply_to_message_id does not resolve")
+			if !errors.Is(err, sql.ErrNoRows) {
+				a.log.Error("reply parent lookup failed", "err", err)
+			}
+			writeLookupProblem(w, err, "reply parent")
 			return
 		}
 		if problem := validateTransportAttachments(parentProvider, attachments); problem != "" {
 			writeProblem(w, http.StatusUnprocessableEntity, "Attachment Rejected", problem)
+			return
+		}
+		// Same submission-transport rule as the fresh-send path: a reply
+		// must go out through the account the thread belongs to, and a
+		// JMAP-only account has no verified submission path (audit 4 F07).
+		if parentProvider == string(mail.ProviderJMAP) {
+			writeProblem(w, http.StatusUnprocessableEntity, "Sending Not Configured",
+				"this JMAP account has no verified send transport — the draft was not queued")
 			return
 		}
 		parent, err := a.store.Envelope(r.Context(), mail.AccountID(parentAcct), mail.MessageID(req.ReplyToID))

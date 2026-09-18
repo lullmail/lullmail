@@ -26,7 +26,15 @@ func (a *App) handlePush(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		var count int
-		_ = a.db.QueryRowContext(r.Context(), `SELECT count(*) FROM push_subscriptions WHERE user_id=$1`, uid).Scan(&count)
+		if err := a.db.QueryRowContext(r.Context(), `SELECT count(*) FROM push_subscriptions WHERE user_id=$1`, uid).Scan(&count); err != nil {
+			// A failed count query must not masquerade as "not
+			// subscribed": the toggle would offer to enable what may
+			// already be registered (audit 4 F23).
+			a.log.Error("push status count failed", "err", err)
+			w.Header().Set("Retry-After", "2")
+			writeProblem(w, http.StatusServiceUnavailable, "Status Unavailable", "notification status could not be checked — try again shortly")
+			return
+		}
 		writeJSON(w, map[string]any{"configured": a.pushConfigured(), "subscribed": count > 0, "public_key": a.cfg.VAPIDPublic})
 	case http.MethodPost:
 		if !a.pushConfigured() {

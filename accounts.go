@@ -401,7 +401,10 @@ func (a *App) updateBackfill(w http.ResponseWriter, r *http.Request, id string) 
 		`UPDATE email_accounts SET backfill_days=$1 WHERE id=$2 AND user_id=$3 RETURNING mirror_account_id`,
 		*req.Days, id, uid).Scan(&mirror)
 	if err != nil {
-		writeProblem(w, 404, "Not Found", "no such account")
+		if !errors.Is(err, sql.ErrNoRows) {
+			a.log.Error("backfill account lookup failed", "err", err)
+		}
+		writeLookupProblem(w, err, "account")
 		return
 	}
 	// Shrink: drop filing rows that left the window (mirror data stays).
@@ -593,7 +596,10 @@ func (a *App) triggerSync(w http.ResponseWriter, r *http.Request, id string) {
 	err = a.db.QueryRowContext(r.Context(),
 		`SELECT mirror_account_id FROM email_accounts WHERE id = $1 AND user_id = $2`, id, uid).Scan(&mirror)
 	if err != nil {
-		writeProblem(w, http.StatusNotFound, "Not Found", "no such account")
+		if !errors.Is(err, sql.ErrNoRows) {
+			a.log.Error("sync account lookup failed", "err", err)
+		}
+		writeLookupProblem(w, err, "account")
 		return
 	}
 	if r.URL.Query().Get("wait") == "1" {

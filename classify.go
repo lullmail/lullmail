@@ -882,7 +882,11 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				cred, err := a.Token(fetchCtx, mail.AccountID(rf.acct))
 				if err != nil {
+					// A credential or dial failure is a failed fetch, not
+					// "not fetched yet": the reader must offer a retry, not
+					// a false sync-in-progress promise (audit 4 F19).
 					a.log.Error("body fetch: token", "err", err)
+					out[rf.idx].BodyStatus = "failed"
 					continue
 				}
 				resolve := newResolver()
@@ -890,6 +894,7 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 				ad, release, err = resolve(fetchCtx, mail.AccountID(rf.acct), cred)
 				if err != nil {
 					a.log.Error("body fetch: dial", "err", err)
+					out[rf.idx].BodyStatus = "failed"
 					continue
 				}
 				adapters[rf.acct] = ad
@@ -954,7 +959,10 @@ func (a *App) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	attachmentQuery += ` LIMIT 1`
 	err = a.db.QueryRowContext(r.Context(), attachmentQuery, attachmentArgs...).Scan(&acct)
 	if err != nil {
-		writeProblem(w, http.StatusNotFound, "Not Found", "no such message")
+		if !errors.Is(err, sql.ErrNoRows) {
+			a.log.Error("attachment account lookup failed", "err", err)
+		}
+		writeLookupProblem(w, err, "message")
 		return
 	}
 	cred, err := a.Token(r.Context(), mail.AccountID(acct))
@@ -1006,9 +1014,13 @@ func (a *App) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if _, err := io.Copy(w, rc); err != nil {
-		// Headers and possibly some body bytes are already out; the only
-		// honest action is logging — a second HTTP response is impossible.
+		// Headers and possibly some body bytes are already out. Returning
+		// normally would let the HTTP server close the partial 200 cleanly,
+		// which the browser reads as a complete download — a corrupt file
+		// saved without an error. Aborting tears the connection down so the
+		// client sees a failed transfer instead (audit 4 F15).
 		a.log.Warn("attachment stream interrupted", "account", acct, "message", msgID, "part", partID, "err", err)
+		panic(http.ErrAbortHandler)
 	}
 }
 
@@ -1087,7 +1099,10 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 	lookupArgs := []any{uid, msg, account}
 	lookup += ` ORDER BY m.received_at DESC NULLS LAST LIMIT 1`
 	if err := a.db.QueryRowContext(r.Context(), lookup, lookupArgs...).Scan(&acct, &thread); err != nil {
-		writeProblem(w, http.StatusNotFound, "Not Found", "no such message")
+		if !errors.Is(err, sql.ErrNoRows) {
+			a.log.Error("message action lookup failed", "err", err)
+		}
+		writeLookupProblem(w, err, "message")
 		return
 	}
 

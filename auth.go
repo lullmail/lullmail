@@ -2023,3 +2023,19 @@ func writeProblem(w http.ResponseWriter, status int, title, detail string) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"title": title, "detail": detail})
 }
+
+// writeLookupProblem classifies a row-lookup error honestly: a genuinely
+// absent row is a 404, while an infrastructure failure is a retryable 503.
+// Reporting database outages as missing resources misleads users, hides
+// failures from monitoring, and teaches offline clients to treat a transient
+// outage as a permanent rejection (audit 4 F23). Call sites log the
+// underlying error before delegating here.
+func writeLookupProblem(w http.ResponseWriter, err error, noun string) {
+	if errors.Is(err, sql.ErrNoRows) {
+		writeProblem(w, http.StatusNotFound, "Not Found", "no such "+noun)
+		return
+	}
+	w.Header().Set("Retry-After", "2")
+	writeProblem(w, http.StatusServiceUnavailable, "Temporarily Unavailable",
+		"the operation could not be completed — retry without discarding your changes")
+}
