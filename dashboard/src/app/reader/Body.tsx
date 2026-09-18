@@ -170,6 +170,23 @@ export function cleanLinks(html: string): string {
     .filter((node) => !/@\s*import\b/i.test(node.textContent || ""))
     .map((node) => node.cloneNode(true));
   for (const style of headStyles.reverse()) doc.body.prepend(style);
+  // Body-level presentation survives serialization: cleanLinks returns
+  // body.innerHTML, which drops the body element's own (already sanitized)
+  // style and bgcolor — so a white-canvas email lost its canvas to the
+  // dark theme one decision later, in emailHasOwnColors (audit 4 F21).
+  // The vetted attributes move onto a wrapper inside the document; no
+  // event handlers, network-backed backgrounds, or unsanitized values
+  // are introduced — sanitizeImageResources above already cleaned the
+  // body's style/background attributes in place.
+  const wrapper = doc.createElement("div");
+  const bodyStyle = doc.body.getAttribute("style");
+  if (bodyStyle) wrapper.setAttribute("style", bodyStyle);
+  const bgcolor = doc.body.getAttribute("bgcolor");
+  if (bgcolor && typeof CSS !== "undefined" && CSS.supports("color", bgcolor)) {
+    wrapper.style.backgroundColor = bgcolor;
+  }
+  while (doc.body.firstChild) wrapper.appendChild(doc.body.firstChild);
+  doc.body.appendChild(wrapper);
   return doc.body.innerHTML;
 }
 
@@ -338,9 +355,35 @@ function TextBody({ text }: { text: string }) {
   );
 }
 
-export function MessageBody({ html, text, messageId, sender }: {
+export function MessageBody({ html, text, messageId, sender, bodyStatus = "ready", onRetry }: {
   html?: string; text: string; messageId: string; sender: string;
+  bodyStatus?: "ready" | "missing" | "failed"; onRetry?: () => void;
 }) {
+  // body_status decides before the content does: a failed fetch offers a
+  // retry, an unfetched body offers to load, and only a READY empty body is
+  // an authoritative empty message. The old fallback labelled all three
+  // "sync in progress" (audit 4 F19).
+  if (bodyStatus === "failed") {
+    return (
+      <div class="msg-empty" role="alert">
+        <div class="empty-big">Message content could not be fetched.</div>
+        <div class="empty-sub">
+          <button class="btn btn-outline btn-sm" type="button" onClick={onRetry}>Retry</button>
+        </div>
+      </div>
+    );
+  }
+  if (bodyStatus === "missing") {
+    return (
+      <div class="msg-empty">
+        <div class="empty-big">Message content has not been loaded on this device.</div>
+        <div class="empty-sub">
+          <button class="btn btn-outline btn-sm" type="button" onClick={onRetry}>Load message</button>
+        </div>
+      </div>
+    );
+  }
   if (html) return <HtmlBody html={html} messageId={messageId} sender={sender} />;
-  return <TextBody text={text || "(body not fetched yet — sync in progress)"} />;
+  if (!text) return <div class="msg-empty"><div class="empty-big">This message has an empty body.</div></div>;
+  return <TextBody text={text} />;
 }

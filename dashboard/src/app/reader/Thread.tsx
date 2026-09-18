@@ -1,7 +1,7 @@
 import { useState } from "preact/hooks";
 import { download } from "../lib/api";
 import { closeReader, openCompose, reader, showError } from "../lib/store";
-import { BUCKET_LABEL, markDone, markRead, moveTo, pinThreads, snooze } from "../lib/actions";
+import { BUCKET_LABEL, markDone, markRead, moveTo, openThread, pinThreads, snooze } from "../lib/actions";
 import type { Bucket, ListBucket, Message, Row } from "../lib/types";
 import { countOf, fmtFull, splitFrom } from "../lib/fmt";
 import { Avatar } from "../ui/bits";
@@ -28,7 +28,10 @@ function rowFor(messages: Message[], threadId: string, bucket: ListBucket | null
   };
 }
 
-function ThreadMessage({ message }: { message: Message }) {
+/** One message. A body that is missing or failed offers its own reload —
+    a plain "sync in progress" label promised progress that was not
+    happening (audit 4 F19). */
+function ThreadMessage({ message, onRetry }: { message: Message; onRetry: () => void }) {
   const who = splitFrom(message.from);
   const [exporting, setExporting] = useState(false);
   return (
@@ -63,7 +66,10 @@ function ThreadMessage({ message }: { message: Message }) {
         </button>
       </div>
       <div class="thread-msg-body">
-        <MessageBody html={message.html} text={message.body} messageId={message.id} sender={who.email} />
+        <MessageBody
+          html={message.html} text={message.body} messageId={message.id} sender={who.email}
+          bodyStatus={message.body_status} onRetry={onRetry}
+        />
         <Attachments account={message.account} messageId={message.id} items={message.attachments || []} />
       </div>
     </article>
@@ -76,13 +82,15 @@ function Bar({ row }: { row: Row }) {
   const last = messages[messages.length - 1];
 
   const reply = () => {
-    const who = splitFrom(last.from);
+    // The server computed the default recipients from the stored envelope
+    // (Reply-To honored, own sent mail followed up to its recipients —
+    // audit 4 F06). Empty means "ask": the composer opens with a blank To.
     openCompose({
-      to: who.email,
+      to: last.reply_to || "",
       subject: /^re:/i.test(last.subject) ? last.subject : "Re: " + (last.subject || ""),
       accountId: last.account,
       replyToId: last.id,
-      context: "Replying to " + (who.name || who.email),
+      context: "Replying to " + (splitFrom(last.from).name || splitFrom(last.from).email),
     });
   };
 
@@ -169,6 +177,11 @@ export function Thread({ backTo, variant = "page" }: { backTo: string; variant?:
   const last = messages[messages.length - 1];
   const row = rowFor(messages, state.threadId || "", state.bucket);
   const people = new Set(messages.map((m) => splitFrom(m.from).email));
+  // Refetch the open thread (bypassing the in-memory cache) so a missing or
+  // failed body gets another eager-fetch pass (audit 4 F19).
+  const retryBody = () => {
+    if (state.threadId && state.account) openThread(state.threadId, state.account, state.bucket);
+  };
 
   return (
     <>
@@ -179,7 +192,7 @@ export function Thread({ backTo, variant = "page" }: { backTo: string; variant?:
           {countOf(messages.length, "message")}
           {people.size > 1 && " · " + countOf(people.size, "person", "people")}
         </div>
-        {messages.map((m) => <ThreadMessage message={m} key={m.id} />)}
+        {messages.map((m) => <ThreadMessage message={m} key={m.id} onRetry={retryBody} />)}
       </div>
       {row && <Bar row={row} />}
     </>

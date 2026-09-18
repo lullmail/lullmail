@@ -37,6 +37,9 @@ export interface BoardCard {
   preview?: string;
   note?: string;
   manual?: boolean;
+  /** True only when the pin call created this card; an undo may only
+      remove cards the operation itself created (audit 4 F20). */
+  created?: boolean;
 }
 
 export interface Board {
@@ -76,6 +79,11 @@ export interface Message {
   /** "ready" | "missing" (not fetched yet) | "failed" (fetch errored).
       Empty content with status "ready" is a genuinely empty message. */
   body_status?: "ready" | "missing" | "failed";
+  /** Server-computed default recipients for a reply to this message:
+      Reply-To when set, else From — and the message's own recipients when
+      it came from one of the owner's addresses. Empty means "ask the
+      user" (audit 4 F06). */
+  reply_to?: string;
 }
 
 export interface ScreenerSender {
