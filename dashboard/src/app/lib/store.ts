@@ -504,12 +504,40 @@ export const compose = computed<ComposeState | null>(() => draftStack.value[draf
 
 /** The ring itself persists (debounced), so a reload parks the same drafts
     behind the same Compose-button count. Blank drafts are not worth
-    restoring; content is. */
+    restoring; content is. Attachment PAYLOADS never ride along: localStorage
+    cannot hold them (a multi-megabyte undo seed blew the quota and took the
+    whole ring's save down silently — audit 4 F05); the files live in
+    IndexedDB keyed by draft id, and the ring keeps a hasAttachments marker
+    so an attachment-only draft is still worth restoring. */
+type StoredDraft = Omit<ComposeState, "attachments"> & { hasAttachments?: boolean };
+
+export function draftMetadata(d: ComposeState): StoredDraft {
+  const { attachments: _files, ...metadata } = d;
+  return { ...metadata, hasAttachments: (d.attachments?.length ?? 0) > 0 };
+}
+
+/** A draft is worth restoring when any field carries content OR it holds
+    attachments — the old to/subject/body test dropped attachment-only and
+    cc/bcc-only drafts (audit 4 F05). */
+export function worthRestoring(d: StoredDraft): boolean {
+  if (d.hasAttachments) return true;
+  return [d.to, d.cc, d.bcc, d.subject, d.body].some((v) => typeof v === "string" && v.trim().length > 0);
+}
+
+/** True when the last ring save failed (quota/private mode): surfaced as a
+    persistent warning instead of a swallowed exception (audit 4 F05). */
+export const draftsUnsaved = signal(false);
+
 const DRAFTS_KEY = "es-drafts";
 let draftSaveTimer: ReturnType<typeof setTimeout> | undefined;
 function persistDraftsNow() {
   clearTimeout(draftSaveTimer);
-  try { localStorage.setItem(DRAFTS_KEY, JSON.stringify(draftStack.value)); } catch { /* private mode */ }
+  try {
+    localStorage.setItem(DRAFTS_KEY, JSON.stringify(draftStack.value.map(draftMetadata)));
+    draftsUnsaved.value = false;
+  } catch {
+    draftsUnsaved.value = true;
+  }
 }
 draftStack.subscribe(() => {
   clearTimeout(draftSaveTimer);
@@ -525,9 +553,9 @@ function restoreDrafts() {
   try {
     const saved = JSON.parse(localStorage.getItem(DRAFTS_KEY) || "[]");
     if (!Array.isArray(saved)) return;
-    const live = saved.filter((d: ComposeState) =>
-      d && typeof d.id === "string" &&
-      [d.to, d.subject, d.body].some((v) => typeof v === "string" && v.trim()));
+    const live = (saved as StoredDraft[])
+      .filter((d) => d && typeof d.id === "string" && worthRestoring(d))
+      .map(({ hasAttachments: _marker, ...rest }) => rest as ComposeState);
     if (live.length) {
       draftStack.value = live;
       draftIndex.value = 0;
