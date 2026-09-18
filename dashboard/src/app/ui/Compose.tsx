@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { accounts, closeCompose, compose, cycleDraft, draftIndex, draftStack, newDraft, retireDraft, showToast, undoSeconds, updateDraft, type ComposeState } from "../lib/store";
+import { accounts, closeCompose, compose, cycleDraft, draftIndex, draftsUnsaved, draftStack, newDraft, retireDraft, showToast, undoSeconds, updateDraft, type ComposeState } from "../lib/store";
 import { sendMail, type SendAttachment } from "../lib/actions";
 import { clearDraftAttachments, loadDraftAttachments, saveDraftAttachments } from "../lib/offline";
 
@@ -62,17 +62,35 @@ function DraftForm({ seed }: { seed: ComposeState }) {
   const [busy, setBusy] = useState(false);
   const [accountId, setAccountId] = useState(saved.accountId ?? seed.accountId ?? "");
   const [attachments, setAttachments] = useState<SendAttachment[]>(seed.attachments ? [...seed.attachments] : []);
-  // Send stays disabled until any saved/seeded attachment set is restored:
-  // sending before restoration would ship a draft missing its files
-  // (audit WEB-06).
-  const [attachmentsReady, setAttachmentsReady] = useState(!seed.attachments);
+  // The file set is a small state machine, not a boolean (audit 4 F03):
+  // "loading" until the saved set is authoritatively restored (or the seed
+  // carried it in memory), "error" when the restore failed — an error is
+  // NOT an authoritative empty set, so nothing is persisted over the stored
+  // files and no send slips out without them until the user acknowledges.
+  const [filePhase, setFilePhase] = useState<"loading" | "ready" | "error">(seed.attachments ? "ready" : "loading");
+  const attachmentsReady = filePhase === "ready";
   const bodyRef = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  // Retirement fence: once a draft is sent or discarded, the unmount
+  // autosave and any queued attachment save must not resurrect its slot
+  // (audit 4-F04).
+  const retired = useRef(false);
+  // Closes the same-tick double-activation window between the button and
+  // the keyboard shortcut, which funnel through one send() (audit 4 F03).
+  const sending = useRef(false);
+  // Serializes attachment writes with the final deletion so an in-flight
+  // save cannot land after clearDraftAttachments and resurrect the files.
+  const saves = useRef<Promise<void>>(Promise.resolve());
+  const queueSave = (run: () => Promise<void>) => {
+    saves.current = saves.current.then(run, run);
+  };
 
   const fileBytes = attachments.reduce((n, a) => n + Math.round(a.dataBase64.length * 3 / 4), 0);
 
   const addFiles = async (files: FileList | null) => {
-    if (!files) return;
+    // No additions while submitting (the send already captured its set) or
+    // while an unreadable restore awaits acknowledgment (audit 4 F03).
+    if (!files || busy || sending.current || filePhase === "error") return;
     const next: SendAttachment[] = [];
     for (const f of files) {
       const att = await fileToAttachment(f);
@@ -86,6 +104,7 @@ function DraftForm({ seed }: { seed: ComposeState }) {
   };
 
   const removeAttachment = (i: number) => {
+    if (busy || sending.current) return;
     setAttachments((current) => current.filter((_, idx) => idx !== i));
   };
 
@@ -95,8 +114,9 @@ function DraftForm({ seed }: { seed: ComposeState }) {
   useEffect(() => {
     let alive = true;
     if (seed.attachments) {
-      void saveDraftAttachments(seed.id, [...seed.attachments]).catch(() => {});
-      setAttachmentsReady(true);
+      const seeded = [...seed.attachments];
+      queueSave(() => (retired.current ? Promise.resolve() : saveDraftAttachments(seed.id, seeded)));
+      setFilePhase("ready");
       return () => { alive = false; };
     }
     loadDraftAttachments<SendAttachment>(seed.id).then((files) => {
@@ -107,11 +127,14 @@ function DraftForm({ seed }: { seed: ComposeState }) {
           return [...current, ...files.filter((item) => !present.has(item.filename + "\u0000" + item.dataBase64))];
         });
       }
-      setAttachmentsReady(true);
+      setFilePhase("ready");
     }).catch(() => {
       if (alive) {
-        showToast("Saved attachments could not be loaded — re-attach any missing files");
-        setAttachmentsReady(true);
+        // The stored set exists but could not be read: keep the draft
+        // blocked (no empty overwrite, no silent missing-file send) until
+        // the user acknowledges sending without the unreadable files
+        // (audit 4 F03).
+        setFilePhase("error");
       }
     });
     return () => { alive = false; };
@@ -120,36 +143,59 @@ function DraftForm({ seed }: { seed: ComposeState }) {
 
   // Persistence follows the settled list, never a snapshot captured mid-race.
   useEffect(() => {
-    if (!attachmentsReady) return; // don't clobber the stored set with the pre-restore empty list
-    void saveDraftAttachments(seed.id, attachments);
-  }, [attachments, attachmentsReady, seed.id]);
+    if (filePhase !== "ready") return; // don't clobber the stored set with the pre-restore empty list
+    queueSave(() => (retired.current ? Promise.resolve() : saveDraftAttachments(seed.id, attachments)));
+  }, [attachments, filePhase, seed.id]);
 
   // Debounced autosave that FLUSHES on unmount: clearing the timer and
   // dropping a pending write left the per-draft snapshot older than the
   // draft stack, so switching back resurrected stale text (audit WEB-05).
+  // The write is fenced by retirement so a sent/discarded draft's slot is
+  // not recreated after its deletion (audit 4-F04).
   const latest = useRef({ to, cc, bcc, subject, body, htmlMode, accountId });
   latest.current = { to, cc, bcc, subject, body, htmlMode, accountId };
   useEffect(() => {
     const write = () => {
+      if (retired.current) return;
       try { localStorage.setItem(draftKey, JSON.stringify(latest.current)); } catch { /* private mode */ }
     };
     const timer = setTimeout(write, 250);
     return () => { clearTimeout(timer); write(); };
   }, [draftKey, to, cc, bcc, subject, body, htmlMode, accountId]);
 
+  // Send and discard both pass through here: fence first, then remove the
+  // local copies, and only then retire the ring entry (audit 4-F04). The
+  // queued clear runs after every pending attachment save, so deletion is
+  // the last write.
+  const retireLocalDraft = () => {
+    retired.current = true;
+    try { localStorage.removeItem(draftKey); } catch { /* private mode */ }
+    queueSave(() => clearDraftAttachments(seed.id));
+    retireDraft(seed.id);
+  };
+
   const send = async () => {
-    if (!to.trim() || busy) return;
+    // The guard lives in send(), not only on the button: the keyboard path
+    // reaches here directly and must not ship a draft whose saved
+    // attachments have not been restored (audit 4 F03).
+    if (!to.trim() || busy || !attachmentsReady || sending.current) return;
+    sending.current = true;
     setBusy(true);
-    const ok = await sendMail({
-      to: to.trim(), cc: cc.trim(), bcc: bcc.trim(), subject,
-      text: htmlMode ? "" : body,
-      html: htmlMode ? body : undefined,
-      accountId: accountId || seed.accountId,
-      replyToId: seed.replyToId,
-      attachments,
-    });
-    setBusy(false);
-    if (ok) { localStorage.removeItem(draftKey); void clearDraftAttachments(seed.id); retireDraft(seed.id); }
+    let ok = false;
+    try {
+      ok = await sendMail({
+        to: to.trim(), cc: cc.trim(), bcc: bcc.trim(), subject,
+        text: htmlMode ? "" : body,
+        html: htmlMode ? body : undefined,
+        accountId: accountId || seed.accountId,
+        replyToId: seed.replyToId,
+        attachments,
+      });
+    } finally {
+      sending.current = false;
+      setBusy(false);
+    }
+    if (ok) retireLocalDraft();
   };
 
   const accountList = accounts.value;
@@ -227,6 +273,15 @@ function DraftForm({ seed }: { seed: ComposeState }) {
           />
           {htmlMode && !preview && <span class="compose-modes-note">plain-text readers get an automatic fallback</span>}
         </div>
+        {filePhase === "error" && (
+          <p class="account-warning" role="alert">
+            This draft has saved attachments that could not be read from this device. Re-attach
+            any missing files, or{" "}
+            <button class="btn btn-ghost btn-sm" type="button" onClick={() => setFilePhase("ready")}>
+              send without them
+            </button>.
+          </p>
+        )}
         {attachments.length > 0 && (
           <div class="compose-files">
             {attachments.map((a, i) => (
@@ -262,9 +317,9 @@ function DraftForm({ seed }: { seed: ComposeState }) {
       </div>
       <div class="compose-btns">
         <span class="hint"><span class="kbd">⌘↵</span> send · <span class="kbd">Esc</span> park · <span class="kbd">c</span> new draft · {undoSeconds}s to undo</span>
-        <button class="btn btn-ghost btn-sm" type="button" onClick={() => { localStorage.removeItem(draftKey); void clearDraftAttachments(seed.id); retireDraft(seed.id); }}>Discard</button>
+        <button class="btn btn-ghost btn-sm" type="button" onClick={retireLocalDraft}>Discard</button>
         <button class="btn btn-accent" type="button" disabled={!to.trim() || busy || !attachmentsReady} onClick={send}>
-          {busy ? "Sending…" : attachmentsReady ? "Send" : "Restoring…"}
+          {busy ? "Sending…" : attachmentsReady ? "Send" : filePhase === "error" ? "Attachments unreadable" : "Restoring…"}
         </button>
       </div>
     </>
@@ -292,6 +347,9 @@ export function Compose() {
           <button class="btn btn-ghost btn-sm" type="button" onClick={() => newDraft()}>
             + New draft
           </button>
+          {draftsUnsaved.value && (
+            <span class="compose-ring-count" role="status">drafts are NOT saved on this device</span>
+          )}
           {stack.length > 1 && (
             <>
               <span class="compose-ring-count">{at + 1} of {stack.length}</span>
