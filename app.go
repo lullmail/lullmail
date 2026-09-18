@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -36,6 +37,8 @@ type App struct {
 	accountOwnerMu    sync.RWMutex
 	accountStatesMu   sync.Mutex
 	accountStates     map[mail.AccountID]*accountLifecycle
+	instIDMu          sync.Mutex
+	instID            string
 
 	// dial builds adapters from stored credentials. connectApp leaves it
 	// nil (the production resolver is constructed per invocation); tests
@@ -60,6 +63,37 @@ func (a *App) accountState(acct mail.AccountID) *accountLifecycle {
 		a.accountStates[acct] = state
 	}
 	return state
+}
+
+// installationID is the durable identity of THIS deployment, minted once
+// into app_settings and never rotated. The offline-v2 namespace pairs it
+// with the user id (audit WEB-07/WEB-01/R08) so browser storage is keyed
+// by identities the owner cannot accidentally reuse: unlike the email
+// address, an installation id + user id pair is not a mutable, shared,
+// or re-registrable name.
+func (a *App) installationID(ctx context.Context) (string, error) {
+	a.instIDMu.Lock()
+	cached := a.instID
+	a.instIDMu.Unlock()
+	if cached != "" {
+		return cached, nil
+	}
+	var id string
+	err := a.db.QueryRowContext(ctx, `SELECT value FROM app_settings WHERE key='installation_id'`).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		id = newID()
+		if _, err = a.db.ExecContext(ctx,
+			`INSERT INTO app_settings (key, value) VALUES ('installation_id', $1) ON CONFLICT (key) DO NOTHING`, id); err == nil {
+			err = a.db.QueryRowContext(ctx, `SELECT value FROM app_settings WHERE key='installation_id'`).Scan(&id)
+		}
+	}
+	if err != nil {
+		return "", err
+	}
+	a.instIDMu.Lock()
+	a.instID = id
+	a.instIDMu.Unlock()
+	return id, nil
 }
 
 // beginAccountUse prevents mailbox deletion while an operation can write to

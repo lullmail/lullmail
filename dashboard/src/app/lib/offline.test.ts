@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 
-import { canQueue, newMutationKey, offlineOwner, queueMutation, replayDecision, replayPlan, replayRequestInit, retryAfterMs, retryDelay, suspendOfflineStorage, withReplayLock } from "./offline";
+import {
+  accountOf, canQueue, generationCurrent, namespaceFor, newMutationKey, offlineOwner,
+  queueMutation, replayDecision, replayPlan, replayRequestInit, retryAfterMs, retryDelay,
+  suspendOfflineStorage, withReplayLock,
+} from "./offline";
 
 describe("replay classification (audit WEB-03)", () => {
   it("counts only 2xx as committed", () => {
@@ -82,12 +86,31 @@ describe("replay ordering (audit 4 F09)", () => {
 
 describe("fail-closed suspension (audit 4 F11)", () => {
   it("gates queueMutation with a visible error while suspended", async () => {
-    localStorage.setItem("es-offline-owner", "owner@example.com");
+    localStorage.setItem("lull-offline-ns", "inst-1/user-1");
     suspendOfflineStorage();
     await expect(queueMutation("/messages/m1/action", "POST", {})).rejects.toThrow(/suspended/i);
   });
   it("reports suspension state", () => {
-    expect(offlineOwner()).toBe("owner@example.com");
+    expect(offlineOwner()).toBe("inst-1/user-1");
+  });
+});
+
+describe("namespace + generation fencing (audit WEB-07/R08)", () => {
+  it("keys the namespace by installation + user ids, not the email", () => {
+    expect(namespaceFor({ installation_id: "abc", user_id: "def", email: "someone@example.com" })).toBe("abc/def");
+    expect(namespaceFor({ email: "legacy@example.com" })).toBe("legacy@example.com");
+  });
+  it("discards results from a stale generation", () => {
+    localStorage.setItem("lull-offline-gen", "4");
+    expect(generationCurrent(4)).toBe(true);
+    expect(generationCurrent(3)).toBe(false);
+    localStorage.removeItem("lull-offline-gen");
+    expect(generationCurrent(4)).toBe(false);
+  });
+  it("attributes cached rows to the lensed account", () => {
+    expect(accountOf("/buckets/imbox")).toBe("");
+    expect(accountOf("/buckets/imbox?account=abc")).toBe("abc");
+    expect(accountOf("/buckets/imbox?x=1&account=a%2Fb")).toBe("a/b");
   });
 });
 

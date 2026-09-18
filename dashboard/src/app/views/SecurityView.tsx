@@ -114,6 +114,11 @@ export function SecurityView() {
     setBusy("logout");
     try {
       await authApi("/auth/logout", { method: "POST" });
+      // Ratified logout semantics (offline-v2): this device's offline
+      // caches, queued work, and drafts belong to the session owner and
+      // leave with the session — no survivorship for the next owner of
+      // this browser.
+      try { await clearOfflineData(); } catch { /* the session is dead server-side; a failed local wipe suspends offline storage on next prepare */ }
       authed.value = false;
       await refreshAuth();
       navigate("/today");

@@ -1,7 +1,10 @@
 // The one place that talks to the server. Product calls use the HttpOnly
 // session cookie; JavaScript never sees a long-lived authentication secret.
 import { signal } from "@preact/signals";
-import { cacheResponse, cachedResponse, canQueue, newMutationKey, offlineOwner, prepareOfflineOwner, queueMutation, suspendOfflineStorage } from "./offline";
+import {
+  cacheResponse, cachedResponse, canQueue, generationCurrent, newMutationKey, offlineEmail,
+  offlineGeneration, offlineOwner, prepareOfflineOwner, queueMutation, suspendOfflineStorage,
+} from "./offline";
 
 export const authed = signal(false);
 export const authReady = signal(false);
@@ -15,6 +18,11 @@ export interface AuthStatus {
   email: string;
   bootstrap_available: boolean;
   passkey_supported: boolean;
+  /** Durable offline namespace pair (audit WEB-07): the deployment's
+   *  installation id and the user's id. All offline storage is keyed by
+   *  the pair, never the (mutable, reusable) email. */
+  installation_id?: string;
+  user_id?: string;
   /** First-run only: where the server believes the browser is, shown so a
    *  wrong proxy header is visible before a passkey is bound to it. */
   detected_origin?: string;
@@ -76,6 +84,10 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
   const queueable = protectedRoute && canQueue(path, opts.method || (opts.body !== undefined ? "POST" : "GET"));
   const idempotencyKey = queueable ? newMutationKey() : undefined;
   if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
+  // The generation fences this async read against an owner switch: if the
+  // owner changes while the request is in flight, the result is discarded
+  // — never cached, never published (audit WEB-07/R08).
+  const gen = offlineGeneration();
   let body: string | undefined;
   if (opts.body !== undefined) {
     headers["Content-Type"] = "application/json";
@@ -93,7 +105,7 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
   } catch (error) {
     if (opts.signal?.aborted) throw error;
     if (protectedRoute && method === "GET") {
-      const cached = await cachedResponse<T>(path);
+      const cached = await cachedResponse<T>(path, gen);
       if (cached !== undefined) return cached;
     }
     if (queueable) {
@@ -118,9 +130,9 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
     throw new ApiError(detail, res.status);
   }
   const value = (await res.json()) as T;
-  if (protectedRoute && method === "GET") {
+  if (protectedRoute && method === "GET" && generationCurrent(gen)) {
     memoryResponses.set(path, { savedAt: Date.now(), value: copyValue(value) });
-    cacheResponse(path, value).catch(() => {});
+    cacheResponse(path, value, gen).catch(() => {});
   } else if (protectedRoute && res.ok) {
     // A mutation invalidates the in-memory cache only. The persisted
     // offline snapshots are the ONLY offline copy of the mailbox —
@@ -149,7 +161,7 @@ export async function refreshAuth(): Promise<AuthStatus> {
     if (!status.authenticated) memoryResponses.clear();
     if (status.authenticated && status.email) {
       try {
-        await prepareOfflineOwner(status.email);
+        await prepareOfflineOwner(status);
       } catch (storageError) {
         // A storage failure is not an unreachable server: the session is
         // known-good, only offline persistence is disabled (audit 3 WEB-08).
@@ -169,7 +181,7 @@ export async function refreshAuth(): Promise<AuthStatus> {
     // mailbox open; a fresh device waits for the server rather than being
     // told to sign in to something it cannot reach.
     unreachable.value = true;
-    const owner = offlineOwner();
+    const owner = offlineEmail();
     if (owner && !authStatus.value) {
       authStatus.value = { configured: true, authenticated: true, email: owner, bootstrap_available: false, passkey_supported: true };
       authed.value = true;

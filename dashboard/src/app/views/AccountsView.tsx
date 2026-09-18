@@ -2,7 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import { api, clearMemoryCache, download } from "../lib/api";
 import { useLoad } from "../lib/useLoad";
 import { closeReader, setList, showError, showToast } from "../lib/store";
-import { clearResponseCache } from "../lib/offline";
+import { purgeAccountSnapshots } from "../lib/offline";
 import { refreshAccounts, refreshCounts } from "../lib/actions";
 import type { Account } from "../lib/types";
 import { countOf, fmtDate } from "../lib/fmt";
@@ -13,17 +13,18 @@ import { installApp, installKind } from "../lib/pwa";
  *  device's persistent copies of that mail must go too: the server's
  *  deletion transaction says nothing about the browser's IndexedDB
  *  snapshots, which otherwise keep serving removed private mail offline
- *  (audit 4 F12). The conservative whole-cache clear is the immediate
- *  mitigation; per-mailbox records with generation fencing remain the
- *  registered offline-v2 item (WEB-01/WEB-07). The mutation queue is left
- *  alone — it holds the user's own pending work, not mail content.
- *  Returns an error message when device cleanup failed (the server side
- *  already succeeded and must not be retried as if it had not). */
-async function purgeDeviceMailSnapshots(): Promise<string | null> {
+ *  (audit 4 F12). offline-v2 makes records per-mailbox: disconnecting one
+ *  account removes its snapshots and the unified ones (they contain its
+ *  mail) while every other mailbox's lensed snapshots survive. The
+ *  mutation queue is left alone — it holds the user's own pending work,
+ *  not mail content. Returns an error message when device cleanup failed
+ *  (the server side already succeeded and must not be retried as if it
+ *  had not). */
+async function purgeDeviceMailSnapshots(accountId: string): Promise<string | null> {
   closeReader();
   clearMemoryCache();
   try {
-    await clearResponseCache();
+    await purgeAccountSnapshots(accountId);
     return null;
   } catch {
     return "removed on the server, but this device's cached copies could not be cleared — reload before going offline";
@@ -83,7 +84,7 @@ function AccountCard({ account, onChange }: { account: Account; onChange: () => 
     setBusy("delete");
     try {
       await api("/accounts/" + encodeURIComponent(account.id), { method: "DELETE" });
-      const cleanupProblem = await purgeDeviceMailSnapshots();
+      const cleanupProblem = await purgeDeviceMailSnapshots(account.id);
       if (cleanupProblem) {
         showError(account.address + " " + cleanupProblem);
       } else {
@@ -106,7 +107,7 @@ function AccountCard({ account, onChange }: { account: Account; onChange: () => 
       if (days > 0) {
         // Retention removed local mail server-side; this device's cached
         // copies of it must not outlive the policy (audit 4 F12).
-        const cleanupProblem = await purgeDeviceMailSnapshots();
+        const cleanupProblem = await purgeDeviceMailSnapshots(account.id);
         if (cleanupProblem) {
           showError("Local mail " + cleanupProblem);
         } else {

@@ -392,6 +392,18 @@ func (a *App) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		// once per boot, against the pinned origin — never enforced.
 		"exposed": publicExposure(a.cfg.PublicURL),
 	}
+	if authenticated {
+		// The offline-v2 namespace pair (audit WEB-07/WEB-01/R08): the
+		// dashboard namespaces every offline store by installation +
+		// user, so a reused or renamed email address can never inherit
+		// the previous owner's caches, queue, or drafts.
+		status["user_id"] = uid
+		if instID, instErr := a.installationID(r.Context()); instErr == nil {
+			status["installation_id"] = instID
+		} else {
+			a.log.Error("installation id unavailable", "err", instErr)
+		}
+	}
 	if via != "" {
 		status["via"] = via
 	}

@@ -3,6 +3,7 @@
 // has to drive whichever list is on screen without knowing which view drew it.
 import { signal, computed } from "@preact/signals";
 import type { Bucket, Counts, ListBucket, Message, Row, ScreenerSender } from "./types";
+import { loadDrafts, saveDraftFields, worthRestoring } from "./offline";
 
 /* ---- theme ---- */
 
@@ -159,7 +160,7 @@ export function resolveLayout() {
     document.documentElement.setAttribute("data-layout", layout.value);
   } catch { /* no document during prerender */ }
   accountFilter.value = initialAccountFilter();
-  restoreDrafts();
+  void hydrateDrafts();
   accent.value = initialAccent();
   typeFlavor.value = initialType();
   textSize.value = attrDefault("data-textsize", "m") as TextSize;
@@ -502,67 +503,74 @@ export const draftStack = signal<ComposeState[]>([]);
 export const draftIndex = signal(0);
 export const compose = computed<ComposeState | null>(() => draftStack.value[draftIndex.value] ?? null);
 
-/** The ring itself persists (debounced), so a reload parks the same drafts
-    behind the same Compose-button count. Blank drafts are not worth
-    restoring; content is. Attachment PAYLOADS never ride along: localStorage
-    cannot hold them (a multi-megabyte undo seed blew the quota and took the
-    whole ring's save down silently — audit 4 F05); the files live in
-    IndexedDB keyed by draft id, and the ring keeps a hasAttachments marker
-    so an attachment-only draft is still worth restoring. */
-type StoredDraft = Omit<ComposeState, "attachments"> & { hasAttachments?: boolean };
-
-export function draftMetadata(d: ComposeState): StoredDraft {
-  const { attachments: _files, ...metadata } = d;
-  return { ...metadata, hasAttachments: (d.attachments?.length ?? 0) > 0 };
-}
-
-/** A draft is worth restoring when any field carries content OR it holds
-    attachments — the old to/subject/body test dropped attachment-only and
-    cc/bcc-only drafts (audit 4 F05). */
-export function worthRestoring(d: StoredDraft): boolean {
-  if (d.hasAttachments) return true;
-  return [d.to, d.cc, d.bcc, d.subject, d.body].some((v) => typeof v === "string" && v.trim().length > 0);
-}
-
-/** True when the last ring save failed (quota/private mode): surfaced as a
-    persistent warning instead of a swallowed exception (audit 4 F05). */
+/** True when the last ring save failed (storage unavailable): surfaced
+ *  as a persistent warning instead of a swallowed exception (audit 4
+ *  F05). */
 export const draftsUnsaved = signal(false);
 
-const DRAFTS_KEY = "es-drafts";
+/** offline-v2 drafts (audit F05 remainder / WEB-07): one draft is ONE
+ *  IndexedDB record — fields and attachment payloads in the same row,
+ *  the ordered ring being those rows in seq order, so the ring and the
+ *  record commit together by construction. localStorage is no longer
+ *  involved: no quota ceiling can drop a large draft's save. */
 let draftSaveTimer: ReturnType<typeof setTimeout> | undefined;
-function persistDraftsNow() {
-  clearTimeout(draftSaveTimer);
+let draftSaveQueued = false;
+
+function fieldsOf(d: ComposeState): Omit<ComposeState, "id"> {
+  const { id: _id, ...fields } = d;
+  return fields;
+}
+
+async function flushDrafts(): Promise<void> {
   try {
-    localStorage.setItem(DRAFTS_KEY, JSON.stringify(draftStack.value.map(draftMetadata)));
+    for (const d of draftStack.value) await saveDraftFields(d.id, fieldsOf(d));
     draftsUnsaved.value = false;
   } catch {
     draftsUnsaved.value = true;
   }
 }
-draftStack.subscribe(() => {
+
+function scheduleDraftFlush() {
+  // SSR prerendering has no storage to flush to, and a timer left running
+  // past the build's module lifetime is a crash, not a save.
+  if (typeof window === "undefined") return;
+  draftSaveQueued = true;
   clearTimeout(draftSaveTimer);
-  draftSaveTimer = setTimeout(persistDraftsNow, 120);
-});
+  draftSaveTimer = setTimeout(() => {
+    draftSaveTimer = undefined;
+    void flushDrafts();
+  }, 250);
+}
+draftStack.subscribe(() => scheduleDraftFlush());
 // A reload can land inside the debounce window; the last state must win.
 if (typeof window !== "undefined") {
-  window.addEventListener("pagehide", persistDraftsNow);
+  window.addEventListener("pagehide", () => {
+    if (draftSaveQueued || draftSaveTimer !== undefined) void flushDrafts();
+  });
 }
 
-function restoreDrafts() {
-  if (typeof localStorage === "undefined") return;
+/** Hydrates parked drafts from the single-record store. Runs after mount
+ *  (IndexedDB is async); it never clobbers a draft the user has already
+ *  started in this page. Blank drafts are not worth restoring; content
+ *  and attachment-only drafts are (audit 4 F05). */
+export async function hydrateDrafts(): Promise<void> {
   try {
-    const saved = JSON.parse(localStorage.getItem(DRAFTS_KEY) || "[]");
-    if (!Array.isArray(saved)) return;
-    const live = (saved as StoredDraft[])
-      .filter((d) => d && typeof d.id === "string" && worthRestoring(d))
-      .map(({ hasAttachments: _marker, ...rest }) => rest as ComposeState);
-    if (live.length) {
+    const rows = await loadDrafts();
+    if (draftStack.value.length || !rows.length) return;
+    const live = rows
+      .filter((row) => worthRestoring(row))
+      .map(({ ns: _ns, seq: _seq, savedAt: _savedAt, ...rest }) => rest as ComposeState);
+    if (live.length && !draftStack.value.length) {
       draftStack.value = live;
       draftIndex.value = 0;
       // Window stays closed: a reload should not slap a modal in your face.
       // The Compose button's count is the reminder.
     }
-  } catch { /* corrupt or absent — start clean */ }
+  } catch {
+    // Unreadable drafts stay parked on disk; the ring starts empty rather
+    // than half-restored, and the unsaved marker warns nothing persisted.
+    draftsUnsaved.value = true;
+  }
 }
 
 /** The window. Closing it parks the drafts — they are only gone when sent
