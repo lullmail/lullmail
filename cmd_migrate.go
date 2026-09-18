@@ -30,10 +30,8 @@ func migrate() error {
 	if err := db.PingContext(ctx); err != nil {
 		return err
 	}
-	for _, stmt := range splitStatements(schemaSQL) {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("%w\nstatement: %.80s", err, stmt)
-		}
+	if err := applyProductSchema(ctx, db); err != nil {
+		return err
 	}
 	store, err := mail.Open(ctx, url)
 	if err != nil {
@@ -44,6 +42,28 @@ func migrate() error {
 		return err
 	}
 	return migrateAccountScopedState(ctx, db)
+}
+
+// applyProductSchema converges the product schema. Every statement is
+// idempotent, and the whole file now applies inside ONE transaction: a
+// half-applied migration is the recorded lockout risk for additive column
+// pairs (auth_totp.last_used_step, the auth_epochs), because a table left
+// without its column turns every insert or lookup on it into an error
+// until the next boot converges. All-or-nothing closes that window
+// (audit AUTH-05 remainder); the server still only serves after the
+// migration succeeds, so a failed application degrades exactly as before.
+func applyProductSchema(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, stmt := range splitStatements(schemaSQL) {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("%w\nstatement: %.80s", err, stmt)
+		}
+	}
+	return tx.Commit()
 }
 
 func splitStatements(s string) []string {

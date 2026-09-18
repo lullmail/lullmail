@@ -64,12 +64,10 @@ func connectApp(cfg *Config) *App {
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
-	for _, stmt := range splitStatements(schemaSQL) {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			db.Close()
-			log.Printf("app: product migration failed — API disabled: %v", err)
-			return nil
-		}
+	if err := applyProductSchema(ctx, db); err != nil {
+		db.Close()
+		log.Printf("app: product migration failed — API disabled: %v", err)
+		return nil
 	}
 
 	store, err := mail.Open(ctx, cfg.DatabaseURL)

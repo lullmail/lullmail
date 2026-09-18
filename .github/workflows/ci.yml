@@ -72,7 +72,9 @@ jobs:
         env:
           NEUTRON_MAIL_TEST_DATABASE_URL: postgres://test:test@localhost:5432/mailtest?sslmode=disable
         run: go test -race -count=1 ./...
-      - name: Product race checks
+      - name: Product integration and race checks
+        env:
+          LULL_TEST_DATABASE_URL: postgres://test:test@localhost:5432/mailtest?sslmode=disable
         run: go test -race -count=1 ./...
       - name: MCP race checks
         working-directory: mcp

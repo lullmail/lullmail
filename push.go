@@ -13,6 +13,23 @@ import (
 	webpush "github.com/SherClockHolmes/webpush-go"
 )
 
+// pushCandidateSQL selects the message a notification should announce.
+// Kept as a named package-level constant so the real-database integration
+// suite executes the production statement itself (mail_messages keys are
+// id, not message_id — exactly the class of mistake a mock cannot catch).
+const pushCandidateSQL = `
+SELECT m.account_id,m.id,m.thread_id FROM hey_messages h
+JOIN mail_messages m ON m.account_id=h.account_id AND m.id=h.message_id
+JOIN email_accounts ea ON ea.mirror_account_id=m.account_id AND ea.user_id=h.user_id
+WHERE h.user_id=$1 AND h.bucket='imbox' AND h.read_at IS NULL
+  AND EXISTS (SELECT 1 FROM push_subscriptions s WHERE s.user_id=h.user_id
+    AND NOT EXISTS (SELECT 1 FROM push_deliveries p
+      WHERE p.user_id=h.user_id AND p.account_id=m.account_id
+        AND p.message_id=m.id
+        AND (p.subscription_hash='' OR p.subscription_hash=s.endpoint_hash)
+        AND (p.delivered_at IS NOT NULL OR p.claimed_at > now() - interval '10 minutes')))
+ORDER BY m.received_at DESC NULLS LAST LIMIT 1`
+
 func endpointHash(endpoint string) string {
 	sum := sha256.Sum256([]byte(endpoint))
 	return hex.EncodeToString(sum[:])
@@ -123,22 +140,6 @@ func (a *App) sendPushForUser(ctx context.Context, uid string) {
 	// (subscription_hash '') covered "some device was notified" and keep
 	// covering every subscription; a delivered receipt on one device does
 	// not stop a retry for a device that failed.
-	//
-	// Kept as a named constant so a real-database integration test can
-	// execute the production statement (mail_messages keys are id, not
-	// message_id).
-	const pushCandidateSQL = `
-	SELECT m.account_id,m.id,m.thread_id FROM hey_messages h
-	JOIN mail_messages m ON m.account_id=h.account_id AND m.id=h.message_id
-	JOIN email_accounts ea ON ea.mirror_account_id=m.account_id AND ea.user_id=h.user_id
-	WHERE h.user_id=$1 AND h.bucket='imbox' AND h.read_at IS NULL
-	  AND EXISTS (SELECT 1 FROM push_subscriptions s WHERE s.user_id=h.user_id
-	    AND NOT EXISTS (SELECT 1 FROM push_deliveries p
-	      WHERE p.user_id=h.user_id AND p.account_id=m.account_id
-	        AND p.message_id=m.id
-	        AND (p.subscription_hash='' OR p.subscription_hash=s.endpoint_hash)
-	        AND (p.delivered_at IS NOT NULL OR p.claimed_at > now() - interval '10 minutes')))
-	ORDER BY m.received_at DESC NULLS LAST LIMIT 1`
 	var accountID, messageID, threadID string
 	err = a.db.QueryRowContext(ctx, pushCandidateSQL, uid).Scan(&accountID, &messageID, &threadID)
 	if err != nil {
