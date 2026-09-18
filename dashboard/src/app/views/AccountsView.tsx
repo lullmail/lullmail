@@ -1,12 +1,34 @@
 import { useEffect, useState } from "preact/hooks";
-import { api, download } from "../lib/api";
+import { api, clearMemoryCache, download } from "../lib/api";
 import { useLoad } from "../lib/useLoad";
-import { setList, showError, showToast } from "../lib/store";
+import { closeReader, setList, showError, showToast } from "../lib/store";
+import { clearResponseCache } from "../lib/offline";
 import { refreshAccounts, refreshCounts } from "../lib/actions";
 import type { Account } from "../lib/types";
 import { countOf, fmtDate } from "../lib/fmt";
 import { Empty, ListSkeleton, PageHead, SettingsTabs } from "../ui/bits";
 import { installApp, installKind } from "../lib/pwa";
+
+/** After the server has confirmed a destructive mailbox operation, this
+ *  device's persistent copies of that mail must go too: the server's
+ *  deletion transaction says nothing about the browser's IndexedDB
+ *  snapshots, which otherwise keep serving removed private mail offline
+ *  (audit 4 F12). The conservative whole-cache clear is the immediate
+ *  mitigation; per-mailbox records with generation fencing remain the
+ *  registered offline-v2 item (WEB-01/WEB-07). The mutation queue is left
+ *  alone — it holds the user's own pending work, not mail content.
+ *  Returns an error message when device cleanup failed (the server side
+ *  already succeeded and must not be retried as if it had not). */
+async function purgeDeviceMailSnapshots(): Promise<string | null> {
+  closeReader();
+  clearMemoryCache();
+  try {
+    await clearResponseCache();
+    return null;
+  } catch {
+    return "removed on the server, but this device's cached copies could not be cleared — reload before going offline";
+  }
+}
 
 function AccountCard({ account, onChange }: { account: Account; onChange: () => void }) {
   const [busy, setBusy] = useState<"sync" | "export" | "delete" | null>(null);
@@ -61,7 +83,12 @@ function AccountCard({ account, onChange }: { account: Account; onChange: () => 
     setBusy("delete");
     try {
       await api("/accounts/" + encodeURIComponent(account.id), { method: "DELETE" });
-      showToast(account.address + " disconnected");
+      const cleanupProblem = await purgeDeviceMailSnapshots();
+      if (cleanupProblem) {
+        showError(account.address + " " + cleanupProblem);
+      } else {
+        showToast(account.address + " disconnected");
+      }
       onChange();
       refreshCounts();
     } catch (e) {
@@ -76,7 +103,18 @@ function AccountCard({ account, onChange }: { account: Account; onChange: () => 
     setBusy("sync");
     try {
       await api("/accounts/" + encodeURIComponent(account.id) + "?op=retention", { body: { days } });
-      showToast(days ? "Local mail older than " + days + " days removed" : "Local mail kept until you delete it");
+      if (days > 0) {
+        // Retention removed local mail server-side; this device's cached
+        // copies of it must not outlive the policy (audit 4 F12).
+        const cleanupProblem = await purgeDeviceMailSnapshots();
+        if (cleanupProblem) {
+          showError("Local mail " + cleanupProblem);
+        } else {
+          showToast("Local mail older than " + days + " days removed");
+        }
+      } else {
+        showToast("Local mail kept until you delete it");
+      }
       onChange(); refreshCounts();
     } catch (e) { showError(e instanceof Error ? e.message : "Could not change retention"); }
     finally { setBusy(null); }
@@ -202,7 +240,11 @@ function ConnectForm({ onDone }: { onDone: () => void }) {
     const data = new FormData(form);
     const body: Record<string, unknown> = {};
     data.forEach((v, k) => {
-      const s = String(v).trim();
+      // Secrets keep their exact bytes: a password with meaningful
+      // leading/trailing spaces is not the value trim() would submit
+      // (audit 4 F18). Everything else is still normalized.
+      const raw = String(v);
+      const s = k === "password" ? raw : raw.trim();
       if (!s || s === "default") return;
       body[k] = ["port", "smtp_port", "backfill_days"].includes(k) ? parseInt(s, 10) : s;
     });
