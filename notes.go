@@ -57,7 +57,7 @@ func (a *App) handleNoteCreate(w http.ResponseWriter, r *http.Request) {
 		Text  string  `json:"text"`
 		Color int     `json:"color"`
 	}
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
@@ -92,7 +92,7 @@ func (a *App) handleNoteUpdate(w http.ResponseWriter, r *http.Request) {
 		Text  *string  `json:"text"`
 		Color *int     `json:"color"`
 	}
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}

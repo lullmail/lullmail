@@ -17,8 +17,36 @@ import (
 	"time"
 )
 
-func decodeJSON(r *http.Request, v any) error {
+// decodeJSON reads exactly one bounded JSON document (audit OPS-01): the
+// cap applies before decoding begins, so an oversized body is refused as
+// an error from the reader instead of allocating toward it. The default
+// covers every small product mutation; callers with larger legitimate
+// bodies use decodeJSONLimit explicitly.
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
+	return decodeJSONLimit(w, r, v, 64<<10)
+}
+
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, v any, limit int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	return json.NewDecoder(r.Body).Decode(v)
+}
+
+// isBodyTooLarge classifies a bounded decode's failure for the caller's
+// problem response.
+func isBodyTooLarge(err error) bool {
+	var maxErr *http.MaxBytesError
+	return errors.As(err, &maxErr)
+}
+
+// writeDecodeProblem answers a bounded decode failure with the right
+// status: 413 for an oversized body, 400 for malformed JSON.
+func writeDecodeProblem(w http.ResponseWriter, err error) {
+	if isBodyTooLarge(err) {
+		writeProblem(w, http.StatusRequestEntityTooLarge, "Request Too Large",
+			"the request body exceeds this route's limit")
+		return
+	}
+	writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
 }
 
 // sweepSnoozed returns dated snoozes whose day has arrived (TASKS 1.4). A
@@ -272,7 +300,7 @@ func (a *App) handleBoardPin(w http.ResponseWriter, r *http.Request) {
 		Account  string `json:"account"`
 		ThreadID string `json:"thread_id"`
 	}
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
@@ -333,7 +361,7 @@ func (a *App) handleBoardCard(w http.ResponseWriter, r *http.Request) {
 		Title string `json:"title"`
 		Note  string `json:"note"`
 	}
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
@@ -363,7 +391,7 @@ func (a *App) handleBoardCardDone(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Done bool `json:"done"`
 	}
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
@@ -392,7 +420,7 @@ func (a *App) handleBoardUnpin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		CardID string `json:"card_id"`
 	}
-	if err := decodeJSON(r, &req); err != nil || req.CardID == "" {
+	if err := decodeJSON(w, r, &req); err != nil || req.CardID == "" {
 		writeProblem(w, http.StatusUnprocessableEntity, "Missing Card", "card_id is required")
 		return
 	}

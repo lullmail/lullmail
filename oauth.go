@@ -185,6 +185,12 @@ func (a *App) handleOAuthCallback(w http.ResponseWriter, r *http.Request, provid
 	http.Redirect(w, r, "/settings/accounts?connected="+url.QueryEscape(provider)+"&mailboxes="+fmt.Sprint(len(boxes)), http.StatusSeeOther)
 }
 
+// providerJSONLimit bounds every provider JSON response the product
+// decodes (audit OPS-01): identity and token payloads are small
+// documents, and an unbounded decode lets a hostile or broken provider
+// endpoint balloon server memory before validation runs.
+const providerJSONLimit = 4 << 20
+
 func oauthIdentity(ctx context.Context, provider string, client *http.Client) (string, string, error) {
 	endpoint := "https://openidconnect.googleapis.com/v1/userinfo"
 	if provider == "graph" {
@@ -207,7 +213,7 @@ func oauthIdentity(ctx context.Context, provider string, client *http.Client) (s
 		Name              string `json:"name"`
 		DisplayName       string `json:"displayName"`
 	}
-	if err := json.NewDecoder(res.Body).Decode(&data); err != nil {
+	if err := json.NewDecoder(io.LimitReader(res.Body, providerJSONLimit)).Decode(&data); err != nil {
 		return "", "", err
 	}
 	email := data.Email
@@ -435,7 +441,7 @@ func graphCall(ctx context.Context, cred mail.Credential, method, endpoint strin
 		return fmt.Errorf("graph %s %s status %d: %s", method, endpoint, res.StatusCode, strings.TrimSpace(string(data)))
 	}
 	if out != nil {
-		return json.NewDecoder(res.Body).Decode(out)
+		return json.NewDecoder(io.LimitReader(res.Body, providerJSONLimit)).Decode(out)
 	}
 	return nil
 }

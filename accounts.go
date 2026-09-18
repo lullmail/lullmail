@@ -107,8 +107,8 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 		Label        string `json:"label"`
 		BackfillDays *int   `json:"backfill_days"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
+	if err := decodeJSONLimit(w, r, &req, 64<<10); err != nil {
+		writeDecodeProblem(w, err)
 		return
 	}
 	if req.Provider == "" {
@@ -464,8 +464,8 @@ func (a *App) updateBackfill(w http.ResponseWriter, r *http.Request, id string) 
 	writeJSON(w, map[string]any{
 		"backfill_days": *req.Days,
 		"reconcile": (&reconcileJob{
-			PolicyVersion:    version,
-			State:            "pending",
+			PolicyVersion:   version,
+			State:           "pending",
 			FullEnumeration: false,
 		}).asJSON(),
 	})
@@ -539,8 +539,8 @@ func (a *App) updateRetention(w http.ResponseWriter, r *http.Request, id string)
 	writeJSON(w, map[string]any{
 		"retention_days": *req.Days,
 		"reconcile": (&reconcileJob{
-			PolicyVersion:    version,
-			State:            "pending",
+			PolicyVersion:   version,
+			State:           "pending",
 			FullEnumeration: full,
 		}).asJSON(),
 	})
@@ -548,7 +548,8 @@ func (a *App) updateRetention(w http.ResponseWriter, r *http.Request, id string)
 
 // Retention affects only the local encrypted/mirrored copy; it never issues a
 // delete operation to the mail provider. Zero means keep the mirror forever.
-func (a *App) applyRetention(ctx context.Context, uid string) error {	rows, err := a.db.QueryContext(ctx, `SELECT mirror_account_id,retention_days FROM email_accounts WHERE user_id=$1 AND retention_days>0`, uid)
+func (a *App) applyRetention(ctx context.Context, uid string) error {
+	rows, err := a.db.QueryContext(ctx, `SELECT mirror_account_id,retention_days FROM email_accounts WHERE user_id=$1 AND retention_days>0`, uid)
 	if err != nil {
 		return err
 	}

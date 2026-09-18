@@ -59,6 +59,45 @@ type exportManifest struct {
 	Note        string                `json:"note"`
 }
 
+// Export resource budgets (audit OPS-01): the archive build is bounded
+// in total bytes written to disk and per provider message read, so a
+// mailbox or a misbehaving provider cannot stream the deployment's disk
+// full through one export request.
+const (
+	// exportDiskBudget bounds one archive build on disk. A full mailbox
+	// export is typically far below this; over it the build aborts with a
+	// clean 5xx instead of filling the volume.
+	exportDiskBudget = 2 << 30 // 2 GiB
+	// exportRawMessageMax bounds one provider "original bytes" read; past
+	// it the read errors and the export falls back to the mirror render.
+	exportRawMessageMax = 128 << 20
+)
+
+// budgetedWriter fails the build once the archive passes its budget.
+type budgetedWriter struct {
+	w     io.Writer
+	total int64
+	max   int64
+}
+
+func (b *budgetedWriter) Write(p []byte) (int, error) {
+	b.total += int64(len(p))
+	if b.total > b.max {
+		return 0, fmt.Errorf("export exceeded its %d MiB disk budget", b.max>>20)
+	}
+	return b.w.Write(p)
+}
+
+// sweepStaleExportTemps removes archives a crashed build left behind:
+// the handler removes its own temp file on every return path, so
+// anything still matching the pattern at boot is garbage.
+func sweepStaleExportTemps() {
+	matches, _ := filepath.Glob(filepath.Join(os.TempDir(), "lullmail-export-*.zip"))
+	for _, name := range matches {
+		_ = os.Remove(name)
+	}
+}
+
 func (a *App) handleAccountExport(w http.ResponseWriter, r *http.Request) {
 	uid, err := a.userID(r.Context())
 	if err != nil {
@@ -117,7 +156,7 @@ func (a *App) handleAccountExport(w http.ResponseWriter, r *http.Request) {
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
 
-	zw := zip.NewWriter(tmp)
+	zw := zip.NewWriter(&budgetedWriter{w: tmp, max: exportDiskBudget})
 	manifest := exportManifest{
 		Version:     1,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
@@ -403,9 +442,17 @@ func readProviderRaw(ctx context.Context, adapter nmail.Adapter, id nmail.Messag
 		return nil, err
 	}
 	defer rc.Close()
-	raw, err := io.ReadAll(rc)
-	if err == nil && len(raw) == 0 {
-		err = fmt.Errorf("provider returned an empty message")
+	// Bounded before allocation (audit OPS-01): a provider stream past
+	// the per-message cap errors into the mirror fallback rather than
+	// buffering unbounded bytes for one message.
+	raw, err := io.ReadAll(io.LimitReader(rc, exportRawMessageMax+1))
+	if err == nil {
+		switch {
+		case len(raw) == 0:
+			err = fmt.Errorf("provider returned an empty message")
+		case len(raw) > exportRawMessageMax:
+			err = fmt.Errorf("provider message exceeds the %d MiB export read cap", exportRawMessageMax>>20)
+		}
 	}
 	return raw, err
 }

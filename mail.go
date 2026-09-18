@@ -159,6 +159,12 @@ func connectApp(cfg *Config) *App {
 // fixes itself on the next tick. The context is the server's shutdown
 // context, so both loops stop when the process drains.
 func (a *App) startBackground(ctx context.Context) {
+	// A crashed export build can leave its temp archive behind; the
+	// handler removes its own file on every return path, so anything
+	// matching the pattern before the server listens is garbage. Run
+	// synchronously ahead of ListenAndServe so the sweep can never race
+	// a live build from this process (audit OPS-01).
+	sweepStaleExportTemps()
 	go a.sched.Run(ctx)
 	go func() {
 		t := time.NewTicker(2 * time.Minute)

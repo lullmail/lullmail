@@ -11,8 +11,8 @@ import (
 	"fmt"
 	"io"
 	"mime"
-	netmail "net/mail"
 	"net/http"
+	netmail "net/mail"
 	"strconv"
 	"strings"
 	"time"
@@ -505,8 +505,8 @@ func (a *App) handleDecide(w http.ResponseWriter, r *http.Request) {
 		Allow  bool   `json:"allow"`
 		Route  string `json:"route"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeDecodeProblem(w, err)
 		return
 	}
 	req.Sender = strings.ToLower(strings.TrimSpace(req.Sender))
@@ -582,8 +582,8 @@ func (a *App) handleUndecide(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Sender string `json:"sender"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeDecodeProblem(w, err)
 		return
 	}
 	req.Sender = strings.ToLower(strings.TrimSpace(req.Sender))
@@ -1230,8 +1230,8 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 		Until     json.RawMessage `json:"until"`
 		UntilDays int             `json:"until_days"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeDecodeProblem(w, err)
 		return
 	}
 	uid, err := a.userID(r.Context())
@@ -1421,8 +1421,8 @@ func (a *App) handlePrefs(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ScreeningEnabled *bool `json:"screening_enabled"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeDecodeProblem(w, err)
 		return
 	}
 	if req.ScreeningEnabled == nil {

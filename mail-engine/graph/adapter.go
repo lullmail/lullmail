@@ -25,6 +25,12 @@ import (
 // service; production always talks to the real endpoint.
 var baseURL = "https://graph.microsoft.com/v1.0"
 
+// providerJSONLimit bounds every provider JSON response this adapter
+// decodes: fetch responses carry envelopes and bodies, so the cap sits
+// far above any legitimate page while still refusing an unbounded
+// stream (audit OPS-01).
+const providerJSONLimit = 64 << 20
+
 // Adapter is a Graph client bound to one mailbox.
 type Adapter struct {
 	http *http.Client
@@ -106,7 +112,7 @@ func (a *Adapter) get(ctx context.Context, endpoint string, out any) error {
 	if out == nil {
 		return nil
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, providerJSONLimit)).Decode(out); err != nil {
 		return fmt.Errorf("graph: decode: %w", err)
 	}
 	return nil
@@ -144,10 +150,10 @@ func statusError(resp *http.Response) error {
 // display names are localised and cannot identify roles.
 func (a *Adapter) Mailboxes(ctx context.Context) ([]mail.Mailbox, error) {
 	type folder struct {
-		ID              string `json:"id"`
-		DisplayName     string `json:"displayName"`
-		ParentFolderID  string `json:"parentFolderId"`
-		ChildFolderCount int  `json:"childFolderCount"`
+		ID               string `json:"id"`
+		DisplayName      string `json:"displayName"`
+		ParentFolderID   string `json:"parentFolderId"`
+		ChildFolderCount int    `json:"childFolderCount"`
 	}
 	roles, err := a.wellKnownRoles(ctx)
 	if err != nil {
@@ -167,8 +173,8 @@ func (a *Adapter) Mailboxes(ctx context.Context) ([]mail.Mailbox, error) {
 				return nil, fmt.Errorf("graph: mail folder pagination exceeded 100 pages")
 			}
 			var out struct {
-				Value   []folder `json:"value"`
-				NextLink string  `json:"@odata.nextLink"`
+				Value    []folder `json:"value"`
+				NextLink string   `json:"@odata.nextLink"`
 			}
 			if err := a.get(ctx, endpoint, &out); err != nil {
 				// A partial traversal must never look authoritative: the
@@ -204,12 +210,12 @@ func (a *Adapter) Mailboxes(ctx context.Context) ([]mail.Mailbox, error) {
 // transport failure.
 func (a *Adapter) wellKnownRoles(ctx context.Context) (map[string]mail.Role, error) {
 	aliases := map[string]mail.Role{
-		"inbox":         mail.RoleInbox,
-		"sentitems":     mail.RoleSent,
-		"drafts":        mail.RoleDrafts,
-		"deleteditems":  mail.RoleTrash,
-		"junkemail":     mail.RoleJunk,
-		"archive":       mail.RoleArchive,
+		"inbox":        mail.RoleInbox,
+		"sentitems":    mail.RoleSent,
+		"drafts":       mail.RoleDrafts,
+		"deleteditems": mail.RoleTrash,
+		"junkemail":    mail.RoleJunk,
+		"archive":      mail.RoleArchive,
 	}
 	out := make(map[string]mail.Role, len(aliases))
 	for alias, role := range aliases {
@@ -419,7 +425,7 @@ func (a *Adapter) Body(ctx context.Context, id mail.MessageID) (*mail.Body, erro
 			return nil, fmt.Errorf("graph: attachment pagination exceeded 100 pages")
 		}
 		var atts struct {
-			Value    []struct {
+			Value []struct {
 				ID          string `json:"id"`
 				Name        string `json:"name"`
 				ContentType string `json:"contentType"`

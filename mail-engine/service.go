@@ -39,6 +39,12 @@ func NewService(store Store, eng *Engine) *Service {
 	return &Service{store: store, eng: eng}
 }
 
+// sendBodyLimit bounds request bodies on the engine's raw API surface
+// (audit OPS-01). Sends carry attachments, so this matches the product
+// send route's wire cap; the engine surface is read-only behind the
+// product's mount, but the handler stays bounded on its own merits.
+const sendBodyLimit = 34 << 20
+
 // Handler returns the routed HTTP handler.
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -75,7 +81,7 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 		HTML             string    `json:"html,omitempty"`
 		ReplyToMessageID MessageID `json:"reply_to_message_id,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, sendBodyLimit)).Decode(&req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Malformed Request", err.Error())
 		return
 	}
@@ -311,7 +317,7 @@ func (s *Service) operation(w http.ResponseWriter, r *http.Request) {
 		Keyword string      `json:"keyword,omitempty"`
 		Target  MailboxID   `json:"target,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, sendBodyLimit)).Decode(&req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Malformed Request", err.Error())
 		return
 	}

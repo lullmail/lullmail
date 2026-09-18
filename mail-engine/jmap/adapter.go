@@ -26,6 +26,14 @@ const (
 	capMail = "urn:ietf:params:jmap:mail"
 )
 
+// Provider JSON decode caps (audit OPS-01): a session document is small;
+// method responses carry envelopes and bodies, so their cap sits far
+// above any legitimate page while refusing an unbounded stream.
+const (
+	sessionJSONLimit  = 4 << 20
+	responseJSONLimit = 64 << 20
+)
+
 // Adapter is a JMAP client bound to one account.
 type Adapter struct {
 	http        *http.Client
@@ -81,7 +89,7 @@ func Dial(ctx context.Context, cfg Config) (*Adapter, error) {
 	}
 
 	var s session
-	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, sessionJSONLimit)).Decode(&s); err != nil {
 		return nil, fmt.Errorf("jmap: decode session: %w", err)
 	}
 	acct := s.PrimaryAccounts[capMail]
@@ -157,7 +165,7 @@ func (a *Adapter) call(ctx context.Context, calls ...[3]any) ([]json.RawMessage,
 	var out struct {
 		MethodResponses [][3]json.RawMessage `json:"methodResponses"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, responseJSONLimit)).Decode(&out); err != nil {
 		return nil, fmt.Errorf("jmap: decode response: %w", err)
 	}
 

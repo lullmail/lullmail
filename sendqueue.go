@@ -55,9 +55,9 @@ type sendBudget struct {
 }
 
 const (
-	sendMaxJobs         = 8
-	sendMaxBytes int64  = 128 << 20
-	sendOverhead int64  = 1 << 10
+	sendMaxJobs        = 8
+	sendMaxBytes int64 = 128 << 20
+	sendOverhead int64 = 1 << 10
 )
 
 var errSendCapacity = errors.New("send capacity exhausted")
@@ -108,6 +108,24 @@ func outgoingWeight(out *mail.Outgoing) int64 {
 
 type deliverFunc func(context.Context, *mail.Outgoing) error
 
+// decodeSem bounds how many large request bodies decode at once (audit
+// OPS-01): the slot is acquired BEFORE the JSON reader allocates, so a
+// burst of multi-megabyte sends queues at admission instead of
+// multiplying in-flight allocations. 2 slots at the 34 MiB send cap
+// bound peak decode memory to ~68 MiB.
+var decodeSem = make(chan struct{}, 2)
+
+// acquireDecodeSlot waits for a decode slot with the request's context;
+// a request that gives up waiting answers 503, not a timeout pile-up.
+func acquireDecodeSlot(ctx context.Context) (func(), bool) {
+	select {
+	case decodeSem <- struct{}{}:
+		return func() { <-decodeSem }, true
+	case <-ctx.Done():
+		return nil, false
+	}
+}
+
 func newSendQueue() *sendQueue {
 	return &sendQueue{sends: map[string]*pendingSend{}}
 }
@@ -129,7 +147,16 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 	// them at their wire size: base64 grows the decoded bytes by 4/3, so
 	// the advertised 25 MiB total alone arrives as ~33.4 MiB of payload.
 	// 34 MiB covers that plus the envelope; past it the request is refused
-	// as too large, not reported as malformed JSON.
+	// as too large, not reported as malformed JSON. The decode slot is
+	// taken BEFORE the reader allocates (audit OPS-01): concurrent fat
+	// sends wait at admission rather than decoding in parallel.
+	releaseDecode, ok := acquireDecodeSlot(r.Context())
+	if !ok {
+		writeProblem(w, http.StatusServiceUnavailable, "Busy",
+			"too many large requests are decoding — retry shortly")
+		return
+	}
+	defer releaseDecode()
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 34<<20)).Decode(&req); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
