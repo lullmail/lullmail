@@ -1967,3 +1967,10 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
   border-bottom: 1px solid transparent;
 }
 .day-link:hover { color: var(--ink); border-bottom-color: var(--line-strong); }
+
+/* Load-more tail on paged lists (audit DATA-06). */
+.load-more {
+  display: flex;
+  justify-content: center;
+  padding: 20px 0 32px;
+}
