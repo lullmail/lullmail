@@ -26,11 +26,19 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   deferrals and SEND-03, none reopened. No finding was assessed as a
   false positive; the Gmail endpoint/allowlist mismatch (F01), the pool
   hold-and-wait (F08), and the offline replay reordering (F09) each
-  reproduced exactly as reported. F06's server-computed reply defaults
+  reproduced exactly as reported.   F06's server-computed reply defaults
   cover the owner's connected addresses; verified-alias configuration for
   addresses not recorded locally remains future product polish.
+- Remainder pass (2026-09-18): the two round-3 register remainders that were
+  gated on real-PostgreSQL test infrastructure landed. OPS-07's product-side
+  harness (`556e272`) supplies `LULL_TEST_DATABASE_URL`, executes the real
+  push candidate SQL, and is wired into the CI postgres job. AUTH-05's
+  remainder / AUTH-01's auth-epoch pair (`4fbd4f6`) closed the
+  verify-then-mint interleaving through that harness's race runs; that
+  entry leaves this register. SYNC-03/04 keep their deferrals but no longer
+  wait on the harness precondition.
 
-Open items: 28 (all deferrals; 9 of them are remainders of partial fixes)
+Open items: 27 (all deferrals; 8 of them are remainders of partial fixes)
 
 Standing decision: **SEND-01 = SEND-03 (pass 6) = lullmail-10 below.** The
 durable-outbox finding appears in both later reports; it is the same item
@@ -64,14 +72,6 @@ as this register's one recorded product deferral, and the deferral stands.
 - Proposed fix: Add persistent outbox states and a delivery-result event or status endpoint. Retain/recover draft content until an outcome is known; distinguish accepted, submitting, submitted, failed and ambiguous. Define retry/idempotency behavior rather than blindly retrying sends.
 - Deferral: sendqueue.go's design comment is the recorded decision this item argues against — "Five seconds is the whole feature — no queue table, no worker, just a timer map" (SPEC §6.1; the in-process undo window IS the shipped feature). A durable outbox with delivery states, a status endpoint, and retry/idempotency semantics is a product redesign of that surface, not a defect repair; reopening it is a product call, not an audit action. Pass-7 SEND-01 restates it with a full outbox_jobs design; same item, deferral stands. SEND-04 (durable Sent-copy filing state, pass 7) is a requirement on the same replacement and is deferred with it — today a failed Sent-file is logged (never silently dropped) and the delivered message is never re-sent. Partial hardening landed in pass 7: the queue now has an aggregate admission budget and delivery holds an account-use lease, so the volatile window is bounded and fenced (commits tagged `audit 3-SEND-02`, `audit 3-SEND-03`).
 - Review commit: `49d159b6654d3dbd27866f87ac783402f19c6cb7` (last reviewed 2026-09-10)
-
-## AUTH-05 (remainder) / AUTH-01 (pass 7) - High - DEFERRED (contained fix landed, epoch design deferred)
-
-**Login can still mint a session from a credential verified before a concurrent credential change committed**
-
-- Kind: Concurrency gap (remainder)
-- Evidence: The contained half of pass-6 AUTH-05 landed (revocation now runs inside the credential-change transaction, errors propagate, TOTP removal revokes, logout reports failed revocation). The remaining gap both reports prove is the check/commit interleaving: a login that verifies an old credential, pauses, and inserts its session after the credential-change path deleted sessions leaves a usable stale session. Pass-7 AUTH-01 adds that the TOTP path reads the secret before its step-claim lock, and that passkey login separates verification from session creation the same way.
-- Deferral: An auth-epoch column pair plus a changed session-lookup join is a schema and auth-pipeline change that every session read depends on; it needs its own migration window and race regression tests against real PostgreSQL, not a bolt-on inside an audit sweep. Risk accepted for now: the window requires an in-flight login during the exact change instant, single-operator deployments, and the in-transaction revocation already removes everything not mid-flight.
 
 ## AUTH-06 (pass 6) / AUTH-02 (pass 7) - Medium - DEFERRED (hardening)
 
@@ -224,12 +224,13 @@ as this register's one recorded product deferral, and the deferral stands.
 - Evidence: Confirmed per both reports (deployment hardening, not an unauthenticated-login finding): compose publishes 8080 on all interfaces, HTTP origins away from loopback are accepted, origin detection trusts forwarded headers without a proxy-peer check.
 - Deferral: Binding the compose default to loopback silently breaks every existing deployment whose ingress dials the published port, and enforcing HTTPS-only origins plus trusted-proxy forwarded parsing needs the same deployment-policy decision as pass-6 AUTH-01. The dashboard already surfaces a public-exposure warning; the enforcement change belongs to a release-noted deployment-policy update, not a sweep.
 
-## OPS-07 (remainder) - Medium - DEFERRED (CI job landed, product harness deferred)
+## OPS-07 (remainder) - Medium - PARTIALLY FIXED (product harness landed), per-suite isolation and migration-upgrade tests DEFERRED
 
 **CI lacks real SQL integration coverage**
 
 - Evidence: Confirmed — engine integration tests skip without `NEUTRON_MAIL_TEST_DATABASE_URL`. FIXED in pass 7: CI now runs a disposable postgres:17 service job that executes the engine store integration suite and race runs for all three Go modules (commit tagged `audit 3-OPS-07`); the normal green build no longer excludes every database test.
-- Deferral (remainder): Isolated per-suite databases for potentially destructive suites, a `LULL_TEST_DATABASE_URL` product-side integration harness executing the real push candidate SQL, and migration-upgrade tests remain CI infrastructure work; they are the precondition for regression-testing several deferrals above (AUTH-01, SYNC-03/04), so they should land with them.
+- Fixed (remainder pass, 2026-09-18, `556e272`): `LULL_TEST_DATABASE_URL` gates a product-side integration suite with the same skip-offline contract as the engine's — it resets only product-owned tables, re-runs the real schema migration entry point inside one transaction, and executes the production push candidate SQL (hoisted to `pushCandidateSQL` so the suite runs the shipped statement, not a copy) plus the auth-epoch schema/lookup sync checks. The CI postgres job runs it with `-race` alongside the engine and MCP modules; the harness was verified end-to-end against a live local PostgreSQL (disposable database, created and dropped for the run).
+- Deferral (remainder): Isolated per-suite databases for potentially destructive suites and migration-upgrade tests remain CI infrastructure work. The harness precondition this register recorded is now met — AUTH-01's race regression tests landed through it (`4fbd4f6`) — so only SYNC-03/04 still await it.
 
 ## OPS-09 (pass 6) / OPS-09+PROVIDER-03-remainder (pass 7) - Medium/Low - DEFERRED
 
