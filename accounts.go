@@ -617,7 +617,9 @@ func (a *App) triggerSync(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 // syncAccount dials with the stored credential and runs one full sync,
-// recording outcome on the account row.
+// recording outcome on the account row. The returned error covers BOTH the
+// provider fetch and product finalization: a wait=1 caller must not be told
+// "synced" when reconciliation failed (audit 4 F16).
 func (a *App) syncAccount(ctx context.Context, acct mail.AccountID) error {
 	releaseUse, ok := a.beginAccountUse(acct)
 	if !ok {
@@ -626,22 +628,19 @@ func (a *App) syncAccount(ctx context.Context, acct mail.AccountID) error {
 	defer releaseUse()
 	cred, err := a.Token(ctx, acct)
 	if err != nil {
-		a.finishSync(ctx, acct, nil, err)
-		return err
+		return a.finishSync(ctx, acct, nil, err)
 	}
 	resolve := newResolver()
 	adapter, release, err := resolve(ctx, acct, cred)
 	if err != nil {
-		a.finishSync(ctx, acct, nil, err)
-		return err
+		return a.finishSync(ctx, acct, nil, err)
 	}
 	defer release()
 	reports, err := a.eng.SyncAccount(ctx, acct, adapter)
-	a.finishSync(ctx, acct, reports, err)
-	return err
+	return a.finishSync(ctx, acct, reports, err)
 }
 
-func (a *App) finishSync(ctx context.Context, acct mail.AccountID, reports []mail.SyncReport, syncErr error) {
+func (a *App) finishSync(ctx context.Context, acct mail.AccountID, reports []mail.SyncReport, syncErr error) error {
 	// A wait=1 browser request may vanish mid-sync; the outcome still has to
 	// land durably, so finish on a detached context rather than not at all —
 	// but a BOUNDED one, so finalization cannot outlive shutdown forever.
@@ -661,14 +660,14 @@ func (a *App) finishSync(ctx context.Context, acct mail.AccountID, reports []mai
 			`UPDATE email_accounts SET last_error=$1 WHERE mirror_account_id=$2 RETURNING id,user_id`,
 			syncErr.Error(), string(acct)).Scan(&accountID, &uid); err != nil {
 			a.log.Error("record sync error failed", "account", acct, "err", err)
-			return
+			return errors.Join(syncErr, fmt.Errorf("record sync error: %w", err))
 		}
 		// Durable first, hint second: a browser reloading on this event must
 		// see last_error already set.
 		ev.AccountID = accountID
 		ev.Error = syncErr.Error()
 		a.events.publish(uid, ev)
-		return
+		return syncErr
 	}
 	var accountID, uid string
 	// The provider sync succeeded, but the local view is not usable until
@@ -680,7 +679,7 @@ func (a *App) finishSync(ctx context.Context, acct mail.AccountID, reports []mai
 		`UPDATE email_accounts SET last_sync_at=now() WHERE mirror_account_id=$1 RETURNING id,user_id`,
 		string(acct)).Scan(&accountID, &uid); err != nil {
 		a.log.Error("record sync success failed", "account", acct, "err", err)
-		return
+		return fmt.Errorf("record provider sync: %w", err)
 	}
 	var reconErrs []error
 	if err := a.cleanupMirrorOrphans(ctx, uid, acct); err != nil {
@@ -707,15 +706,17 @@ func (a *App) finishSync(ctx context.Context, acct mail.AccountID, reports []mai
 			`UPDATE email_accounts SET last_error=$1 WHERE mirror_account_id=$2`,
 			"reconcile failed after sync: "+reconErr.Error(), string(acct)); err != nil {
 			a.log.Error("record reconcile error failed", "account", acct, "err", err)
+			return errors.Join(reconErr, fmt.Errorf("record final status: %w", err))
 		}
 		ev.AccountID = accountID
 		ev.Error = "reconcile failed after sync"
 		a.events.publish(uid, ev)
-		return
+		return reconErr
 	}
 	if _, err := a.db.ExecContext(ctx,
 		`UPDATE email_accounts SET last_error=NULL WHERE mirror_account_id=$1`, string(acct)); err != nil {
 		a.log.Error("clear sync error failed", "account", acct, "err", err)
+		return fmt.Errorf("clear sync error: %w", err)
 	}
 	// Publish only after classification completes, so a reloading browser
 	// never lands between envelope insertion and bucket insertion.
@@ -723,6 +724,7 @@ func (a *App) finishSync(ctx context.Context, acct mail.AccountID, reports []mai
 		a.sendPushForUser(ctx, uid)
 		a.events.publish(uid, syncEvent{Type: "sync-finished", AccountID: accountID, Changed: true})
 	}
+	return nil
 }
 
 func (a *App) cleanupMirrorOrphans(ctx context.Context, uid string, acct mail.AccountID) error {

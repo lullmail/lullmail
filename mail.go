@@ -130,7 +130,12 @@ func connectApp(cfg *Config) *App {
 	app.sched.Resolve = app.accountResolver()
 	app.sched.Interval = time.Minute
 	app.sched.AfterSync = func(ctx context.Context, account mail.Account, reports []mail.SyncReport, err error) {
-		app.finishSync(ctx, account.ID, reports, err)
+		// finishSync now returns the finalization outcome; a scheduled
+		// reconciliation failure must be visible in the log, not silently
+		// recorded on the account row (audit 4 F16).
+		if finishErr := app.finishSync(ctx, account.ID, reports, err); finishErr != nil {
+			app.log.Error("sync finalization failed", "account", account.ID, "err", finishErr)
+		}
 	}
 	// email_accounts.sync_enabled is the product-level pause switch; the
 	// engine only knows the mirror, so the decision is supplied from here.
