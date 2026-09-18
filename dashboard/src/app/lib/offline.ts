@@ -84,19 +84,35 @@ function transaction<T>(store: string, mode: IDBTransactionMode, run: (s: IDBObj
 
 export function offlineOwner(): string { return localStorage.getItem(OWNER) || ""; }
 
+/** Fail-closed suspension (audit 4 F11): when preparing an owner's storage
+ *  failed — most dangerously a wipe that did not commit during an owner
+ *  change — the old localStorage marker is not authority to keep reading and
+ *  writing that namespace. Every cache read, cache write, queue write and
+ *  replay no-ops (or fails visibly) until a later successful prepare clears
+ *  the flag. The durable generation-fenced design remains the registered
+ *  offline-v2 item (WEB-01/WEB-07). */
+let storageSuspended = false;
+
+export function suspendOfflineStorage(): void { storageSuspended = true; }
+
+export function offlineStorageSuspended(): boolean { return storageSuspended; }
+
 export async function prepareOfflineOwner(owner: string): Promise<void> {
   if (!owner) return;
   const previous = offlineOwner();
   if (previous && previous !== owner) await clearOfflineData();
   localStorage.setItem(OWNER, owner);
+  storageSuspended = false;
 }
 
 export async function cacheResponse(path: string, value: unknown): Promise<void> {
+  if (storageSuspended) return;
   const owner = offlineOwner(); if (!owner || typeof indexedDB === "undefined") return;
   await transaction(CACHE, "readwrite", (store) => store.put({ key: owner + "\n" + path, owner, savedAt: Date.now(), value } as Cached));
 }
 
 export async function cachedResponse<T>(path: string): Promise<T | undefined> {
+  if (storageSuspended) return undefined;
   const owner = offlineOwner(); if (!owner || typeof indexedDB === "undefined") return undefined;
   const item = await transaction<Cached | undefined>(CACHE, "readonly", (store) => store.get(owner + "\n" + path));
   return item?.value as T | undefined;
@@ -113,6 +129,10 @@ export function canQueue(path: string, method: string): boolean {
 }
 
 export async function queueMutation(path: string, method: string, body?: unknown): Promise<void> {
+  if (storageSuspended) {
+    // Failing visibly beats pretending the mutation was saved (audit 4 F11).
+    throw new OfflineStorageError("Offline storage is suspended on this device — the change was NOT saved for replay");
+  }
   const owner = offlineOwner(); if (!owner) throw new Error("Offline owner is not initialised");
   const id = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Date.now() + "-" + Math.random();
   await transaction(QUEUE, "readwrite", (store) => store.put({ id, owner, path, method, body, queuedAt: Date.now() } as Queued));
@@ -154,28 +174,45 @@ export interface ReplaySummary {
   /** Actions the server permanently rejected (audit 3 WEB-04). */
   rejected: number;
   /** Epoch ms when a retryable failure may resume; set while online so a
-   * transient outage does not strand the queue until the next navigation
-   * (audit 3 WEB-05). */
+   *  transient outage does not strand the queue until the next navigation
+   *  (audit 3 WEB-05). */
   retryAt?: number;
 }
 
+/** The replay order: oldest first, and a backed-off head STOPS the pass —
+ *  nothing behind it runs early. Letting newer mutations overtake an older
+ *  backed-off one applied sequential edits in the wrong order and let the
+ *  older write clobber the newer result (audit 4 F09). The resume time is
+ *  exactly the head's deadline, because nothing may run before it anyway. */
+export function replayPlan<T extends { owner: string; queuedAt: number; nextAttemptAt?: number; failed?: string }>(
+  items: T[],
+  owner: string,
+  now: number,
+): { due: T[]; retryAt?: number } {
+  const due: T[] = [];
+  let retryAt: number | undefined;
+  for (const item of [...items]
+    .filter((entry) => entry.owner === owner && !entry.failed)
+    .sort((a, b) => a.queuedAt - b.queuedAt)) {
+    if (item.nextAttemptAt && item.nextAttemptAt > now) {
+      // Not due yet (persisted backoff from an earlier attempt): nothing
+      // later may overtake it (audit 4 F09).
+      retryAt = retryAt === undefined ? item.nextAttemptAt : Math.min(retryAt, item.nextAttemptAt);
+      break;
+    }
+    due.push(item);
+  }
+  return retryAt === undefined ? { due } : { due, retryAt };
+}
+
 export async function replayMutations(): Promise<ReplaySummary> {
-  if (!navigator.onLine || !offlineOwner()) return { committed: 0, rejected: 0 };
+  if (!navigator.onLine || storageSuspended || !offlineOwner()) return { committed: 0, rejected: 0 };
   const all = await transaction<Queued[]>(QUEUE, "readonly", (store) => store.getAll());
   const now = Date.now();
   let committed = 0;
   let rejected = 0;
   let retryAt: number | undefined;
-  const due = all
-    .filter((entry) => entry.owner === offlineOwner() && !entry.failed)
-    .sort((a, b) => a.queuedAt - b.queuedAt);
-  for (const item of due) {
-    if (item.nextAttemptAt && item.nextAttemptAt > now) {
-      // Not due yet (persisted backoff from an earlier attempt): remember
-      // when it becomes due so a timer can resume replay (audit 3 WEB-05).
-      retryAt = retryAt === undefined ? item.nextAttemptAt : Math.min(retryAt, item.nextAttemptAt);
-      continue;
-    }
+  for (const item of replayPlan(all, offlineOwner(), now).due) {
     let response: Response;
     try {
       response = await fetch("/api" + item.path, {
@@ -183,7 +220,17 @@ export async function replayMutations(): Promise<ReplaySummary> {
         headers: item.body === undefined ? undefined : { "Content-Type": "application/json" },
         body: item.body === undefined ? undefined : JSON.stringify(item.body),
       });
-    } catch { break; } // network failed mid-replay: keep the rest queued
+    } catch {
+      // A network-level failure while navigator.onLine can still be true:
+      // give the queue head a backoff slot and schedule the retry, or the
+      // work strands until some later navigation or connectivity event
+      // (audit 4 F10).
+      const attempts = (item.attempts ?? 0) + 1;
+      const delay = retryDelay(attempts, null);
+      retryAt = retryAt === undefined ? now + delay : Math.min(retryAt, now + delay);
+      await transaction(QUEUE, "readwrite", (store) => store.put({ ...item, attempts, nextAttemptAt: now + delay }));
+      break; // keep the rest queued behind this one, in order
+    }
     const decision = replayDecision(response.status);
     if (decision === "reauth") break;
     if (decision === "retry") {
@@ -272,8 +319,14 @@ export function startOfflineData(): () => void {
   // the only offline copy of the mailbox (audit 3 WEB-06). Fresh GETs
   // overwrite the snapshots they replace.
   let timer: number | undefined;
+  // An in-flight replay must not schedule a new timer after the cleanup
+  // function has run: unmount would leave an orphaned retry loop (audit
+  // 4 F10).
+  let stopped = false;
   const replay = () => {
+    if (stopped) return;
     replayMutations().then(async (summary) => {
+      if (stopped) return;
       if (summary.committed > 0) {
         const { reload, refreshCounts } = await import("./actions");
         reload(); refreshCounts();
@@ -289,6 +342,7 @@ export function startOfflineData(): () => void {
     });
   };
   const scheduleRetry = (at: number) => {
+    if (stopped) return;
     if (timer !== undefined) window.clearTimeout(timer);
     const delay = Math.max(0, at - Date.now());
     // A transient failure while still online must schedule its own next
@@ -301,6 +355,7 @@ export function startOfflineData(): () => void {
   };
   window.addEventListener("online", replay); replay();
   return () => {
+    stopped = true;
     window.removeEventListener("online", replay);
     if (timer !== undefined) window.clearTimeout(timer);
   };

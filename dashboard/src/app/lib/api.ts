@@ -1,7 +1,7 @@
 // The one place that talks to the server. Product calls use the HttpOnly
 // session cookie; JavaScript never sees a long-lived authentication secret.
 import { signal } from "@preact/signals";
-import { cacheResponse, cachedResponse, canQueue, offlineOwner, prepareOfflineOwner, queueMutation } from "./offline";
+import { cacheResponse, cachedResponse, canQueue, offlineOwner, prepareOfflineOwner, queueMutation, suspendOfflineStorage } from "./offline";
 
 export const authed = signal(false);
 export const authReady = signal(false);
@@ -146,6 +146,11 @@ export async function refreshAuth(): Promise<AuthStatus> {
       } catch (storageError) {
         // A storage failure is not an unreachable server: the session is
         // known-good, only offline persistence is disabled (audit 3 WEB-08).
+        // It is also not permission to keep using whatever namespace the
+        // old localStorage marker names — most dangerously after an owner
+        // change whose wipe did not commit. Suspend fail-closed until a
+        // later successful prepare (audit 4 F11).
+        suspendOfflineStorage();
         console.warn("Offline storage unavailable; offline mailbox disabled", storageError);
       }
     }
