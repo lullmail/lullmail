@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 
-import { canQueue, offlineOwner, queueMutation, replayDecision, replayPlan, retryAfterMs, retryDelay, suspendOfflineStorage } from "./offline";
+import { canQueue, newMutationKey, offlineOwner, queueMutation, replayDecision, replayPlan, replayRequestInit, retryAfterMs, retryDelay, suspendOfflineStorage, withReplayLock } from "./offline";
 
 describe("replay classification (audit WEB-03)", () => {
   it("counts only 2xx as committed", () => {
@@ -88,5 +88,32 @@ describe("fail-closed suspension (audit 4 F11)", () => {
   });
   it("reports suspension state", () => {
     expect(offlineOwner()).toBe("owner@example.com");
+  });
+});
+
+describe("idempotency keys (audit WEB-04)", () => {
+  it("mints unique keys", () => {
+    const seen = new Set<string>();
+    for (let i = 0; i < 100; i++) seen.add(newMutationKey());
+    expect(seen.size).toBe(100);
+  });
+  it("sends the queued key as the Idempotency-Key header", () => {
+    const init = replayRequestInit({ method: "POST", body: { action: "read" }, key: "key-1" });
+    const headers = init.headers as Record<string, string>;
+    expect(headers["Idempotency-Key"]).toBe("key-1");
+    expect(headers["Content-Type"]).toBe("application/json");
+    expect(init.body).toBe(JSON.stringify({ action: "read" }));
+  });
+  it("omits the header for legacy queue rows minted before the contract", () => {
+    const init = replayRequestInit({ method: "DELETE" });
+    expect(init.headers).toBeUndefined();
+    expect(init.body).toBeUndefined();
+  });
+});
+
+describe("replay lock (audit WEB-04)", () => {
+  it("runs the pass when no lock manager exists", async () => {
+    const ran = await withReplayLock(async () => "done");
+    expect(ran).toBe("done");
   });
 });

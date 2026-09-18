@@ -19,6 +19,10 @@ interface Queued {
   method: string;
   body?: unknown;
   queuedAt: number;
+  /** Server idempotency key (audit WEB-04): minted before the FIRST
+   *  attempt so a request whose acknowledgment was lost replays the
+   *  recorded answer instead of applying twice. */
+  key?: string;
   /** Failed-attempt bookkeeping for bounded exponential retry (audit 3 WEB-05). */
   attempts?: number;
   nextAttemptAt?: number;
@@ -128,14 +132,56 @@ export function canQueue(path: string, method: string): boolean {
   return method !== "GET" && QUEUEABLE.some((pattern) => pattern.test(path.split("?")[0]));
 }
 
-export async function queueMutation(path: string, method: string, body?: unknown): Promise<void> {
+export async function queueMutation(path: string, method: string, body?: unknown, key?: string): Promise<void> {
   if (storageSuspended) {
     // Failing visibly beats pretending the mutation was saved (audit 4 F11).
     throw new OfflineStorageError("Offline storage is suspended on this device — the change was NOT saved for replay");
   }
   const owner = offlineOwner(); if (!owner) throw new Error("Offline owner is not initialised");
-  const id = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Date.now() + "-" + Math.random();
-  await transaction(QUEUE, "readwrite", (store) => store.put({ id, owner, path, method, body, queuedAt: Date.now() } as Queued));
+  const id = newMutationKey();
+  await transaction(QUEUE, "readwrite", (store) => store.put({ id, key: key ?? id, owner, path, method, body, queuedAt: Date.now() } as Queued));
+}
+
+/** A client-generated idempotency key: opaque, unique, safe as both the
+ *  queue item id and the Idempotency-Key header (audit WEB-04). */
+export function newMutationKey(): string {
+  return typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Date.now() + "-" + Math.random().toString(16).slice(2);
+}
+
+/** The exact fetch one replayed mutation issues — export shape so the
+ *  contract (headers, body) is testable without a network. */
+export function replayRequestInit(item: Pick<Queued, "method" | "body" | "key">): RequestInit {
+  const headers: Record<string, string> = {};
+  if (item.body !== undefined) headers["Content-Type"] = "application/json";
+  if (item.key) headers["Idempotency-Key"] = item.key;
+  return {
+    method: item.method,
+    credentials: "same-origin",
+    headers: item.body === undefined && !item.key ? undefined : headers,
+    body: item.body === undefined ? undefined : JSON.stringify(item.body),
+  };
+}
+
+/** Web Locks coordinate replay across tabs (audit WEB-04): the lock is
+ *  held for one whole replay pass, and a tab that cannot take it skips —
+ *  the holder refreshes shared state when it finishes. Without the
+ *  server contract this would only have narrowed the duplicate window;
+ *  with api_mutations recorded server-side it is now safe coordination
+ *  rather than an implied guarantee. */
+const REPLAY_LOCK = "lullmail-offline-replay";
+
+export async function withReplayLock<T>(run: () => Promise<T>): Promise<T | undefined> {
+  const locks = (navigator as Navigator & {
+    locks?: { request(name: string, options: { ifAvailable: true }, callback: () => Promise<T>): Promise<T | undefined> };
+  }).locks;
+  if (!locks) return run();
+  try {
+    return await locks.request(REPLAY_LOCK, { ifAvailable: true }, run);
+  } catch {
+    // A lock-manager failure must not strand the queue: an uncoordinated
+    // pass can still only commit each item once (server-side keying).
+    return run();
+  }
 }
 
 export type ReplayDecision = "committed" | "reauth" | "retry" | "failed";
@@ -205,8 +251,10 @@ export function replayPlan<T extends { owner: string; queuedAt: number; nextAtte
   return retryAt === undefined ? { due } : { due, retryAt };
 }
 
-export async function replayMutations(): Promise<ReplaySummary> {
-  if (!navigator.onLine || storageSuspended || !offlineOwner()) return { committed: 0, rejected: 0 };
+/** One ordered replay pass over this owner's queue (oldest first, a
+ *  backed-off head stops the pass — audit 4 F09). Runs under the
+ *  cross-tab replay lock when the browser offers one. */
+async function replayDueMutations(): Promise<ReplaySummary> {
   const all = await transaction<Queued[]>(QUEUE, "readonly", (store) => store.getAll());
   const now = Date.now();
   let committed = 0;
@@ -215,11 +263,7 @@ export async function replayMutations(): Promise<ReplaySummary> {
   for (const item of replayPlan(all, offlineOwner(), now).due) {
     let response: Response;
     try {
-      response = await fetch("/api" + item.path, {
-        method: item.method, credentials: "same-origin",
-        headers: item.body === undefined ? undefined : { "Content-Type": "application/json" },
-        body: item.body === undefined ? undefined : JSON.stringify(item.body),
-      });
+      response = await fetch("/api" + item.path, replayRequestInit(item));
     } catch {
       // A network-level failure while navigator.onLine can still be true:
       // give the queue head a backoff slot and schedule the retry, or the
@@ -257,6 +301,14 @@ export async function replayMutations(): Promise<ReplaySummary> {
     committed++;
   }
   return retryAt === undefined ? { committed, rejected } : { committed, rejected, retryAt };
+}
+
+/** The public entry: online, unsuspended, under an owner, and holding the
+ *  cross-tab replay lock (WEB-04). A tab that loses the lock reports an
+ *  empty pass — the holder's commits refresh the shared view anyway. */
+export async function replayMutations(): Promise<ReplaySummary> {
+  if (!navigator.onLine || storageSuspended || !offlineOwner()) return { committed: 0, rejected: 0 };
+  return (await withReplayLock(replayDueMutations)) ?? { committed: 0, rejected: 0 };
 }
 
 export async function clearResponseCache(): Promise<void> {

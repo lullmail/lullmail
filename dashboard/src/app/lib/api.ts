@@ -1,7 +1,7 @@
 // The one place that talks to the server. Product calls use the HttpOnly
 // session cookie; JavaScript never sees a long-lived authentication secret.
 import { signal } from "@preact/signals";
-import { cacheResponse, cachedResponse, canQueue, offlineOwner, prepareOfflineOwner, queueMutation, suspendOfflineStorage } from "./offline";
+import { cacheResponse, cachedResponse, canQueue, newMutationKey, offlineOwner, prepareOfflineOwner, queueMutation, suspendOfflineStorage } from "./offline";
 
 export const authed = signal(false);
 export const authReady = signal(false);
@@ -69,6 +69,13 @@ function copyValue<T>(value: T): T {
 async function request<T>(path: string, opts: Opts = {}, setupToken = "", protectedRoute = true): Promise<T> {
   const headers: Record<string, string> = {};
   if (setupToken) headers.Authorization = "Bearer " + setupToken;
+  // The idempotency key is minted BEFORE the first attempt (audit
+  // WEB-04): a request whose response never arrived may still have been
+  // applied server-side, and replaying under the SAME key returns the
+  // recorded answer instead of applying the change twice.
+  const queueable = protectedRoute && canQueue(path, opts.method || (opts.body !== undefined ? "POST" : "GET"));
+  const idempotencyKey = queueable ? newMutationKey() : undefined;
+  if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
   let body: string | undefined;
   if (opts.body !== undefined) {
     headers["Content-Type"] = "application/json";
@@ -89,8 +96,8 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
       const cached = await cachedResponse<T>(path);
       if (cached !== undefined) return cached;
     }
-    if (protectedRoute && canQueue(path, method)) {
-      await queueMutation(path, method, opts.body);
+    if (queueable) {
+      await queueMutation(path, method, opts.body, idempotencyKey);
       throw new QueuedOffline();
     }
     throw error;
