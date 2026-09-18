@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
@@ -208,6 +209,11 @@ func (a *App) purgeExpired() {
 		`DELETE FROM oauth_states WHERE expires_at < now()`,
 		`DELETE FROM auth_sessions WHERE expires_at < now()`,
 		`DELETE FROM push_deliveries WHERE delivered_at IS NULL AND claimed_at < now() - interval '10 minutes'`,
+		// Idempotency answers outlive the request by design (a parked
+		// offline queue can replay weeks later) but not forever: past the
+		// retention window the row goes and a retried mutation would
+		// re-apply — the window is the documented contract.
+		fmt.Sprintf(`DELETE FROM api_mutations WHERE created_at < now() - interval '%d days'`, idempotencyRetentionDays),
 	} {
 		if _, err := a.db.Exec(q); err != nil {
 			a.log.Error("purge failed", "err", err, "query", q)
@@ -339,26 +345,26 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	api.HandleFunc("GET /search", a.handleSearch)
 	api.HandleFunc("GET /briefing", a.handleBriefing)
 	api.HandleFunc("GET /board", a.handleBoard)
-	api.HandleFunc("POST /board/pin", a.handleBoardPin)
-	api.HandleFunc("POST /board/cards", a.handleBoardCard)
-	api.HandleFunc("POST /board/cards/{id}/done", a.handleBoardCardDone)
-	api.HandleFunc("POST /board/unpin", a.handleBoardUnpin)
+	api.HandleFunc("POST /board/pin", a.withIdempotency(a.handleBoardPin))
+	api.HandleFunc("POST /board/cards", a.withIdempotency(a.handleBoardCard))
+	api.HandleFunc("POST /board/cards/{id}/done", a.withIdempotency(a.handleBoardCardDone))
+	api.HandleFunc("POST /board/unpin", a.withIdempotency(a.handleBoardUnpin))
 
 	api.HandleFunc("GET /notes", a.handleNotes)
-	api.HandleFunc("POST /notes", a.handleNoteCreate)
-	api.HandleFunc("POST /notes/{id}", a.handleNoteUpdate)
-	api.HandleFunc("DELETE /notes/{id}", a.handleNoteDelete)
+	api.HandleFunc("POST /notes", a.withIdempotency(a.handleNoteCreate))
+	api.HandleFunc("POST /notes/{id}", a.withIdempotency(a.handleNoteUpdate))
+	api.HandleFunc("DELETE /notes/{id}", a.withIdempotency(a.handleNoteDelete))
 	api.HandleFunc("GET /people", a.handlePeople)
 	api.HandleFunc("GET /recent", a.handleRecent)
 	api.HandleFunc("GET /folder", a.handleFolder)
 	api.HandleFunc("GET /mailboxes", a.handleMailboxList)
-	api.HandleFunc("POST /screener/decide", a.handleDecide)
-	api.HandleFunc("POST /screener/undecide", a.handleUndecide)
+	api.HandleFunc("POST /screener/decide", a.withIdempotency(a.handleDecide))
+	api.HandleFunc("POST /screener/undecide", a.withIdempotency(a.handleUndecide))
 	api.HandleFunc("GET /buckets/{bucket}", a.handleBucket)
 	// GitHub-derived thread ids contain "/" (repo/check-suites/...@github.com),
 	// so the segment is a suffix wildcard, not a single path element.
 	api.Handle("GET /threads/{thread...}", a.accountWorkLifecycle(http.HandlerFunc(a.handleThread)))
-	api.HandleFunc("POST /messages/{message}/action", a.handleMessageAction)
+	api.HandleFunc("POST /messages/{message}/action", a.withIdempotency(a.handleMessageAction))
 	api.Handle("GET /messages/{message}/attachment/{part}", a.accountWorkLifecycle(http.HandlerFunc(a.handleAttachment)))
 	api.Handle("GET /messages/{message}/eml", a.accountWorkLifecycle(http.HandlerFunc(a.handleMessageEML)))
 	api.HandleFunc("POST /send", a.handleSend)

@@ -38,7 +38,7 @@ func testDatabaseURL(t *testing.T) string {
 // the engine's own Drop/Migrate so a shared scratch database loses
 // nothing this suite does not own.
 var productTables = []string{
-	"account_reconcile_jobs", "agent_tokens", "app_settings", "board_cards",
+	"api_mutations", "account_reconcile_jobs", "agent_tokens", "app_settings", "board_cards",
 	"sticky_notes", "email_accounts", "hey_messages", "hey_senders",
 	"oauth_states", "push_deliveries", "push_subscriptions",
 	"auth_passwords", "auth_totp", "auth_recovery_codes", "auth_challenges",

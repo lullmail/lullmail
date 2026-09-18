@@ -85,10 +85,29 @@ var policyStatements = []string{
 	)`,
 }
 
+// idempotencyStatements is the WEB-04/WEB-03/R07 machinery: one recorded
+// response per (user, Idempotency-Key). A row exists only in its complete
+// form — the recorder inserts, runs the handler, and stores the response in
+// ONE transaction, so a crash mid-request leaves no row and the retry
+// applies cleanly; a committed row is always a replayable answer.
+var idempotencyStatements = []string{
+	`CREATE TABLE IF NOT EXISTS api_mutations (
+		user_id                uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		mutation_key           text NOT NULL,
+		request_hash           text NOT NULL,
+		response_status        integer NOT NULL,
+		response_content_type  text NOT NULL DEFAULT 'application/json',
+		response_body          bytea NOT NULL,
+		created_at             timestamptz NOT NULL DEFAULT now(),
+		PRIMARY KEY (user_id, mutation_key)
+	)`,
+}
+
 var productMigrations = []productMigration{
 	{Version: 1, Name: "product baseline schema", Statements: splitStatements(schemaSQL)},
 	{Version: 2, Name: "account-scoped product state", Statements: accountScopedStatements},
 	{Version: 3, Name: "reconciliation policy machinery", Statements: policyStatements},
+	{Version: 4, Name: "mutation idempotency ledger", Statements: idempotencyStatements},
 }
 
 const productLedgerDDL = `CREATE TABLE IF NOT EXISTS app_migrations (
