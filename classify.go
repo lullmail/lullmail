@@ -38,7 +38,36 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+
+	// The unclassified batch is drained and CLOSED before any other query
+	// runs. An open result set holds its pool connection; the correspondent
+	// queries below need another connection from the same capped pool, so
+	// enough overlapping classifiers could hold-and-wait every connection
+	// and deadlock the pool (audit 4 F08).
+	type pending struct {
+		acct, id, sender string
+		historical       bool
+	}
+	var batch []pending
+	for rows.Next() {
+		var acct, id, fromJSON string
+		var received, connected sql.NullTime
+		if err := rows.Scan(&acct, &id, &fromJSON, &received, &connected); err != nil {
+			rows.Close()
+			return err
+		}
+		// A NULL INTERNALDATE must not wedge the whole pass; undated mail is
+		// treated as new (it screens like any unknown sender).
+		batch = append(batch, pending{
+			acct: acct, id: id, sender: firstSenderEmail(fromJSON),
+			historical: received.Valid && connected.Valid && received.Time.Before(connected.Time),
+		})
+	}
+	scanErr := rows.Err()
+	closeErr := rows.Close()
+	if err := errors.Join(scanErr, closeErr); err != nil {
+		return err
+	}
 
 	// Correspondents: people the owner has already exchanged mail with —
 	// explicit recipients of user-sent messages, plus anyone sharing a
@@ -116,28 +145,6 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		  AND lower(COALESCE(other.from_addrs, '[]')::json->0->>'email') <> lower(ea.address)
 		  AND COALESCE(other.from_addrs, '') <> ''`); err != nil {
 		return fmt.Errorf("classify: correspondent evidence (threads): %w", err)
-	}
-
-	type pending struct {
-		acct, id, sender string
-		historical       bool
-	}
-	var batch []pending
-	for rows.Next() {
-		var acct, id, fromJSON string
-		var received, connected sql.NullTime
-		if err := rows.Scan(&acct, &id, &fromJSON, &received, &connected); err != nil {
-			return err
-		}
-		// A NULL INTERNALDATE must not wedge the whole pass; undated mail is
-		// treated as new (it screens like any unknown sender).
-		batch = append(batch, pending{
-			acct: acct, id: id, sender: firstSenderEmail(fromJSON),
-			historical: received.Valid && connected.Valid && received.Time.Before(connected.Time),
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return err
 	}
 
 	tx, err := a.db.BeginTx(ctx, nil)

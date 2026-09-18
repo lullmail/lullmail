@@ -79,7 +79,10 @@ jobs:
         run: go test -race -count=1 ./...
 
   publish:
-    needs: verify
+    # Real-database integration and race checks gate publication too: a
+    # green unit-only build must not be able to publish an image past a
+    # failed PostgreSQL job (audit 4 F02).
+    needs: [verify, postgres-integration]
     # Only pushes publish. A v* tag on an older commit must never move
     # `latest` backwards (audit OPS-08): main publishes latest, a version
     # tag publishes only its own immutable tags.
