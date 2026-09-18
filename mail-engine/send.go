@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Outgoing is a message to send.
@@ -463,7 +464,15 @@ func sanitizeFilename(name string) string {
 		name = name[:i]
 	}
 	if len(name) > 200 {
-		name = name[len(name)-200:]
+		// Keep the tail (the extension end of a long name), but back the
+		// cut up to a rune boundary: slicing into the middle of a
+		// multi-byte character produced invalid UTF-8 filenames (audit
+		// 4 F17).
+		start := len(name) - 200
+		for start < len(name) && !utf8.RuneStart(name[start]) {
+			start++
+		}
+		name = name[start:]
 	}
 	if strings.TrimSpace(name) == "" {
 		name = "attachment"

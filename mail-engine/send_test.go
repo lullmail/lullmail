@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestReplyCarriesTheThreadingChain(t *testing.T) {
@@ -653,5 +654,27 @@ func TestRenderedBodyPartsAreQuotedPrintableAndRoundTrip(t *testing.T) {
 	got = []byte(strings.TrimSuffix(string(got), "\r\n"))
 	if want := strings.ReplaceAll(msg2.Text, "\n", "\r\n"); string(got) != want {
 		t.Fatalf("decoded body differs from the composed text (len %d vs %d)", len(got), len(want))
+	}
+}
+
+// A long non-ASCII filename must stay valid UTF-8 after the 200-byte cap:
+// the old tail slice cut into the middle of a multi-byte rune (audit 4 F17).
+func TestSanitizeFilenameLongUnicodeStaysValidUTF8(t *testing.T) {
+	for _, name := range []string{
+	 strings.Repeat("é", 150),
+	 strings.Repeat("邮", 120),
+	 strings.Repeat("📩", 80),
+	 strings.Repeat("a", 199) + "é",
+	} {
+		got := sanitizeFilename(name)
+		if !utf8.ValidString(got) {
+			t.Fatalf("sanitizeFilename(%q bytes) = %q, invalid UTF-8", name[:16], got)
+		}
+		if len(got) > 200 {
+			t.Fatalf("sanitizeFilename result len = %d, want <= 200", len(got))
+		}
+		if got == "" {
+			t.Fatal("sanitizeFilename returned an empty name")
+		}
 	}
 }
