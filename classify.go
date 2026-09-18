@@ -1214,11 +1214,21 @@ func parseAttachments(parts sql.NullString) []attachment {
 }
 
 // handleMessageAction applies a user action to one message: mark read, move
-// bucket, set aside with a return date.
+// bucket, set aside with an absolute return date.
+//
+// Snooze contract (audit DATA-07/DATA-05): `until` is an absolute UTC
+// RFC3339 instant captured at user-intent time, so offline replay applies
+// the exact intended deadline no matter when replay runs, and undo
+// restores the exact prior instant rather than a rounded day count.
+// `until: null` on set_aside means someday — stored as the "later" bucket
+// with no return date. The legacy `until_days` remains accepted (server
+// computes from its own clock — the drift the absolute form removes) and
+// is deprecated compat for callers that have not migrated.
 func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Action    string `json:"action"`
-		UntilDays int    `json:"until_days"`
+		Action    string          `json:"action"`
+		Until     json.RawMessage `json:"until"`
+		UntilDays int             `json:"until_days"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
@@ -1253,6 +1263,36 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// parseSnoozeUntil resolves the set_aside deadline: absolute instant,
+	// explicit null (someday), or the deprecated relative forms.
+	parseSnoozeUntil := func() (until any, someday bool, problem string) {
+		if len(req.Until) > 0 {
+			raw := strings.TrimSpace(string(req.Until))
+			if raw == "null" {
+				return nil, true, ""
+			}
+			var encoded string
+			if err := json.Unmarshal(req.Until, &encoded); err != nil {
+				return nil, false, "until must be an RFC3339 timestamp string (or null for someday)"
+			}
+			t, err := time.Parse(time.RFC3339, strings.TrimSpace(encoded))
+			if err != nil {
+				return nil, false, "until must be an RFC3339 timestamp (or null for someday)"
+			}
+			return t.UTC(), false, ""
+		}
+		if req.UntilDays > 0 {
+			if req.UntilDays > 3650 {
+				return nil, false, "until_days must be 1 through 3650"
+			}
+			return req.UntilDays, false, "" // relative: handled by the query shape below
+		}
+		if req.UntilDays < 0 {
+			return nil, false, "until_days must be 1 through 3650"
+		}
+		return nil, false, "" // legacy default (3 days) applies
+	}
+
 	var q string
 	var args []any
 	switch req.Action {
@@ -1274,19 +1314,35 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 		       AND h.message_id=m.id AND m.thread_id=$3`
 		args = []any{uid, acct, thread, req.Action}
 	case "set_aside":
-		days := req.UntilDays
-		if days == 0 {
-			days = 3
-		}
-		if days < 1 || days > 3650 {
-			writeProblem(w, http.StatusUnprocessableEntity, "Invalid Snooze", "until_days must be 1 through 3650")
+		until, someday, problem := parseSnoozeUntil()
+		if problem != "" {
+			writeProblem(w, http.StatusUnprocessableEntity, "Invalid Snooze", problem)
 			return
 		}
-		q = `UPDATE hey_messages h SET bucket='set_aside', set_aside_until = now() + make_interval(days => $4)
+		if someday {
+			// until:null — someday is the "later" bucket with no date.
+			q = `UPDATE hey_messages h SET bucket='later', set_aside_until=NULL FROM mail_messages m
+			     WHERE h.user_id=$1 AND h.account_id=$2 AND h.account_id=m.account_id
+			       AND h.message_id=m.id AND m.thread_id=$3`
+			args = []any{uid, acct, thread}
+			break
+		}
+		if days, relative := until.(int); relative {
+			if days == 0 {
+				days = 3 // deprecated default
+			}
+			q = `UPDATE hey_messages h SET bucket='set_aside', set_aside_until = now() + make_interval(days => $4)
+			     FROM mail_messages m
+			     WHERE h.user_id=$1 AND h.account_id=$2 AND h.account_id=m.account_id
+			       AND h.message_id=m.id AND m.thread_id=$3`
+			args = []any{uid, acct, thread, days}
+			break
+		}
+		q = `UPDATE hey_messages h SET bucket='set_aside', set_aside_until = $4
 		     FROM mail_messages m
 		     WHERE h.user_id=$1 AND h.account_id=$2 AND h.account_id=m.account_id
 		       AND h.message_id=m.id AND m.thread_id=$3`
-		args = []any{uid, acct, thread, days}
+		args = []any{uid, acct, thread, until}
 	default:
 		writeProblem(w, http.StatusUnprocessableEntity, "Unknown Action", req.Action)
 		return
@@ -1300,7 +1356,22 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusNotFound, "Not Found", "no such message")
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true})
+	// Echo the applied state: the caller's undo snapshot is exact when it
+	// can see what landed (audit DATA-07).
+	var bucket string
+	var appliedUntil sql.NullTime
+	if err := a.db.QueryRowContext(r.Context(),
+		`SELECT bucket, set_aside_until FROM hey_messages h
+		 WHERE h.user_id=$1 AND h.account_id=$2 AND h.message_id=$3`, uid, acct, msg).
+		Scan(&bucket, &appliedUntil); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	out := map[string]any{"ok": true, "bucket": bucket}
+	if appliedUntil.Valid {
+		out["snooze_until"] = appliedUntil.Time.UTC().Format(time.RFC3339Nano)
+	}
+	writeJSON(w, out)
 }
 
 // screeningEnabled reads the owner's Screener preference. A missing row is

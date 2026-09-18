@@ -82,23 +82,27 @@ export async function refreshAccounts() {
 
 type ActionName = Bucket | "read" | "unread";
 
-async function actOn(account: string, messageId: string, action: ActionName, untilDays?: number) {
+/** The snooze wire contract (audit DATA-07): `until` is an absolute UTC
+ *  RFC3339 instant captured at user-intent time, so offline replay
+ *  applies the exact intended deadline whenever it runs, and undo sends
+ *  the row's exact prior instant. */
+async function actOn(account: string, messageId: string, action: ActionName, until?: string) {
   await api("/messages/" + encodeURIComponent(messageId) + "/action?account=" + encodeURIComponent(account), {
-    body: untilDays ? { action, until_days: untilDays } : { action },
+    body: until ? { action, until } : { action },
   });
 }
 
-async function actMany(rows: Row[], action: ActionName, untilDays?: number) {
-  await Promise.all(rows.map((r) => actOn(r.account, r.message_id, action, untilDays)));
+async function actMany(rows: Row[], action: ActionName, until?: string) {
+  await Promise.all(rows.map((r) => actOn(r.account, r.message_id, action, until)));
 }
 
 /** Per-row outcome of a bulk mutation: which rows actually changed, which
- * requests failed, and which were parked for offline replay. A queued
- * mutation is neither — it has NOT committed, so it must not be reported
- * as done (no false undo) nor as failed (it will apply on reconnect)
- * (audit 3 WEB-07). */
-async function actManySettled(rows: Row[], action: ActionName, untilDays?: number) {
-  const results = await Promise.allSettled(rows.map((r) => actOn(r.account, r.message_id, action, untilDays)));
+ *  requests failed, and which were parked for offline replay. A queued
+ *  mutation is neither — it has NOT committed, so it must not be reported
+ *  as done (no false undo) nor as failed (it will apply on reconnect)
+ *  (audit 3 WEB-07). */
+async function actManySettled(rows: Row[], action: ActionName, until?: string) {
+  const results = await Promise.allSettled(rows.map((r) => actOn(r.account, r.message_id, action, until)));
   const changed: Row[] = [];
   const failed: Row[] = [];
   const queued: Row[] = [];
@@ -198,19 +202,13 @@ async function undoMarkRead(before: { row: Row; was: boolean }[]) {
 }
 
 /** Rows the verbs apply to. Captured with their original snooze so an undo
-    restores the exact deferral, not a generic three days. */
-interface Before { row: Row; from: Bucket; days?: number }
+    restores the exact deferral — the prior bucket AND the prior instant,
+    verbatim (audit DATA-07). */
+interface Before { row: Row; from: Bucket; until?: string }
 
-function snoozeUndoState(r: Row): { from: Bucket; days?: number } {
+function snoozeUndoState(r: Row): { from: Bucket; until?: string } {
   const from = originOf(r);
-  if (from === "later") return { from };
-  if (from === "set_aside" && r.snooze_until) {
-    const until = new Date(r.snooze_until).getTime();
-    if (!isNaN(until)) {
-      const days = Math.max(1, Math.ceil((until - Date.now()) / 86400000));
-      return { from, days };
-    }
-  }
+  if (from === "set_aside" && r.snooze_until) return { from, until: r.snooze_until };
   return { from };
 }
 
@@ -226,11 +224,14 @@ export async function moveTo(rows: Row[], to: Bucket) {
   );
 }
 
-/** days = 0 means someday: snoozed with no return date. */
+/** days = 0 means someday: snoozed with no return date. The deadline is
+ *  computed HERE, at user-intent time, and travels as an absolute instant
+ *  — offline replay applies exactly this deadline (audit DATA-07). */
 export async function snooze(rows: Row[], days: number) {
   if (!rows.length) return;
+  const until = days > 0 ? new Date(Date.now() + days * 86400000).toISOString() : undefined;
   const before = new Map(rows.map((r) => [r, snoozeUndoState(r)] as const));
-  const { changed, failed, queued } = await actManySettled(rows, days > 0 ? "set_aside" : "later", days > 0 ? days : undefined);
+  const { changed, failed, queued } = await actManySettled(rows, days > 0 ? "set_aside" : "later", until);
   const { done } = settleMutation(changed, failed, queued, "snooze");
   if (!done.length) return;
   if (rows.some((r) => r.thread_id === reader.value.threadId && r.account === reader.value.account)) closeReader();
@@ -242,8 +243,8 @@ export async function snooze(rows: Row[], days: number) {
 
 async function restore(before: Before[]) {
   try {
-    await Promise.all(before.map(({ row, from, days }) =>
-      actOn(row.account, row.message_id, from, from === "set_aside" ? days : undefined)));
+    await Promise.all(before.map(({ row, from, until }) =>
+      actOn(row.account, row.message_id, from, from === "set_aside" ? until : undefined)));
     afterMutation();
   } catch (e) {
     fail(e, "Could not undo");

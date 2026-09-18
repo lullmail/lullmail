@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -202,13 +203,15 @@ func registerTools(s *mcp.Server, c *client) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "message_action",
 		Description: "Act on a whole thread: mark read/unread, move it to a bucket (imbox, paper_trail, feed, " +
-			"later, screener), or set_aside to snooze with an optional return date in days (default 3). " +
+			"later, screener), or set_aside to snooze. Snoozes take `until` — an absolute UTC RFC3339 instant " +
+			"(e.g. 2026-09-25T09:00:00Z) that is stored verbatim, or null for someday. " +
 			"Every action is reversible with another call.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
 		AccountID string `json:"account_id" jsonschema:"account id from list_accounts"`
 		MessageID string `json:"message_id" jsonschema:"message id from list_bucket, search_mail, or read_thread"`
 		Action    string `json:"action" jsonschema:"read|unread|imbox|paper_trail|feed|later|screener|set_aside"`
-		UntilDays int    `json:"until_days,omitempty" jsonschema:"set_aside return date in days, 1-3650; default 3"`
+		Until     string `json:"until,omitempty" jsonschema:"set_aside return instant, absolute UTC RFC3339 (2026-09-25T09:00:00Z); or the literal null / empty for someday"`
+		UntilDays int    `json:"until_days,omitempty" jsonschema:"DEPRECATED relative days from now; prefer until"`
 	}) (*mcp.CallToolResult, any, error) {
 		if args.AccountID == "" || args.MessageID == "" {
 			return nil, nil, errArgs("account_id and message_id are required")
@@ -218,9 +221,24 @@ func registerTools(s *mcp.Server, c *client) {
 		default:
 			return nil, nil, errArgs("action must be one of read, unread, imbox, paper_trail, feed, later, screener, set_aside")
 		}
+		body := map[string]any{"action": args.Action}
+		switch {
+		case args.Until != "" && args.Until != "null":
+			if _, err := time.Parse(time.RFC3339, args.Until); err != nil {
+				return nil, nil, errArgs("until must be an RFC3339 timestamp like 2026-09-25T09:00:00Z, or null")
+			}
+			body["until"] = args.Until
+		case args.Until == "null":
+			body["until"] = nil
+		case args.UntilDays > 0:
+			body["until_days"] = args.UntilDays
+		}
+		if _, ok := body["until"]; !ok && args.Action == "set_aside" && args.Until == "" && args.UntilDays == 0 {
+			// Same default the server applies; explicit so tool schemas stay honest.
+			body["until_days"] = 3
+		}
 		query := url.Values{"account": {args.AccountID}}
-		return text(c.postQuery(ctx, "/messages/"+url.PathEscape(args.MessageID)+"/action",
-			map[string]any{"action": args.Action, "until_days": args.UntilDays}, query))
+		return text(c.postQuery(ctx, "/messages/"+url.PathEscape(args.MessageID)+"/action", body, query))
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
