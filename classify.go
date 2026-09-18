@@ -13,6 +13,7 @@ import (
 	"mime"
 	netmail "net/mail"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -350,11 +351,12 @@ func isUUID(s string) bool {
 }
 
 // handleSearch full-text-ish search over the mirror: subject, participants,
-// preview. Same row shape as bucket listings so the client reuses rendering.
+// preview. Same row shape as bucket listings so the client reuses
+// rendering, and the same keyset continuation (audit DATA-06).
 func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	if q == "" {
-		writeJSON(w, []any{})
+		writeRowsPage[struct{}](w, nil, false, listCursor{})
 		return
 	}
 	uid, err := a.userID(r.Context())
@@ -362,20 +364,32 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
 		return
 	}
+	limit, cursor, err := pageParams(r, 60)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "Bad Cursor", "the cursor is not a valid continuation token")
+		return
+	}
 	like := likeContains(q)
-	rows, err := a.db.QueryContext(r.Context(), `
+	query := `
 		SELECT m.account_id, m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at,
 		       h.read_at IS NOT NULL AS is_read, m.has_attachment, COALESCE(m.preview,''),
 		       COALESCE(h.bucket,''),
 		       (SELECT count(*) FROM mail_messages t
-		          WHERE t.account_id = m.account_id AND t.thread_id = m.thread_id) AS thread_len
+	          WHERE t.account_id = m.account_id AND t.thread_id = m.thread_id) AS thread_len
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
-		WHERE (m.subject ILIKE $2 ESCAPE '\' OR m.from_addrs ILIKE $2 ESCAPE '\' OR m.to_addrs ILIKE $2 ESCAPE '\' OR m.preview ILIKE $2 ESCAPE '\')`+
-		accountClause(r)+
-		` ORDER BY m.received_at DESC NULLS LAST, m.id DESC
-		LIMIT 60`, uid, like)
+		WHERE (m.subject ILIKE $2 ESCAPE '\' OR m.from_addrs ILIKE $2 ESCAPE '\' OR m.to_addrs ILIKE $2 ESCAPE '\' OR m.preview ILIKE $2 ESCAPE '\')` +
+		accountClause(r)
+	args := []any{uid, like}
+	if cursor.ID != "" {
+		query += cursorPredicate("$3", "$4")
+		args = append(args, cursorArgs(cursor)...)
+	}
+	query += ` ORDER BY m.received_at DESC NULLS LAST, m.id DESC
+		LIMIT $` + strconv.Itoa(len(args)+1)
+	args = append(args, limit+1)
+	rows, err := a.db.QueryContext(r.Context(), query, args...)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return
@@ -396,7 +410,13 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 		ThreadLen  int    `json:"thread_len"`
 	}
 	out := []rowOut{}
+	next := listCursor{}
+	more := false
 	for rows.Next() {
+		if len(out) == limit {
+			more = true
+			continue
+		}
 		var row rowOut
 		var fromJSON string
 		var received sql.NullTime
@@ -408,14 +428,19 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 		row.From = firstSenderName(fromJSON)
 		if received.Valid {
 			row.ReceivedAt = received.Time.Format(time.RFC3339)
+			t := received.Time
+			next.ReceivedAt = &t
+		} else {
+			next.ReceivedAt = nil
 		}
+		next.ID = row.MessageID
 		out = append(out, row)
 	}
 	if err := rows.Err(); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return
 	}
-	writeJSON(w, out)
+	writeRowsPage(w, out, more, next)
 }
 
 // handleScreener lists undecided senders, newest message first.
@@ -665,6 +690,14 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 	// The per-mailbox lens: ?account=<email_accounts.id> narrows any list to
 	// one mailbox. Empty means all mailboxes — the default unified view.
 	account := r.URL.Query().Get("account")
+	// Keyset pagination (audit DATA-06): the page is the next `limit`
+	// rows strictly after the cursor's sort key, so newer arrivals never
+	// shift what older pages delivered.
+	limit, cursor, err := pageParams(r, maxPageLimit)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "Bad Cursor", "the cursor is not a valid continuation token")
+		return
+	}
 	// The Snoozed list (and the calendar fed by it) must never show a return
 	// date already past — sweep before listing.
 	if r.PathValue("bucket") == "snoozed" {
@@ -688,14 +721,21 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 		args = append(args, account)
 	}
 	query += `
-		  AND m.id = (
-		    SELECT m2.id FROM hey_messages h2
-		    JOIN mail_messages m2 ON m2.account_id = h2.account_id AND m2.id = h2.message_id
-		    WHERE h2.user_id = $1 AND h2.bucket = ANY($2)
-		      AND m2.account_id = m.account_id AND m2.thread_id = m.thread_id
-		    ORDER BY m2.received_at DESC NULLS LAST, m2.id DESC LIMIT 1)
+	  AND m.id = (
+	    SELECT m2.id FROM hey_messages h2
+	    JOIN mail_messages m2 ON m2.account_id = h2.account_id AND m2.id = h2.message_id
+	    WHERE h2.user_id = $1 AND h2.bucket = ANY($2)
+	      AND m2.account_id = m.account_id AND m2.thread_id = m.thread_id
+	    ORDER BY m2.received_at DESC NULLS LAST, m2.id DESC LIMIT 1)`
+	nextArg := len(args) + 1
+	if cursor.ID != "" {
+		query += cursorPredicate("$"+strconv.Itoa(nextArg), "$"+strconv.Itoa(nextArg+1))
+		args = append(args, cursorArgs(cursor)...)
+	}
+	query += `
 		ORDER BY m.received_at DESC NULLS LAST, m.id DESC
-		LIMIT 200`
+		LIMIT $` + strconv.Itoa(len(args)+1)
+	args = append(args, limit+1)
 	rows, err := a.db.QueryContext(r.Context(), query, args...)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
@@ -718,7 +758,15 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 		SnoozeUntil string `json:"snooze_until,omitempty"`
 	}
 	out := []threadRow{}
+	next := listCursor{}
+	more := false
 	for rows.Next() {
+		// The limit+1 probe row exists only to prove has_more; it is
+		// never scanned into the page.
+		if len(out) == limit {
+			more = true
+			continue
+		}
 		var row threadRow
 		var fromJSON string
 		var received sql.NullTime
@@ -732,7 +780,12 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 		row.From = firstSenderName(fromJSON)
 		if received.Valid {
 			row.ReceivedAt = received.Time.Format(time.RFC3339)
+			t := received.Time
+			next.ReceivedAt = &t
+		} else {
+			next.ReceivedAt = nil
 		}
+		next.ID = row.MessageID
 		if snoozeUntil.Valid {
 			row.SnoozeUntil = snoozeUntil.Time.Format(time.RFC3339)
 		}
@@ -742,7 +795,7 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return
 	}
-	writeJSON(w, out)
+	writeRowsPage(w, out, more, next)
 }
 
 // firstSenderName renders "Name <email>" for list rows.

@@ -97,28 +97,49 @@ func registerTools(s *mcp.Server, c *client) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "list_bucket",
 		Description: "List threads in a bucket view. Buckets: screener (new senders awaiting a decision), " +
-			"imbox (allowed in), paper_trail, feed, snoozed, set_aside, later.",
+			"imbox (allowed in), paper_trail, feed, snoozed, set_aside, later. Pages of `limit` threads " +
+			"(default 50, max 200): the answer carries rows, has_more, and next_cursor — pass next_cursor " +
+			"back as cursor to fetch the next page; pages stay stable while new mail arrives.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
 		Bucket string `json:"bucket" jsonschema:"screener|imbox|paper_trail|feed|snoozed|set_aside|later"`
+		Limit  int    `json:"limit,omitempty" jsonschema:"page size 1-200; default 50"`
+		Cursor string `json:"cursor,omitempty" jsonschema:"next_cursor value from a previous page"`
 	}) (*mcp.CallToolResult, any, error) {
 		switch args.Bucket {
 		case "screener", "imbox", "paper_trail", "feed", "snoozed", "set_aside", "later":
 		default:
 			return nil, nil, errArgs("bucket must be one of screener, imbox, paper_trail, feed, snoozed, set_aside, later")
 		}
-		return text(c.get(ctx, "/buckets/"+args.Bucket, nil))
+		query := url.Values{}
+		if args.Limit > 0 {
+			query.Set("limit", strconv.Itoa(args.Limit))
+		}
+		if args.Cursor != "" {
+			query.Set("cursor", args.Cursor)
+		}
+		return text(c.get(ctx, "/buckets/"+args.Bucket, query))
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "search_mail",
-		Description: "Search subjects, participants, and previews across every connected mailbox.",
+		Name: "search_mail",
+		Description: "Search subjects, participants, and previews across every connected mailbox. " +
+			"Pages like list_bucket: rows, has_more, next_cursor; pass next_cursor as cursor to continue.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
-		Query string `json:"query" jsonschema:"free-text search"`
+		Query  string `json:"query" jsonschema:"free-text search"`
+		Limit  int    `json:"limit,omitempty" jsonschema:"page size 1-200; default 60"`
+		Cursor string `json:"cursor,omitempty" jsonschema:"next_cursor value from a previous page"`
 	}) (*mcp.CallToolResult, any, error) {
 		if args.Query == "" {
 			return nil, nil, errArgs("query is required")
 		}
-		return text(c.get(ctx, "/search", url.Values{"q": {args.Query}}))
+		query := url.Values{"q": {args.Query}}
+		if args.Limit > 0 {
+			query.Set("limit", strconv.Itoa(args.Limit))
+		}
+		if args.Cursor != "" {
+			query.Set("cursor", args.Cursor)
+		}
+		return text(c.get(ctx, "/search", query))
 	})
 
 	mcp.AddTool(s, &mcp.Tool{

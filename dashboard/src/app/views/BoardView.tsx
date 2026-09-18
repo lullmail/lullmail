@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { api } from "../lib/api";
-import { useLoad } from "../lib/useLoad";
+import { useLoad, type Page } from "../lib/useLoad";
 import { accountFilter, accountQS, cursor, resetSelection, setList } from "../lib/store";
 import { addCard, markDone, openThread, removeCard, setCardDone } from "../lib/actions";
 import type { Board, BoardCard, Row } from "../lib/types";
@@ -184,7 +184,7 @@ export function BoardView() {
   const { data, loading, error, reload } = useLoad<{ board: Board; snoozed: Row[]; snoozedError: string | null }>("board:" + lens, async (signal) => {
     const board = await api<Board>(accountQS("/board"), { signal });
     try {
-      return { board, snoozed: await api<Row[]>(accountQS("/buckets/snoozed"), { signal }), snoozedError: null };
+      return { board, snoozed: (await api<Page<Row>>(accountQS("/buckets/snoozed"), { signal })).rows, snoozedError: null };
     } catch (e) {
       return { board, snoozed: [], snoozedError: e instanceof Error ? e.message : "Snoozed mail did not load." };
     }

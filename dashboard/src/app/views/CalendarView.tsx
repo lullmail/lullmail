@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { api } from "../lib/api";
-import { useLoad } from "../lib/useLoad";
+import { useLoad, type Page } from "../lib/useLoad";
 import { accountFilter, accountQS, resetSelection, setList } from "../lib/store";
 import { openThread } from "../lib/actions";
 import type { Row } from "../lib/types";
@@ -57,8 +57,8 @@ export function CalendarView() {
   const [anchor, setAnchor] = useState<Date>(today);
 
   const lens = accountFilter.value;
-  const { data, loading, error, reload } = useLoad<Row[]>("cal:snoozed:" + lens, (signal) =>
-    api<Row[]>(accountQS("/buckets/snoozed"), { signal })
+  const { data, loading, error, reload } = useLoad<Row[]>("cal:snoozed:" + lens, async (signal) =>
+    (await api<Page<Row>>(accountQS("/buckets/snoozed"), { signal })).rows
   );
 
   useEffect(() => { resetSelection(); setList({ kind: "none", key: "calendar", loading: false, error: null, rows: [], senders: [], origin: null }); }, []);

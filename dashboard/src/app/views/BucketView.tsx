@@ -1,6 +1,5 @@
 import { useEffect } from "preact/hooks";
-import { api } from "../lib/api";
-import { useLoad } from "../lib/useLoad";
+import { usePaged } from "../lib/useLoad";
 import { accountFilter, accountQS, list, resetSelection, setList } from "../lib/store";
 import type { ListBucket, Row } from "../lib/types";
 import { Empty, ListSkeleton, PageHead } from "../ui/bits";
@@ -49,9 +48,17 @@ const COPY: Record<ListBucket, { title: string; sub: string; emptyTitle: string;
 export function BucketView({ bucket }: { bucket: ListBucket }) {
   const copy = COPY[bucket];
   const lens = accountFilter.value;
-  const { data, loading, error } = useLoad<Row[]>("bucket:" + bucket + ":" + lens, (signal) =>
-    api<Row[]>(accountQS("/buckets/" + bucket), { signal })
-  );
+  // Keyset pages (audit DATA-06): the first page loads with the view and
+  // "Load more" advances the server's cursor — new arrivals never shift
+  // what earlier pages already delivered.
+  const pathFor = (cursor: string | undefined) => {
+    let p = accountQS("/buckets/" + bucket);
+    p += p.includes("?") ? "&" : "?";
+    p += "limit=50";
+    if (cursor) p += "&cursor=" + encodeURIComponent(cursor);
+    return p;
+  };
+  const { rows, loading, error, hasMore, loadingMore, loadMore } = usePaged<Row>("bucket:" + bucket + ":" + lens, pathFor);
 
   useEffect(() => { resetSelection(); }, [bucket]);
 
@@ -62,21 +69,28 @@ export function BucketView({ bucket }: { bucket: ListBucket }) {
   useEffect(() => {
     setList({
       kind: "rows", key: "bucket:" + bucket + ":" + lens, loading, error,
-      rows: data || [], senders: [], origin: bucket,
+      rows, senders: [], origin: bucket,
     });
-  }, [data, loading, error, bucket, lens]);
+  }, [rows, loading, error, bucket, lens]);
 
   return (
     <>
       <BulkBar />
       {/* The subtitle explains the bucket, so it belongs most on an empty one. */}
       <PageHead title={copy.title} sub={copy.sub} />
-      {loading && !data && <ListSkeleton />}
+      {loading && rows.length === 0 && <ListSkeleton />}
       {error && <Empty title="That didn't load." sub={error} />}
-      {data && data.length === 0 && !loading && (
+      {rows.length === 0 && !loading && !error && (
         <Empty title={copy.emptyTitle} sub={copy.emptySub} />
       )}
-      {data && data.length > 0 && <MsgList rows={published === "bucket:" + bucket + ":" + lens ? list.value.rows : data} />}
+      {rows.length > 0 && <MsgList rows={published === "bucket:" + bucket + ":" + lens ? list.value.rows : rows} />}
+      {hasMore && (
+        <div class="load-more">
+          <button class="btn btn-outline" type="button" disabled={loadingMore} onClick={loadMore}>
+            {loadingMore ? "Loading…" : "Load more"}
+          </button>
+        </div>
+      )}
     </>
   );
 }
