@@ -122,9 +122,12 @@ func TestPersistSessionReturnsTokenOnlyAfterInsert(t *testing.T) {
 		if args[1] != "user-id" || args[3] != strings.Repeat("a", 300) || args[4] != loginMethodPasskey {
 			t.Fatalf("unexpected session args: %#v", args)
 		}
+		if args[5] != int64(3) {
+			t.Fatalf("session epoch = %v, want 3", args[5])
+		}
 		return authResult{}, nil
 	})
-	raw, err := a.persistSession(context.Background(), exec, r, "user-id", "unknown")
+	raw, err := a.persistSession(context.Background(), exec, r, "user-id", "unknown", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +138,7 @@ func TestPersistSessionReturnsTokenOnlyAfterInsert(t *testing.T) {
 	wantErr := errors.New("insert failed")
 	raw, err = a.persistSession(context.Background(), authExecFunc(func(context.Context, string, ...any) (sql.Result, error) {
 		return nil, wantErr
-	}), r, "user-id", loginMethodRecovery)
+	}), r, "user-id", loginMethodRecovery, 0)
 	if raw != "" || !errors.Is(err, wantErr) {
 		t.Fatalf("failed insert returned raw=%q err=%v", raw, err)
 	}
@@ -190,6 +193,21 @@ func TestLoginMethodConstantsAndSchemaSync(t *testing.T) {
 	add := "ALTER TABLE auth_sessions ADD CONSTRAINT auth_sessions_login_method_check"
 	if !strings.Contains(schemaSQL, add) {
 		t.Fatal("schema.sql is missing the login_method constraint re-add")
+	}
+}
+
+// The auth-epoch pair must keep converging on old installs (both columns
+// IF NOT EXISTS, both defaulting to 0 so standing sessions stay valid),
+// and the session lookup must carry the epoch join (audit AUTH-05
+// remainder / AUTH-01).
+func TestAuthEpochSchemaAndLookupSync(t *testing.T) {
+	for _, want := range []string{
+		"ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_epoch bigint NOT NULL DEFAULT 0",
+		"ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS auth_epoch bigint NOT NULL DEFAULT 0",
+	} {
+		if !strings.Contains(schemaSQL, want) {
+			t.Fatalf("schema.sql is missing the auth-epoch column: %q", want)
+		}
 	}
 }
 

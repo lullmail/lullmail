@@ -160,7 +160,7 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 	// screening preference is read under the SAME lock: a classifier that
 	// read "off" before the lock must not drain the Screener after the
 	// user re-enabled it (audit 3 DATA-03).
-	if err := lockAuthUser(ctx, tx, uid); err != nil {
+	if _, err := lockAuthUser(ctx, tx, uid); err != nil {
 		return err
 	}
 	screening, err := a.screeningEnabledTx(ctx, tx, uid)
@@ -513,7 +513,7 @@ func (a *App) handleDecide(w http.ResponseWriter, r *http.Request) {
 	// The owner-row lock serializes the decision with classification's
 	// batch insert, closing the window where both commit and neither sees
 	// the other (audit DATA-02).
-	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+	if _, err := lockAuthUser(r.Context(), tx, uid); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Decide Failed", err.Error())
 		return
 	}
@@ -582,7 +582,7 @@ func (a *App) handleUndecide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+	if _, err := lockAuthUser(r.Context(), tx, uid); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Undecide Failed", err.Error())
 		return
 	}
@@ -1315,7 +1315,7 @@ func (a *App) handlePrefs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+	if _, err := lockAuthUser(r.Context(), tx, uid); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Update Failed", err.Error())
 		return
 	}

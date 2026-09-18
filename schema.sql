@@ -85,6 +85,18 @@ CREATE TABLE IF NOT EXISTS auth_passwords (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Auth epochs (audit AUTH-05 remainder / pass-7 AUTH-01): every credential
+-- change advances users.auth_epoch inside the change transaction; sessions
+-- record the epoch they were minted under, and every session lookup
+-- requires the pair to match. A session minted from a credential verified
+-- before a concurrent change therefore dies the moment the change commits —
+-- even one whose INSERT was still in flight when the revocation DELETE ran.
+-- Both columns default to 0 so existing installs converge with every
+-- standing session still valid; applyProductSchema lands the pair in one
+-- transaction (half-applied would break every login).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_epoch bigint NOT NULL DEFAULT 0;
+ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS auth_epoch bigint NOT NULL DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS push_subscriptions (
   endpoint_hash text PRIMARY KEY,
   user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,

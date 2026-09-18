@@ -137,6 +137,10 @@ type webUser struct {
 	Handle      []byte
 	Email       string
 	DisplayName string
+	// authEpoch snapshots users.auth_epoch atomically with this load's
+	// credential read, so passkey login can reject a mint that raced a
+	// credential change (AUTH-01).
+	authEpoch   int64
 	Credentials []webauthn.Credential
 }
 
@@ -211,9 +215,17 @@ func (a *App) authenticateRequest(r *http.Request) (string, string, error) {
 		// The touch only fires when the row is more than a minute stale,
 		// so a revoked session is still refused immediately by the SELECT
 		// (audit 3 OPS-02).
+		//
+		// Both lookups require the session's auth epoch to equal the
+		// owner's current epoch: a credential change advances the epoch
+		// in its own transaction, so any session minted from a
+		// pre-change verification stops authenticating the moment the
+		// change commits — including one whose INSERT raced the change's
+		// revocation DELETE (audit AUTH-05 remainder / AUTH-01).
 		err := a.db.QueryRowContext(r.Context(), `
 			UPDATE auth_sessions SET last_seen_at = now()
 			WHERE id_hash = $1 AND expires_at > now() AND last_seen_at < now() - interval '1 minute'
+			  AND auth_epoch = (SELECT auth_epoch FROM users WHERE users.id = auth_sessions.user_id)
 			RETURNING user_id`, hash).Scan(&uid)
 		if err == nil {
 			return uid, hash, nil
@@ -222,7 +234,9 @@ func (a *App) authenticateRequest(r *http.Request) (string, string, error) {
 			return "", "", err
 		}
 		err = a.db.QueryRowContext(r.Context(), `
-			SELECT user_id FROM auth_sessions WHERE id_hash = $1 AND expires_at > now()`, hash).Scan(&uid)
+			SELECT auth_sessions.user_id FROM auth_sessions
+			WHERE id_hash = $1 AND expires_at > now()
+			  AND auth_epoch = (SELECT auth_epoch FROM users WHERE users.id = auth_sessions.user_id)`, hash).Scan(&uid)
 		if err == nil {
 			return uid, hash, nil
 		}
@@ -520,7 +534,14 @@ func (a *App) handleBootstrapFinish(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Recovery Setup Failed", err.Error())
 		return
 	}
-	rawSession, err := a.persistSession(r.Context(), tx, r, uid, loginMethodBootstrap)
+	// The mint runs inside the installation-wide lock taken above, so the
+	// epoch read here is current by construction.
+	epoch, err := lockAuthUser(r.Context(), tx, uid)
+	if err != nil {
+		writeProblem(w, 500, "Session Failed", err.Error())
+		return
+	}
+	rawSession, err := a.persistSession(r.Context(), tx, r, uid, loginMethodBootstrap, epoch)
 	if err != nil {
 		writeProblem(w, 500, "Session Failed", err.Error())
 		return
@@ -609,7 +630,8 @@ func (a *App) handleBootstrapPassword(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Setup Failed", err.Error())
 		return
 	}
-	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+	epoch, err := lockAuthUser(r.Context(), tx, uid)
+	if err != nil {
 		writeProblem(w, 500, "Setup Failed", err.Error())
 		return
 	}
@@ -636,7 +658,9 @@ func (a *App) handleBootstrapPassword(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Recovery Setup Failed", err.Error())
 		return
 	}
-	rawSession, err := a.persistSession(r.Context(), tx, r, uid, loginMethodPassword)
+	// First credential: the epoch is current by construction under the
+	// installation-wide lock.
+	rawSession, err := a.persistSession(r.Context(), tx, r, uid, loginMethodPassword, epoch)
 	if err != nil {
 		writeProblem(w, 500, "Session Failed", err.Error())
 		return
@@ -734,7 +758,7 @@ func (a *App) finishRegistration(w http.ResponseWriter, r *http.Request, kind st
 	}
 	name = utf8Prefix(name, 80)
 	id := base64.RawURLEncoding.EncodeToString(credential.ID)
-	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+	if _, err := lockAuthUser(r.Context(), tx, uid); err != nil {
 		writeProblem(w, 409, "Passkey Failed", "the account is being deleted")
 		return "", err
 	}
@@ -818,7 +842,16 @@ func (a *App) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Sign In Failed", err.Error())
 		return
 	}
-	if err := a.createSession(w, r, user.ID, loginMethodPasskey); err != nil {
+	// user.authEpoch was read atomically with the credentials the
+	// assertion was verified against, so the mint's epoch re-check under
+	// the users row lock rejects a session if any credential changed in
+	// between (AUTH-01: passkey verification and session creation are
+	// separate steps).
+	if err := a.createSession(w, r, user.ID, loginMethodPasskey, user.authEpoch); err != nil {
+		if errors.Is(err, errAuthEpochAdvanced) {
+			writeProblem(w, 401, "Sign In Failed", "credentials changed during sign-in — try again")
+			return
+		}
 		writeProblem(w, 500, "Session Failed", err.Error())
 		return
 	}
@@ -871,8 +904,16 @@ func (a *App) handlePasswordLogin(w http.ResponseWriter, r *http.Request) {
 		rejected()
 		return
 	}
+	// The hash and the owner's auth epoch are read as one statement: this
+	// is the verification snapshot. The mint re-checks the epoch under the
+	// users row lock, so a password change that commits between verify and
+	// session insert cannot leave a usable session behind (AUTH-05
+	// remainder / AUTH-01).
 	var encoded string
-	err = a.db.QueryRowContext(r.Context(), `SELECT hash FROM auth_passwords WHERE user_id=$1`, uid).Scan(&encoded)
+	var verifyEpoch int64
+	err = a.db.QueryRowContext(r.Context(),
+		`SELECT p.hash, u.auth_epoch FROM auth_passwords p JOIN users u ON u.id=p.user_id WHERE p.user_id=$1`, uid).
+		Scan(&encoded, &verifyEpoch)
 	if err == sql.ErrNoRows {
 		rejected()
 		return
@@ -898,7 +939,11 @@ func (a *App) handlePasswordLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.clearPasswordFailures(lockKey)
-	if err := a.createSession(w, r, uid, loginMethodPassword); err != nil {
+	if err := a.createSession(w, r, uid, loginMethodPassword, verifyEpoch); err != nil {
+		if errors.Is(err, errAuthEpochAdvanced) {
+			writeProblem(w, 401, "Sign In Failed", "credentials changed during sign-in — try again")
+			return
+		}
 		writeProblem(w, 500, "Session Failed", err.Error())
 		return
 	}
@@ -956,27 +1001,58 @@ func (a *App) takeCeremony(r *http.Request, kind string) (string, *webauthn.Sess
 	return uid.String, &session, nil
 }
 
-func (a *App) createSession(w http.ResponseWriter, r *http.Request, uid, method string) error {
-	raw, err := a.persistSession(r.Context(), a.db, r, uid, method)
+func (a *App) createSession(w http.ResponseWriter, r *http.Request, uid, method string, verifyEpoch int64) error {
+	raw, err := a.mintSession(r.Context(), r, uid, method, verifyEpoch)
 	if err == nil {
 		a.setCookie(w, sessionCookie, raw, sessionLifetime)
 	}
 	return err
 }
 
+// errAuthEpochAdvanced marks a sign-in whose credential verification
+// predates a committed credential change: the session is refused rather
+// than minted against stale proof (audit AUTH-05 remainder / AUTH-01).
+var errAuthEpochAdvanced = errors.New("credentials changed during sign-in")
+
+// mintSession inserts a session only when the owner's auth epoch still
+// matches the epoch observed when the credential was verified. The users
+// row lock serializes minting with credential changes (which take the same
+// lock before advancing the epoch), so a verification that predates a
+// change cannot produce a usable session even if it raced the change's
+// revocation DELETE mid-flight.
+func (a *App) mintSession(ctx context.Context, r *http.Request, uid, method string, verifyEpoch int64) (string, error) {
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	epoch, err := lockAuthUser(ctx, tx, uid)
+	if err != nil {
+		return "", err
+	}
+	if epoch != verifyEpoch {
+		return "", errAuthEpochAdvanced
+	}
+	raw, err := a.persistSession(ctx, tx, r, uid, method, epoch)
+	if err != nil {
+		return "", err
+	}
+	return raw, tx.Commit()
+}
+
 type sqlExecer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
-func (a *App) persistSession(ctx context.Context, db sqlExecer, r *http.Request, uid, method string) (string, error) {
+func (a *App) persistSession(ctx context.Context, db sqlExecer, r *http.Request, uid, method string, epoch int64) (string, error) {
 	raw, err := opaqueToken(32)
 	if err != nil {
 		return "", err
 	}
 	ua := utf8Prefix(r.UserAgent(), 300)
 	_, err = db.ExecContext(ctx, `INSERT INTO auth_sessions
-		(id_hash,user_id,expires_at,user_agent,login_method) VALUES ($1,$2,$3,$4,$5)`,
-		tokenHash(raw), uid, time.Now().Add(sessionLifetime), ua, normalizeLoginMethod(method))
+		(id_hash,user_id,expires_at,user_agent,login_method,auth_epoch) VALUES ($1,$2,$3,$4,$5,$6)`,
+		tokenHash(raw), uid, time.Now().Add(sessionLifetime), ua, normalizeLoginMethod(method), epoch)
 	if err != nil {
 		return "", err
 	}
@@ -1002,8 +1078,8 @@ func (a *App) sessionLoginMethod(ctx context.Context, session string) string {
 
 func (a *App) loadWebUser(ctx context.Context, uid string) (*webUser, error) {
 	var u webUser
-	err := a.db.QueryRowContext(ctx, `SELECT id,webauthn_handle,email,display_name FROM users WHERE id=$1`, uid).
-		Scan(&u.ID, &u.Handle, &u.Email, &u.DisplayName)
+	err := a.db.QueryRowContext(ctx, `SELECT id,webauthn_handle,email,display_name,auth_epoch FROM users WHERE id=$1`, uid).
+		Scan(&u.ID, &u.Handle, &u.Email, &u.DisplayName, &u.authEpoch)
 	if err != nil {
 		return nil, err
 	}
@@ -1074,13 +1150,36 @@ func (a *App) saveUsedCredential(ctx context.Context, uid string, credential *we
 // are the owner saying "something may be compromised" — stale sessions must
 // not outlive that, and a revocation that cannot be confirmed must fail the
 // change rather than silently leave sessions usable (audit AUTH-05).
-func revokeOtherSessionsTx(ctx context.Context, db sqlExecer, r *http.Request, uid string) error {
+//
+// The epoch advance is what closes the interleaving the in-transaction
+// DELETE could not (AUTH-05 remainder / AUTH-01): a login that verified an
+// old credential and is paused before its session INSERT would land that
+// row after this transaction committed, surviving the DELETE. Advancing
+// users.auth_epoch makes the changed-session-lookup join reject that
+// session anyway — no mint from a pre-change verification stays usable.
+// The changing request's own session is re-stamped onto the new epoch so
+// the owner stays signed in on the device making the change.
+func revokeOtherSessionsTx(ctx context.Context, tx *sql.Tx, r *http.Request, uid string) error {
+	var epoch int64
+	if err := tx.QueryRowContext(ctx,
+		`UPDATE users SET auth_epoch = auth_epoch + 1 WHERE id=$1 RETURNING auth_epoch`, uid,
+	).Scan(&epoch); err != nil {
+		return err
+	}
 	cookie, err := r.Cookie(sessionCookie)
 	if err != nil {
-		return nil // no current session to preserve
+		// No current session to preserve (bootstrap-token request):
+		// everything goes, and the epoch advance covers stragglers.
+		_, err := tx.ExecContext(ctx, `DELETE FROM auth_sessions WHERE user_id=$1`, uid)
+		return err
 	}
-	_, err = db.ExecContext(ctx,
-		`DELETE FROM auth_sessions WHERE user_id=$1 AND id_hash<>$2`, uid, tokenHash(cookie.Value))
+	current := tokenHash(cookie.Value)
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE auth_sessions SET auth_epoch=$1 WHERE user_id=$2 AND id_hash=$3`, epoch, uid, current); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx,
+		`DELETE FROM auth_sessions WHERE user_id=$1 AND id_hash<>$2`, uid, current)
 	return err
 }
 
@@ -1108,7 +1207,7 @@ func (a *App) replaceRecoveryCodes(ctx context.Context, r *http.Request, uid str
 		return nil, err
 	}
 	defer tx.Rollback()
-	if err := lockAuthUser(ctx, tx, uid); err != nil {
+	if _, err := lockAuthUser(ctx, tx, uid); err != nil {
 		return nil, err
 	}
 	codes, err := a.replaceRecoveryCodesTx(ctx, tx, uid)
@@ -1183,7 +1282,8 @@ func (a *App) handleRecoveryLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+	epoch, err := lockAuthUser(r.Context(), tx, uid)
+	if err != nil {
 		writeProblem(w, 401, "Recovery Failed", "that recovery code is not valid")
 		return
 	}
@@ -1198,7 +1298,7 @@ func (a *App) handleRecoveryLogin(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 401, "Recovery Failed", "that recovery code is not valid or was already used")
 		return
 	}
-	rawSession, err := a.persistSession(r.Context(), tx, r, uid, loginMethodRecovery)
+	rawSession, err := a.persistSession(r.Context(), tx, r, uid, loginMethodRecovery, epoch)
 	if err != nil {
 		writeProblem(w, 500, "Session Failed", err.Error())
 		return
@@ -1265,8 +1365,17 @@ func (a *App) handleTOTPLogin(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 401, "Sign In Failed", "invalid authenticator code")
 		return
 	}
+	// The secret and the owner's auth epoch are read as one statement:
+	// the verification snapshot. AUTH-01's finding was that this read sat
+	// before the step-claim lock with nothing connecting the two — a
+	// TOTP change committing in between still left the claim+mint able to
+	// session-ize a code from the retired secret. The epoch re-check
+	// under the claim lock closes that.
 	var sealed string
-	err = a.db.QueryRowContext(r.Context(), `SELECT secret_ciphertext FROM auth_totp WHERE user_id=$1 AND enabled_at IS NOT NULL`, uid).Scan(&sealed)
+	var verifyEpoch int64
+	err = a.db.QueryRowContext(r.Context(),
+		`SELECT t.secret_ciphertext, u.auth_epoch FROM auth_totp t JOIN users u ON u.id=t.user_id
+		 WHERE t.user_id=$1 AND t.enabled_at IS NOT NULL`, uid).Scan(&sealed, &verifyEpoch)
 	if err != nil {
 		writeProblem(w, 401, "Sign In Failed", "invalid authenticator code")
 		return
@@ -1296,8 +1405,13 @@ func (a *App) handleTOTPLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+	epoch, err := lockAuthUser(r.Context(), tx, uid)
+	if err != nil {
 		writeProblem(w, 500, "Sign In Failed", err.Error())
+		return
+	}
+	if epoch != verifyEpoch {
+		writeProblem(w, 401, "Sign In Failed", "credentials changed during sign-in — try again")
 		return
 	}
 	var claimed string
@@ -1309,7 +1423,7 @@ func (a *App) handleTOTPLogin(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 401, "Sign In Failed", "invalid authenticator code")
 		return
 	}
-	rawSession, err := a.persistSession(r.Context(), tx, r, uid, loginMethodTOTP)
+	rawSession, err := a.persistSession(r.Context(), tx, r, uid, loginMethodTOTP, epoch)
 	if err != nil {
 		writeProblem(w, 500, "Session Failed", err.Error())
 		return
@@ -1381,10 +1495,14 @@ func (a *App) handleSecurity(w http.ResponseWriter, r *http.Request) {
 }
 
 // Auth-material mutations lock the owner row first. PostgreSQL holds this
-// lock through commit, serializing passkey changes with full account deletion.
-func lockAuthUser(ctx context.Context, tx *sql.Tx, uid string) error {
-	var locked string
-	return tx.QueryRowContext(ctx, `SELECT id FROM users WHERE id=$1 FOR UPDATE`, uid).Scan(&locked)
+// lock through commit, serializing passkey changes with full account
+// deletion. The lock also returns the row's auth epoch, so session minting
+// can compare it against the epoch observed at credential verification
+// (audit AUTH-05 remainder / AUTH-01).
+func lockAuthUser(ctx context.Context, tx *sql.Tx, uid string) (int64, error) {
+	var epoch int64
+	err := tx.QueryRowContext(ctx, `SELECT auth_epoch FROM users WHERE id=$1 FOR UPDATE`, uid).Scan(&epoch)
+	return epoch, err
 }
 
 type queryRower interface {
@@ -1451,7 +1569,7 @@ func (a *App) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+	if _, err := lockAuthUser(r.Context(), tx, uid); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeProblem(w, 404, "Not Found", "no such account")
 		} else {
@@ -1509,7 +1627,7 @@ func (a *App) handleTOTPBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+	if _, err := lockAuthUser(r.Context(), tx, uid); err != nil {
 		writeProblem(w, 500, "TOTP Failed", err.Error())
 		return
 	}
@@ -1566,7 +1684,7 @@ func (a *App) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+	if _, err := lockAuthUser(r.Context(), tx, uid); err != nil {
 		writeProblem(w, 500, "TOTP Failed", err.Error())
 		return
 	}
@@ -1616,7 +1734,7 @@ func (a *App) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+	if _, err := lockAuthUser(r.Context(), tx, uid); err != nil {
 		writeProblem(w, 500, "TOTP Failed", err.Error())
 		return
 	}
@@ -1680,7 +1798,7 @@ func (a *App) handlePasswordSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+	if _, err := lockAuthUser(r.Context(), tx, uid); err != nil {
 		writeProblem(w, 500, "Password Failed", err.Error())
 		return
 	}
@@ -1759,7 +1877,7 @@ func (a *App) handlePasswordDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+	if _, err := lockAuthUser(r.Context(), tx, uid); err != nil {
 		writeProblem(w, 500, "Password Failed", err.Error())
 		return
 	}
@@ -1841,7 +1959,13 @@ func (a *App) handleSessions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "current": id == current})
 		return
 	}
-	rows, err := a.db.QueryContext(r.Context(), `SELECT id_hash,created_at,last_seen_at,expires_at,user_agent FROM auth_sessions WHERE user_id=$1 AND expires_at>now() ORDER BY last_seen_at DESC`, uid)
+	// Epoch-matched sessions only: a row left behind by a raced mint is
+	// dead server-side and must not be listed as a live device.
+	rows, err := a.db.QueryContext(r.Context(), `
+		SELECT s.id_hash,s.created_at,s.last_seen_at,s.expires_at,s.user_agent
+		FROM auth_sessions s JOIN users u ON u.id = s.user_id
+		WHERE s.user_id=$1 AND s.expires_at>now() AND s.auth_epoch = u.auth_epoch
+		ORDER BY s.last_seen_at DESC`, uid)
 	if err != nil {
 		writeProblem(w, 500, "Sessions Failed", err.Error())
 		return
@@ -1897,7 +2021,7 @@ func (a *App) handleFullAccountDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
+	if _, err := lockAuthUser(r.Context(), tx, uid); err != nil {
 		writeProblem(w, 500, "Delete Failed", err.Error())
 		return
 	}
