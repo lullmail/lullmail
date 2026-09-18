@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -70,6 +71,11 @@ type MessageLocator interface {
 // PgStore is the Nucleus-backed Store.
 type PgStore struct {
 	pool *pgxpool.Pool
+
+	// advOnce probes advisory-lock support once per store (see
+	// lockAccountTx); Nucleus over pgwire has no pg_advisory_* family.
+	advOnce sync.Once
+	advOK   bool
 }
 
 // Open connects to Nucleus (or PostgreSQL) at the given URL.
@@ -87,14 +93,50 @@ func Open(ctx context.Context, url string) (*PgStore, error) {
 
 func (s *PgStore) Close() { s.pool.Close() }
 
-func (s *PgStore) Migrate(ctx context.Context) error {
-	for _, stmt := range Schema {
-		if _, err := s.pool.Exec(ctx, stmt); err != nil {
-			return fmt.Errorf("mail: migrate: %w", err)
+// advisoryReady probes advisory-lock support once per store.
+func (s *PgStore) advisoryReady() bool {
+	s.advOnce.Do(func() {
+		if advisoryUnsupported.Load() {
+			s.advOK = false
+			return
 		}
+		if advisorySupported.Load() {
+			s.advOK = true
+			return
+		}
+		conn, err := s.pool.Acquire(context.Background())
+		if err != nil {
+			s.advOK = false
+			return
+		}
+		defer conn.Release()
+		ok, err := advisoryCheck(context.Background(), conn.Conn())
+		if err != nil {
+			s.advOK = false
+			return
+		}
+		s.advOK = ok
+	})
+	return s.advOK
+}
+
+// lockAccountTx takes the account maintenance advisory lock as the
+// transaction's FIRST statement — the documented lock order every mirror
+// writer shares with the product's retention/deletion transactions (audit
+// SYNC-04). Transaction-scoped: it releases at commit or rollback, and a
+// backend without advisory support (Nucleus) skips it after one probe.
+func (s *PgStore) lockAccountTx(ctx context.Context, tx pgx.Tx, acct AccountID) error {
+	if !s.advisoryReady() {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, AccountLockKey(acct)); err != nil {
+		return fmt.Errorf("mail: account maintenance lock: %w", err)
 	}
 	return nil
 }
+
+// Migrate lives in migrate.go: the versioned runner with ledger,
+// checksums, and advisory-lock serialization (audit OPS-02).
 
 // Drop removes every mail table. Callers use this to prove the mirror is
 // rebuildable; nothing in the sync path calls it.
@@ -181,6 +223,9 @@ func (s *PgStore) PutMailboxes(ctx context.Context, acct AccountID, boxes []Mail
 		return fmt.Errorf("mail: put mailboxes: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	if err := s.lockAccountTx(ctx, tx, acct); err != nil {
+		return err
+	}
 
 	for _, b := range boxes {
 		_, err := tx.Exec(ctx,
@@ -203,6 +248,7 @@ func (s *PgStore) PutMailboxes(ctx context.Context, acct AccountID, boxes []Mail
 		`SELECT id FROM mail_mailboxes WHERE account_id = $1`,
 		`SELECT mailbox_id FROM mail_sync_state WHERE account_id = $1`,
 		`SELECT mailbox_id FROM mail_message_mailboxes WHERE account_id = $1`,
+		`SELECT mailbox_id FROM mirror_scans WHERE account_id = $1`,
 	} {
 		rows, err := tx.Query(ctx, query, string(acct))
 		if err != nil {
@@ -256,6 +302,8 @@ func (s *PgStore) PutMailboxes(ctx context.Context, acct AccountID, boxes []Mail
 			`DELETE FROM mail_message_mailboxes WHERE account_id = $1 AND mailbox_id = $2`,
 			`DELETE FROM mail_sync_state WHERE account_id = $1 AND mailbox_id = $2`,
 			`DELETE FROM mail_mailboxes WHERE account_id = $1 AND id = $2`,
+			`DELETE FROM mirror_scan_seen WHERE scan_id IN (SELECT id FROM mirror_scans WHERE account_id = $1 AND mailbox_id = $2)`,
+			`DELETE FROM mirror_scans WHERE account_id = $1 AND mailbox_id = $2`,
 		} {
 			if _, err := tx.Exec(ctx, stmt, string(acct), string(box)); err != nil {
 				return fmt.Errorf("mail: remove stale mailbox %s: %w", box, err)
@@ -322,7 +370,19 @@ func (s *PgStore) PutEnvelopes(ctx context.Context, acct AccountID, envs []Envel
 		return fmt.Errorf("mail: put envelopes: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	if err := s.lockAccountTx(ctx, tx, acct); err != nil {
+		return err
+	}
+	if err := putEnvelopesTx(ctx, tx, acct, envs); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
 
+// putEnvelopesTx is the envelope upsert shared by the delta path and
+// staged scan pages, so both write with identical semantics inside a
+// caller-owned transaction.
+func putEnvelopesTx(ctx context.Context, tx pgx.Tx, acct AccountID, envs []Envelope) error {
 	for i := range envs {
 		e := &envs[i]
 		if err := e.ID.Validate(); err != nil {
@@ -379,7 +439,7 @@ func (s *PgStore) PutEnvelopes(ctx context.Context, acct AccountID, envs []Envel
 			}
 		}
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 const envelopeColumns = `id, thread_id, fingerprint, subject, sent_at, received_at,
@@ -502,6 +562,9 @@ func (s *PgStore) DeleteMessages(ctx context.Context, acct AccountID, ids []Mess
 		return fmt.Errorf("mail: delete messages: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	if err := s.lockAccountTx(ctx, tx, acct); err != nil {
+		return err
+	}
 
 	for _, id := range ids {
 		for _, stmt := range []string{
@@ -531,6 +594,9 @@ func (s *PgStore) RemoveFromMailbox(ctx context.Context, acct AccountID, box Mai
 		return fmt.Errorf("mail: remove from mailbox: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	if err := s.lockAccountTx(ctx, tx, acct); err != nil {
+		return err
+	}
 
 	var orphaned []MessageID
 	for _, id := range ids {
@@ -572,16 +638,23 @@ func (s *PgStore) RemoveFromMailbox(ctx context.Context, acct AccountID, box Mai
 
 func (s *PgStore) PutBody(ctx context.Context, acct AccountID, b *Body) error {
 	parts, _ := json.Marshal(b.Parts)
-	_, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("mail: put body: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := s.lockAccountTx(ctx, tx, acct); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO mail_bodies (account_id, message_id, text_body, html_body, parts, fetched_at)
 		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT (account_id, message_id) DO UPDATE SET
 		   text_body = $3, html_body = $4, parts = $5, fetched_at = $6`,
-		string(acct), string(b.MessageID), b.Text, b.HTML, string(parts), time.Now().UTC())
-	if err != nil {
+		string(acct), string(b.MessageID), b.Text, b.HTML, string(parts), time.Now().UTC()); err != nil {
 		return fmt.Errorf("mail: put body: %w", err)
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (s *PgStore) Body(ctx context.Context, acct AccountID, id MessageID) (*Body, error) {
@@ -670,12 +743,23 @@ func (s *PgStore) PutCursor(ctx context.Context, acct AccountID, box MailboxID, 
 	return nil
 }
 
+// ResetMailbox discards every message and the cursor for one mailbox,
+// so the next sync refetches from empty.
+//
+// LEGACY RECOVERY PATH (audit SYNC-03): deleting before the replacement
+// enumeration exists is exactly the destructive ordering the staged-scan
+// machinery replaced. The engine now calls this only for stores that do
+// not implement ScanStore; it remains on PgStore for compatibility with
+// callers that ask for a hard reset explicitly.
 func (s *PgStore) ResetMailbox(ctx context.Context, acct AccountID, box MailboxID) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("mail: reset mailbox: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	if err := s.lockAccountTx(ctx, tx, acct); err != nil {
+		return err
+	}
 
 	ids, err := s.EnvelopeIDs(ctx, acct, box)
 	if err != nil {
@@ -775,3 +859,217 @@ func nullTime(t time.Time) any {
 }
 
 var _ Store = (*PgStore)(nil)
+
+// ---------------------------------------------------------------------------
+// Staged reconciliation scans (audit SYNC-03)
+// ---------------------------------------------------------------------------
+
+var _ ScanStore = (*PgStore)(nil)
+
+// BeginScan starts a staged scan, discarding any previous staged progress
+// for the mailbox. Nothing live is touched.
+func (s *PgStore) BeginScan(ctx context.Context, acct AccountID, box MailboxID) (*Scan, error) {
+	scan := &Scan{
+		ID:           NewScanID(),
+		Account:      acct,
+		Mailbox:      box,
+		Continuation: "",
+		StartedAt:    time.Now().UTC(),
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("mail: begin scan: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := s.lockAccountTx(ctx, tx, acct); err != nil {
+		return nil, err
+	}
+	for _, stmt := range []string{
+		`DELETE FROM mirror_scan_seen WHERE scan_id IN
+		   (SELECT id FROM mirror_scans WHERE account_id = $1 AND mailbox_id = $2)`,
+		`DELETE FROM mirror_scans WHERE account_id = $1 AND mailbox_id = $2`,
+	} {
+		if _, err := tx.Exec(ctx, stmt, string(acct), string(box)); err != nil {
+			return nil, fmt.Errorf("mail: discard previous scan: %w", err)
+		}
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO mirror_scans (id, account_id, mailbox_id, continuation, started_at)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		string(scan.ID), string(acct), string(box), string(scan.Continuation), scan.StartedAt); err != nil {
+		return nil, fmt.Errorf("mail: insert scan: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return scan, nil
+}
+
+func scanFromRow(acct AccountID, id, mailbox, continuation string, startedAt *time.Time) *Scan {
+	scan := &Scan{ID: ScanID(id), Account: acct, Mailbox: MailboxID(mailbox), Continuation: Cursor(continuation)}
+	if startedAt != nil {
+		scan.StartedAt = *startedAt
+	}
+	return scan
+}
+
+func (s *PgStore) RunningScan(ctx context.Context, acct AccountID, box MailboxID) (*Scan, error) {
+	var id, mailbox, continuation string
+	var startedAt *time.Time
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, mailbox_id, continuation, started_at FROM mirror_scans
+		  WHERE account_id = $1 AND mailbox_id = $2`,
+		string(acct), string(box)).Scan(&id, &mailbox, &continuation, &startedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNoStore
+	}
+	if err != nil {
+		return nil, fmt.Errorf("mail: running scan: %w", err)
+	}
+	return scanFromRow(acct, id, mailbox, continuation, startedAt), nil
+}
+
+func (s *PgStore) RunningScans(ctx context.Context, acct AccountID) ([]Scan, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, mailbox_id, continuation, started_at FROM mirror_scans
+		  WHERE account_id = $1 ORDER BY mailbox_id`, string(acct))
+	if err != nil {
+		return nil, fmt.Errorf("mail: running scans: %w", err)
+	}
+	defer rows.Close()
+	var out []Scan
+	for rows.Next() {
+		var id, mailbox, continuation string
+		var startedAt *time.Time
+		if err := rows.Scan(&id, &mailbox, &continuation, &startedAt); err != nil {
+			return nil, fmt.Errorf("mail: running scans scan: %w", err)
+		}
+		out = append(out, *scanFromRow(acct, id, mailbox, continuation, startedAt))
+	}
+	return out, rows.Err()
+}
+
+// ApplyScanPage stages one page atomically: envelopes upserted, seen IDs
+// recorded, continuation advanced — one transaction under the account
+// maintenance lock. A failure stages nothing.
+func (s *PgStore) ApplyScanPage(ctx context.Context, scan ScanID, envs []Envelope, seen []MessageID, next Cursor) error {
+	var acct AccountID
+	var box MailboxID
+	if err := s.pool.QueryRow(ctx,
+		`SELECT account_id, mailbox_id FROM mirror_scans WHERE id = $1`,
+		string(scan)).Scan(&acct, &box); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNoStore
+		}
+		return fmt.Errorf("mail: scan page lookup: %w", err)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("mail: apply scan page: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := s.lockAccountTx(ctx, tx, acct); err != nil {
+		return err
+	}
+
+	if err := putEnvelopesTx(ctx, tx, acct, envs); err != nil {
+		return err
+	}
+
+	batch := &pgx.Batch{}
+	for _, id := range seen {
+		batch.Queue(`INSERT INTO mirror_scan_seen (scan_id, message_id) VALUES ($1, $2)
+		             ON CONFLICT (scan_id, message_id) DO NOTHING`, string(scan), string(id))
+	}
+	batch.Queue(`UPDATE mirror_scans SET continuation = $2 WHERE id = $1`, string(scan), string(next))
+	if err := tx.SendBatch(ctx, batch).Close(); err != nil {
+		return fmt.Errorf("mail: stage scan page: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// FinishScan completes the scan authoritatively in one transaction under
+// the account maintenance lock: memberships of this mailbox absent from
+// the seen set are pruned, messages left with no membership anywhere are
+// deleted (their bodies explicitly, so the semantics hold on backends
+// without FK enforcement), the terminal cursor is published, and the scan
+// rows drop. This is the ONLY deletion in the recovery path.
+func (s *PgStore) FinishScan(ctx context.Context, acct AccountID, box MailboxID, scan ScanID, terminal Cursor) (int, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("mail: finish scan: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := s.lockAccountTx(ctx, tx, acct); err != nil {
+		return 0, err
+	}
+
+	var exists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM mirror_scans WHERE id = $1 AND account_id = $2 AND mailbox_id = $3)`,
+		string(scan), string(acct), string(box)).Scan(&exists); err != nil {
+		return 0, err
+	}
+	if !exists {
+		return 0, ErrNoStore
+	}
+
+	// Prune only what a COMPLETE enumeration omitted, and only for this
+	// mailbox: a message still filed elsewhere keeps its other
+	// memberships.
+	tag, err := tx.Exec(ctx,
+		`DELETE FROM mail_message_mailboxes mm
+		  WHERE mm.account_id = $1 AND mm.mailbox_id = $2
+		    AND NOT EXISTS (
+		      SELECT 1 FROM mirror_scan_seen s
+		       WHERE s.scan_id = $3 AND s.message_id = mm.message_id)`,
+		string(acct), string(box), string(scan))
+	if err != nil {
+		return 0, fmt.Errorf("mail: prune absent memberships: %w", err)
+	}
+	pruned := int(tag.RowsAffected())
+
+	// A message with no membership left anywhere is unreachable at the
+	// provider and strands in the mirror otherwise. The orphan-body sweep
+	// after it is what keeps the semantics identical on backends without
+	// FK enforcement (on PostgreSQL the ON DELETE CASCADE already did it).
+	for _, stmt := range []string{
+		`DELETE FROM mail_messages m
+		  WHERE m.account_id = $1
+		    AND NOT EXISTS (
+		      SELECT 1 FROM mail_message_mailboxes mm
+		       WHERE mm.account_id = m.account_id AND mm.message_id = m.id)`,
+		`DELETE FROM mail_bodies b
+		  WHERE b.account_id = $1
+		    AND NOT EXISTS (
+		      SELECT 1 FROM mail_messages m
+		       WHERE m.account_id = b.account_id AND m.id = b.message_id)`,
+	} {
+		if _, err := tx.Exec(ctx, stmt, string(acct)); err != nil {
+			return 0, fmt.Errorf("mail: delete unmapped messages: %w", err)
+		}
+	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO mail_sync_state (account_id, mailbox_id, cursor, synced_at)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (account_id, mailbox_id) DO UPDATE SET cursor = $3, synced_at = $4`,
+		string(acct), string(box), string(terminal), time.Now().UTC()); err != nil {
+		return 0, fmt.Errorf("mail: publish scan cursor: %w", err)
+	}
+
+	for _, stmt := range []string{
+		`DELETE FROM mirror_scan_seen WHERE scan_id = $1`,
+		`DELETE FROM mirror_scans WHERE id = $1`,
+	} {
+		if _, err := tx.Exec(ctx, stmt, string(scan)); err != nil {
+			return 0, fmt.Errorf("mail: drop scan rows: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return pruned, nil
+}
