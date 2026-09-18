@@ -47,8 +47,20 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   The SYNC-03 (pass 7) identity-promotion remainder stays deferred below —
   it needs the OPS-03 cross-pool transaction bridge, which stays deferred
   with it (not built, noted).
+- Idempotency + offline-v2 + API-contract pass (2026-09-18, final): the
+  four biggest deferrals closed together because they share one contract
+  surface. WEB-04/WEB-03/R07 closed server-side (`0b30f84` api_mutations)
+  and client-side (`6f99201` Web Locks replay + idempotency keys);
+  WEB-07/WEB-01/R08+F11+F12 and the F05 remainder closed as the ratified
+  offline-v2 storage (`9e52433`, plus the fresh-device preparation fix
+  `0f3b8cc` caught by the new fake-indexeddb tests); DATA-06/DATA-11
+  closed with keyset pagination and the dashboard load-more + MCP halves
+  (`3df8501`); DATA-07/DATA-05 closed with absolute-UTC snooze and exact
+  undo snapshots across server, dashboard and MCP (`0e294ef`); OPS-01
+  closed with route body bounds, decode admission, provider read caps and
+  export budgets, registered in `docs/route-limits.md` (`f281466`).
 
-Open items: 22 (all deferrals; 7 of them are remainders of partial fixes)
+Open items: 16 (all deferrals; 4 of them are remainders of partial fixes)
 
 Standing decision: **SEND-01 = SEND-03 (pass 6) = lullmail-10 below.** The
 durable-outbox finding appears in both later reports; it is the same item
@@ -63,14 +75,14 @@ as this register's one recorded product deferral, and the deferral stands.
 - Fixed (round 3, commits tagged `audit 4-F07`): `handleSend` rejects both the fresh-send and reply-parent paths synchronously with 422 "Sending Not Configured" for JMAP accounts, before queue acceptance - the draft stays in the composer instead of silently dying in delivery.
 - Deferral (remainder): implementing the real transport is a product feature, not a repair: either JMAP EmailSubmission against the session-advertised capability or a separately verified SMTP submission credential (a transport discriminator plus encrypted SMTP fields on the account). Until one lands, JMAP accounts are read-only for sending by design of the guard; the report's `can_send` accounts-API surface belongs to that same feature.
 
-## F05 (round 3) - Medium - PARTIALLY FIXED (transitional patch landed), storage redesign DEFERRED (offline-v2)
+## F05 (round 3) - Medium - FIXED (offline-v2 storage landed)
 
 **Draft persistence failed silently on large undo seeds and dropped attachment-only drafts**
 
 - Kind: Storage-layer defect + design remainder
 - Evidence: Confirmed per the report - the ring serialized full base64 attachment sets into localStorage and suppressed write errors; a multi-megabyte undo seed blew the quota and dropped the whole ring's save; `restoreDrafts` tested only to/subject/body.
-- Fixed (round 3, commits tagged `audit 4-F05`): the ring persists metadata plus a `hasAttachments` marker (payloads stay in IndexedDB keyed by draft id, where Compose already restores them), restore keeps attachment-only and cc/bcc-only drafts, and quota failures surface through a persistent `draftsUnsaved` indicator in the compose ring instead of a swallowed exception.
-- Deferral (remainder): one complete draft as a single IndexedDB record with the ordered ring in the same transaction (the report's design) removes the two-engine atomicity gap between the ring and the per-draft attachment records. That is the same storage-layer redesign tracked as the offline-v2 work in WEB-07 below, and it needs the same product decision about what logout/owner change means for drafts.
+- Fixed (round 3, commits tagged `audit 4-F05`): the transitional patch kept the ring in localStorage with payloads in IndexedDB, surfaced quota failures, and kept attachment-only drafts restorable.
+- Fixed (remainder, offline-v2 `9e52433`): one draft is ONE IndexedDB record — fields and attachment payloads in the same row, the draft ring those rows in seq order — so the two-engine atomicity gap and the localStorage quota ceiling are both gone. Regression (fake-indexeddb): field edits merge into the single record without clobbering its attachments (`offline-storage.test.ts`).
 
 ## lullmail__lullmail-10 - P2 / SEND-03 (pass 6) / SEND-01 (pass 7) High - DEFERRED (decision)
 
@@ -113,35 +125,38 @@ as this register's one recorded product deferral, and the deferral stands.
 - Evidence: Confirmed. FIXED in pass 7: `setOriginForSetup` now validates the candidate on a Config copy and publishes origin + WebAuthn instance together only after construction succeeds, and `handleLoginFinish` reads the instance through the locked accessor (commit tagged `audit 3-AUTH-04`). Bootstrap token retirement already mutates under waMu.
 - Deferral (remainder): Other request handlers still read `a.cfg` fields directly rather than one immutable published snapshot, so a reader can mix pre- and post-swap values mid-request. The report's `atomic.Pointer[runtimeAuth]` migration of every reader is a cross-cutting refactor of the auth/config surface; defer as its own pass. The contained fix removed the dangerous case (a failed setup leaving a half-updated live config).
 
-## WEB-04 (pass 6) / WEB-03 (pass 7) / R07 (round 3) - Medium - DEFERRED
+## WEB-04 (pass 6) / WEB-03 (pass 7) / R07 (round 3) - Medium - FIXED (idempotency + offline-v2 pass, 2026-09-18)
 
 **Offline replay is not coordinated across tabs or made idempotent at the server**
 
 - Kind: Concurrency/uncertain-retry gap
-- Evidence: Confirmed per both reports — each tab can replay the shared queue and no idempotency key exists server-side. Pass 7 landed the retry-scheduling and rejection-surfacing companions (WEB-04/WEB-05 there), so failures are no longer stranded or invisible; round 3 (F09/F10) additionally made replay strictly order-preserving and self-rescheduling on network-only failures. Duplication under multi-tab replay or a lost acknowledgment remains.
-- Deferral: The correctness boundary the reports demand is server-side mutation idempotency (an `api_mutations` table keyed by user+key with request-hash conflict detection, plus Web Locks in the browser). That is a new API contract and table, and per-mutation response persistence across every mutable endpoint — a subsystem, not a repair. Browser-side locks alone were deliberately not added: without the server contract they only narrow the duplicate window while implying a guarantee the system does not make.
+- Evidence: Confirmed per both reports — each tab can replay the shared queue and no idempotency key exists server-side. Pass 7 landed the retry-scheduling and rejection-surfacing companions (WEB-04/WEB-05 there), so failures are no longer stranded or invisible; round 3 (F09/F10) additionally made replay strictly order-preserving and self-rescheduling on network-only failures. Duplication under multi-tab replay or a lost acknowledgment remained.
+- Fixed (server, `0b30f84`): the `api_mutations` table (product migration 4, versioned runner from the OPS-02 work) keys one recorded answer per (user, Idempotency-Key ≤128 chars) with request-hash conflict detection (409 on reuse with a different request); the recorded answer — success or handler error — replays verbatim on a lost acknowledgment, recorded answers prune after 30 days, and the buffered idempotency copy of the request body is capped at 1 MiB. Every mutable product endpoint takes the key.
+- Fixed (client, `6f99201`): every queueable mutation mints its key before the first fetch attempt, queued rows carry it, replay sends it, and the replay pass runs under a Web Locks held lock (uncoordinated fallback only where `navigator.locks` is absent — safe now that the server contract exists).
+- Regressions: `TestIntegrationConcurrentSameKeyMutationAppliesOnce` (parallel same-key racers apply exactly once), `TestIntegrationLostAcknowledgmentReplaysRecordedResponse`, `TestIntegrationIdempotencyKeyConflictRejectsDifferentRequest`, `TestIntegrationIdempotentHandlerErrorIsReplayed`, `TestIntegrationIdempotencyKeyLengthAndBodyBound`; dashboard-side key minting/transport tests.
 
-## WEB-07 (pass 6) / WEB-01 (pass 7) / R08+F11+F12 remainders (round 3) - Medium - DEFERRED (partial fixes landed)
+## WEB-07 (pass 6) / WEB-01 (pass 7) / R08+F11+F12 remainders (round 3) - Medium - FIXED (offline-v2 pass, 2026-09-18)
 
 **Browser caches and drafts need an immutable owner namespace and generation fencing**
 
 - Kind: Isolation gap; exposure depends on logout/reset paths
-- Evidence: Confirmed per both reports — persistent owner identity is the (mutable, reusable) email; drafts use global storage keys; in-flight reads are not fenced against an owner change. Pass 7 made the wipe itself atomic and error-propagating (WEB-02 there), which closes the "believed erased but was not" half. Round 3 landed the two contained halves the fourth report isolated: storage preparation failure now suspends offline access fail-closed instead of keep operating on the old namespace (F11, commits tagged `audit 4-F11`), and disconnect/retention purge this device's response snapshots with the reader closed (F12, `audit 4-F12`).
-- Deferral (remainder): `installation_id`+`user_id` namespacing, a generation counter fencing every async authenticated read inside the write transaction, abort-on-owner-change, per-mailbox cache records so one account's deletion does not clear every account's snapshots, and IndexedDB store/key migration for existing clients is a storage-layer redesign touching every offline call site (the reports' Scope model). Requires the same product decision as WEB-04 about what logout means for offline data; the single-record drafts design (F05 remainder) lands with it. Tracked as the offline-v2 storage work.
+- Evidence: Confirmed per both reports — persistent owner identity is the (mutable, reusable) email; drafts use global storage keys; in-flight reads are not fenced against an owner change. Pass 7 made the wipe itself atomic and error-propagating (WEB-02 there). Round 3 landed the contained halves: fail-closed suspension on storage-preparation failure (F11) and disconnect/retention snapshot purge (F12).
+- Fixed (remainder, offline-v2 `9e52433`): every offline store is namespaced `installation_id/user_id` (the server mints the installation id into `app_settings`; both ids ride `/auth/status`); a generation counter bumped on every owner/account switch and wipe fences every async authenticated read — a stale-generation write is discarded inside the write transaction, never published; cache records are per-mailbox so one account's deletion keeps other mailboxes' snapshots; a one-time migration carries the SAME owner's parked drafts and pending queue from the v1 engine and wipes a different owner's remnants. Logout semantics are the founder-ratified ones: logout/owner switch clears that owner's caches, queue, and drafts (no survivorship) — implemented as the one-transaction wipe with the generation counter deliberately never removed.
+- Fixed (follow-up, `0f3b8cc`): the v1-remnant wipe inside the one-time migration stripped the just-written namespace on a fresh device, silently no-op'ing every offline store; the migration now runs before the markers are written. Caught by the first real-IndexedDB tests (fake-indexeddb): the logout wipe clears caches/queue/attachments/drafts, drops the namespace marker, and keeps the generation counting.
 
-## DATA-06 (pass 6) / DATA-11 (pass 7) - Medium - DEFERRED (partial fix landed)
+## DATA-06 (pass 6) / DATA-11 (pass 7) - Medium - FIXED (idempotency + offline-v2 pass, 2026-09-18)
 
 **Bucket/search result limits have no continuation contract**
 
 - Evidence: Confirmed — buckets cap at 200 threads and search at 60 with no cursor; a client cannot distinguish truncation from completeness. FIXED in pass 7: the deterministic tie-breaker (received_at DESC, id DESC) landed on bucket and search ordering, so equal-timestamp rows no longer reorder between requests (commit tagged `audit 3-DATA-11`).
-- Deferral (remainder): Keyset pagination on the outer per-thread result plus `has_more`/`next_cursor` is a versioned API change with dashboard load-more and MCP tool support landing together. Truncation today is silent but bounded.
+- Fixed (remainder, `3df8501`): buckets and search answer `{rows, has_more, next_cursor}` and accept `?cursor=` + `?limit=` (1-200, clamped). The cursor pins the last row's (received_at DESC NULLS LAST, id DESC) key, so rows arriving between pages never duplicate or skip what earlier pages delivered; received_at comparisons go through `AT TIME ZONE 'UTC'` because the mirror stores UTC-naive timestamps. Dashboard buckets and search page at 50 with a load-more tail (board and calendar unwrap page one); MCP `list_bucket` and `search_mail` expose limit/cursor and document the iteration. Regressions: `TestIntegrationKeysetPaginationStableUnderInsertion` (walk to exhaustion while inserting), malformed-cursor 400, limit clamping.
 
-## DATA-07 (pass 6) / DATA-05 (pass 7) - Medium - DEFERRED
+## DATA-07 (pass 6) / DATA-05 (pass 7) - Medium - FIXED (idempotency + offline-v2 pass, 2026-09-18)
 
 **Relative snooze durations make offline replay and undo change the intended date**
 
 - Evidence: Confirmed — snoozes store server-relative day counts; replay applies them later; undo reconstructs a prior snooze through rounded remaining days. Pass 7 did not change this.
-- Deferral: Absolute-UTC snooze timestamps with `until: null` semantics, undo snapshots of the exact prior instant, and dashboard/MCP callers updated together is an API contract migration across server, dashboard and MCP; the offline-queue path only exists for the actions the dashboard already sends, so a server-side acceptance of absolute timestamps alone would change nothing users touch. The queue replay timing itself got fairer in pass 7 (WEB-05 retry scheduling), but the deadline semantics remain relative.
+- Fixed (`0e294ef`): `set_aside` takes `until` — an absolute RFC3339 instant captured at user-intent time and stored verbatim, so offline replay applies the exact intended deadline no matter when it runs; `until: null` parks the thread as someday (the later bucket, no date); `until_days` stays as deprecated server-relative compat. The response echoes the applied bucket and `snooze_until` so undo snapshots are exact: the dashboard captures the row's prior instant verbatim and restores it (the old path re-derived rounded day counts from remaining time), and the SnoozeMenu deadline is computed at click time. MCP `message_action` takes `until` (or null) with the legacy days form still accepted. Regressions: `TestIntegrationSnoozeUntilAbsoluteAndUndoExactness` (microsecond equality through move-and-restore), `TestIntegrationSnoozeUntilNullIsSomeday`, `TestIntegrationSnoozeValidationAndLegacyPath` (garbage-until 422, legacy bounds).
 
 ## DATA-04 (pass 7) / R11+F20 remainder (round 3) - Medium - DEFERRED (product design)
 
@@ -199,12 +214,12 @@ as this register's one recorded product deferral, and the deferral stands.
 - Evidence: Confirmed per both reports — no `Prefer: IdType="ImmutableId"` header on any request, while Graph default IDs are mutable on moves.
 - Deferral: Both reports are explicit that a header-only rollout is wrong: existing mirrors hold default-format IDs, and switching the preference without translating them changes every message's identity overnight (duplicate threads, lost filing state). The mandatory accompaniment is an ID-translation migration of mirror memberships, bodies, product filing and push receipts, plus a real Graph test mailbox regression. That migration touches production data and needs a provider integration environment; it is planned Graph work, not a sweep item.
 
-## OPS-01 (pass 6) / OPS-01 (pass 7) / R19+F14 remainder (round 3) - Medium - DEFERRED (partial hardening exists)
+## OPS-01 (pass 6) / OPS-01 (pass 7) / R19+F14 remainder (round 3) - Medium - FIXED (idempotency + offline-v2 pass, 2026-09-18)
 
 **Request, provider-response and export resource limits are incomplete**
 
-- Evidence: Confirmed scope: many JSON handlers read bodies uncapped; provider reads and export staging allocate before validation. Partial bounds exist (send handler 34 MiB wire cap, push 64 KiB, per-attachment caps, engine-side 90 MB part cap), pass 7 added strict bounded single-document decoding with unknown-field rejection on the account-settings routes (commit tagged `audit 3-DATA-07`) and an aggregate send-queue admission budget, and round 3 made that budget count the retained header fields — subject, recipients, references, attachment metadata — instead of bodies alone (F14, commits tagged `audit 4-F14`).
-- Deferral (remainder = F14's pre-decode admission + the rest of R19): a decode semaphore ahead of JSON allocation on the send route, route-specific body bounds across dozens of handlers, a bounded reader on every provider JSON path, export disk budgets and read deadlines is a cross-cutting hardening pass; deferred as its own review with a table of routes and limits rather than piecemeal in a sweep.
+- Evidence: Confirmed scope: many JSON handlers read bodies uncapped; provider reads and export staging allocate before validation. Partial bounds existed earlier (send handler 34 MiB wire cap, push 64 KiB, per-attachment caps, engine-side 90 MB part cap; pass 7 added strict bounded single-document decoding with unknown-field rejection on the account-settings routes and an aggregate send-queue admission budget; round 3 made that budget count retained header fields, F14).
+- Fixed (remainder, `f281466`): every request-body decode is bounded ahead of allocation with `http.MaxBytesReader` per route (`decodeJSON`/`decodeJSONLimit`, 64 KiB default; oversized bodies answer 413, not malformed-JSON 400); the send route takes one of 2 global decode slots BEFORE its 34 MiB reader allocates (queue at admission, 503 on give-up, ~68 MiB peak decode memory); every provider JSON path decodes through a bounded reader (OAuth identity/graphCall 4 MiB, engine Graph/JMAP method responses 64 MiB, JMAP session 4 MiB, token callback 1 MiB, error bodies 2 KiB); export builds write through a 2 GiB `budgetedWriter`, cap each provider raw-message read at 128 MiB (mirror fallback beyond), and sweep stale temp archives synchronously ahead of ListenAndServe. `docs/route-limits.md` is the route/bound register this deferral required. Offline tests cover the budgeted writer, slot admission, and the 413-vs-400 handler contract.
 
 ## OPS-02 (pass 6) / OPS-02+OPS-03 (pass 7) - Medium - FIXED (staged reconciliation pass, 2026-09-18)
 
