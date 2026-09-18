@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 type authExecFunc func(context.Context, string, ...any) (sql.Result, error)
@@ -212,5 +214,90 @@ func TestTOTPMatchedStepIsHighestAndMonotonic(t *testing.T) {
 	}
 	if totpMatchedStep(secret, "000000", now) != -1 {
 		t.Fatal("a nonmatching code produced a step")
+	}
+}
+
+// A failed session revocation must keep the cookie: clearing it would remove
+// the only token this browser can retry revocation with, while pretending the
+// user signed out (audit 4 F13).
+func TestLogoutKeepsCookieWhenRevocationFails(t *testing.T) {
+	a := &App{
+		cfg: &Config{},
+		log: discardLogger(),
+		db:  openStepDB(t, dbStep{kind: "exec", err: errors.New("database unavailable")}),
+	}
+	r := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: "the-session-token"})
+	w := httptest.NewRecorder()
+	a.handleLogout(w, r)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body = %s", w.Code, w.Body.String())
+	}
+	if w.Header().Get("Retry-After") == "" {
+		t.Fatal("failed revocation did not advertise Retry-After")
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name == sessionCookie && c.MaxAge < 0 {
+			t.Fatal("failed revocation cleared the session cookie; the browser can no longer retry")
+		}
+	}
+}
+
+// A successful revocation clears the cookie and reports signed-out.
+func TestLogoutClearsCookieOnSuccess(t *testing.T) {
+	a := &App{cfg: &Config{}, log: discardLogger(), db: openStepDB(t, dbStep{kind: "exec"})}
+	r := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: "the-session-token"})
+	w := httptest.NewRecorder()
+	a.handleLogout(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	cleared := false
+	for _, c := range w.Result().Cookies() {
+		if c.Name == sessionCookie && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("successful logout did not clear the session cookie")
+	}
+}
+
+// Truncation must never split a multi-byte rune: an 80-byte slice of
+// accented or CJK text used to become invalid UTF-8 before storage
+// (audit 4 F17).
+func TestUTF8PrefixKeepsRunesIntact(t *testing.T) {
+	cases := []struct {
+		name  string
+		in    string
+		max   int
+		empty bool
+	}{
+		{"short ascii passes through", "Jane Doe", 80, false},
+		{"accented name", strings.Repeat("é", 60), 80, false},
+		{"cjk name", strings.Repeat("邮", 60), 80, false},
+		{"emoji name", strings.Repeat("📩", 40), 80, false},
+		{"zero limit", "anything", 0, true},
+	}
+	for _, tc := range cases {
+		got := utf8Prefix(tc.in, tc.max)
+		if got == "" && !tc.empty {
+			t.Fatalf("%s: empty result for max=%d", tc.name, tc.max)
+		}
+		if len(got) > tc.max {
+			t.Fatalf("%s: len = %d, want <= %d", tc.name, len(got), tc.max)
+		}
+		if !utf8.ValidString(got) {
+			t.Fatalf("%s: result is invalid UTF-8: %q", tc.name, got)
+		}
+	}
+	// A cut landing mid-rune backs off to the rune boundary; a cut landing
+	// exactly on one keeps it.
+	if got := utf8Prefix("abcéd", 4); got != "abc" {
+		t.Fatalf("mid-rune cut = %q, want %q", got, "abc")
+	}
+	if got := utf8Prefix("abcéd", 5); got != "abcé" {
+		t.Fatalf("boundary cut = %q, want %q", got, "abcé")
 	}
 }

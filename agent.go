@@ -184,9 +184,7 @@ func (a *App) handleAgentTokens(w http.ResponseWriter, r *http.Request) {
 		if name == "" {
 			name = "Agent"
 		}
-		if len(name) > 80 {
-			name = name[:80]
-		}
+		name = utf8Prefix(name, 80)
 		raw, err := opaqueToken(24)
 		if err != nil {
 			writeProblem(w, 500, "Token Failed", err.Error())

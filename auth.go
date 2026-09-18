@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -731,9 +732,7 @@ func (a *App) finishRegistration(w http.ResponseWriter, r *http.Request, kind st
 	if name == "" {
 		name = "Passkey"
 	}
-	if len(name) > 80 {
-		name = name[:80]
-	}
+	name = utf8Prefix(name, 80)
 	id := base64.RawURLEncoding.EncodeToString(credential.ID)
 	if err := lockAuthUser(r.Context(), tx, uid); err != nil {
 		writeProblem(w, 409, "Passkey Failed", "the account is being deleted")
@@ -974,10 +973,7 @@ func (a *App) persistSession(ctx context.Context, db sqlExecer, r *http.Request,
 	if err != nil {
 		return "", err
 	}
-	ua := r.UserAgent()
-	if len(ua) > 300 {
-		ua = ua[:300]
-	}
+	ua := utf8Prefix(r.UserAgent(), 300)
 	_, err = db.ExecContext(ctx, `INSERT INTO auth_sessions
 		(id_hash,user_id,expires_at,user_agent,login_method) VALUES ($1,$2,$3,$4,$5)`,
 		tokenHash(raw), uid, time.Now().Add(sessionLifetime), ua, normalizeLoginMethod(method))
@@ -1089,13 +1085,16 @@ func revokeOtherSessionsTx(ctx context.Context, db sqlExecer, r *http.Request, u
 }
 
 func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
-	// Clearing this browser's cookie is not the same as revoking the
-	// session: another copy of the token stays usable if the server-side
-	// deletion failed. Report that instead of claiming success.
+	// Revocation failure must leave the cookie in place: clearing it here
+	// would destroy the only token this browser can retry revocation with,
+	// while another copy of the session stays valid server-side. The user
+	// is told sign-out failed and can try again (audit 4 F13).
 	if cookie, err := r.Cookie(sessionCookie); err == nil {
 		if _, err := a.db.ExecContext(r.Context(), `DELETE FROM auth_sessions WHERE id_hash=$1`, tokenHash(cookie.Value)); err != nil {
-			a.clearCookie(w, sessionCookie)
-			writeProblem(w, 500, "Logout Failed", "the session could not be revoked server-side — try again")
+			a.log.Error("logout revocation failed", "err", err)
+			w.Header().Set("Retry-After", "2")
+			writeProblem(w, http.StatusServiceUnavailable, "Logout Failed",
+				"the session could not be revoked — you are not signed out; try again")
 			return
 		}
 	}
@@ -2007,6 +2006,24 @@ func (a *App) firstUserID(ctx context.Context) (string, error) {
 	var id string
 	err := a.db.QueryRowContext(ctx, `SELECT id FROM users ORDER BY created_at LIMIT 1`).Scan(&id)
 	return id, err
+}
+
+// utf8Prefix truncates to at most maxBytes without splitting a multi-byte
+// rune. Byte slicing a name or user agent can produce invalid UTF-8 that
+// later fails MIME formatting or storage (audit 4 F17); opaque tokens and
+// hashes must never pass through here.
+func utf8Prefix(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	end := maxBytes
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end]
 }
 
 // Handlers use the authenticated owner. Background jobs deliberately fall
