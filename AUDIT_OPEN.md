@@ -37,8 +37,18 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   verify-then-mint interleaving through that harness's race runs; that
   entry leaves this register. SYNC-03/04 keep their deferrals but no longer
   wait on the harness precondition.
+- Staged reconciliation pass (2026-09-18, later): the mail-state
+  reconciliation program landed against the same harness. SYNC-03/SYNC-01
+  (staged resumable scans), SYNC-04 (mirror FKs + account lock order),
+  SYNC-05/DATA-09 (retention-widening restoration), DATA-08 (versioned
+  policy + durable reconcile jobs), and the OPS-02/OPS-03 migration-runner
+  remainder are all fixed and leave this register; the regression tests
+  run under both harnesses, including kill-between-pages at every phase.
+  The SYNC-03 (pass 7) identity-promotion remainder stays deferred below —
+  it needs the OPS-03 cross-pool transaction bridge, which stays deferred
+  with it (not built, noted).
 
-Open items: 27 (all deferrals; 8 of them are remainders of partial fixes)
+Open items: 22 (all deferrals; 7 of them are remainders of partial fixes)
 
 Standing decision: **SEND-01 = SEND-03 (pass 6) = lullmail-10 below.** The
 durable-outbox finding appears in both later reports; it is the same item
@@ -140,40 +150,40 @@ as this register's one recorded product deferral, and the deferral stands.
 - Evidence: Confirmed — the action handler mutates every message in the resolved thread while the browser inverse is computed from one list row's flags, so mixed read/bucket state inside a thread is lost on undo. (Per-row snapshots already make single-row read/unread undo exact.) Round 3 removed the adjacent board-pin variant's worst case: re-pins no longer clobber the standing card and the undo deletes only cards the pin created (F20, commits tagged `audit 4-F20`); an edit landing between a pin and its undo is still not conflict-detected.
 - Deferral: Exact undo needs server-side preimage capture (row versions, one-use undo records, conflict rejection) — the report's `message_action_undo` design is a schema + API + client change across the same surface as the idempotency work in WEB-04. Deferred as product redesign; the current undo is documented as approximate for mixed threads.
 
-## DATA-08 (pass 7) - Medium - DEFERRED (design)
+## DATA-08 (pass 7) - Medium - FIXED (staged reconciliation pass, 2026-09-18)
 
 **Backfill and retention settings can commit before their corresponding data transition succeeds**
 
 - Evidence: Confirmed — the setting update and the pruning/classification/retention that realize it are separate operations; a later failure leaves the new policy committed with an error response and no durable reconciliation status. (DATA-10's fix in pass 7 means post-sync failures are no longer reported as healthy syncs.)
-- Deferral: The report's desired-policy vs applied-policy design (`policy_version`, `account_reconcile_jobs`, 202 responses with durable job state) is a new job/queue subsystem sharing machinery with the SYNC-03 staged-scan work below; defer with it.
+- Fixed: the report's design landed as committed. `email_accounts.policy_version`/`applied_policy_version` plus `account_reconcile_jobs` (product migration 3); the setting update and the durable job commit in ONE transaction; the endpoints answer 202 with the job state (`full_enumeration` true exactly when the window widened); a worker consumes the job and advances `applied_policy_version` only when the desired version still matches — an older job can never mark a newer version applied (regression: `TestIntegrationOlderReconcileJobNeverMarksNewerVersionApplied`). The job is durable across restarts ('running' rows reset to pending at boot; interrupted jobs resume staged scans). The account item API exposes the job state as `reconcile` so a UI can show "rebuilding retained history" until completion.
 
-## SYNC-03 (pass 6) / SYNC-01 (pass 7) - High - DEFERRED
+## SYNC-03 (pass 6) / SYNC-01 (pass 7) - High - FIXED (staged reconciliation pass, 2026-09-18)
 
 **Destructive cursor reset can erase local filing state before a rebuild succeeds**
 
 - Evidence: Confirmed ordering: an invalid cursor drops local mailbox state before the replacement enumeration exists; if the rebuild then fails, orphan cleanup can read the missing mirror rows as authoritative deletions of user filing state.
-- Deferral: The reports' fix is staged, resumable reconciliation — `mirror_scans`/`mirror_scan_seen` engine tables, per-page transactional staging, destructive pruning only at authoritative completion under the account maintenance lock. That is a new engine sync architecture and this is the largest item in the register; it needs its own design pass against real PostgreSQL. The sweep already refuses to run on incomplete listings; the residual is the reset-then-fail window. Pass-7 SYNC-02 (enumeration bookkeeping not durable across MaxPages/restarts; Graph `initial`/`Complete` flags only consistent within one call) folds into this same staged-scan machinery and is deferred with it.
+- Fixed: staged, resumable reconciliation is the engine's only recovery path. `mirror_scans`/`mirror_scan_seen` (engine migration 2) hold one durable scan per mailbox: every page commits envelopes + seen IDs + continuation in one transaction (`ApplyScanPage`), and the ONLY deletion in the recovery path is `FinishScan`'s single completion transaction (prune memberships absent from the complete seen set, delete membership-less messages, publish the terminal cursor, drop the scan rows). Cursor invalidation, provider `Reset`, and every full enumeration now enter scans (the pass-7 SYNC-02 durable-bookkeeping fold-in), so MaxPages cuts and process restarts resume from the stored continuation instead of losing the seen set. Product orphan cleanup can no longer observe a mid-rebuild mirror because the mirror is never removed mid-rebuild. Regressions at every interruption phase (offline matrix `TestStagedScanInterruptionAtEveryPhaseNeverPrunes`, real-PG restart proof `TestIntegrationStagedScanSurvivesKillBetweenPages`, end-to-end `TestIntegrationReconcileInterruptionKeepsStateAndResumes`); multi-mailbox membership survives the prune (`...FinishScanKeepsOtherMailboxMembership`). Stores that do not implement `ScanStore` keep the legacy destructive path — PgStore, the only production store, implements it.
 
-## SYNC-04 (pass 6) / SYNC-04 (pass 7) - Medium - DEFERRED
+## SYNC-04 (pass 6) / SYNC-04 (pass 7) - Medium - FIXED (staged reconciliation pass, 2026-09-18)
 
 **Retention and mirror writes can race, leaving expired or orphaned data**
 
 - Evidence: Confirmed — retention deletes mirror rows while sync/body writes run; the mirror has no foreign keys tying bodies and memberships to messages.
-- Deferral: NOT VALID→VALIDATED foreign keys on existing production tables, an orphan audit, and a documented account-level lock order shared by retention and sync writeback is a versioned engine migration with deployment sequencing. Deferred with SYNC-03, which owns the same lock-and-stage machinery.
+- Fixed: engine migration 3 runs the orphan audit first, then lands `mail_bodies_message_fk` and `mail_membership_message_fk` as NOT VALID → VALIDATED `ON DELETE CASCADE` constraints, so a body or membership whose parent expired can never be written (the mid-race body write is refused by the FK and surfaces as the prefetch path's best-effort warn). Every transaction that writes or deletes mirror rows — engine writeback and scan staging/completion on the pgx pool, product retention, orphan cleanup, and account deletion on the database/sql pool — takes `pg_advisory_xact_lock(mail.AccountLockKey(account))` as its FIRST statement; one lock per transaction is the entire, deadlock-free lock order (documented in `mail-engine/schema.go`). Envelope re-insertion after expiry converges through the post-sync retention sweep rather than ingestion-time filtering — the report's preferred shape, but the FK plus sweep satisfies the regression's finish line (final state honors policy, zero orphans) under `-race` (`TestIntegrationProductRetentionRacingEngineSync`, engine-side `TestIntegrationConcurrentRetentionAndSyncLeaveNoOrphans`).
 
-## SYNC-05 (pass 6) / DATA-09 (pass 7) - Medium - DEFERRED
+## SYNC-05 (pass 6) / DATA-09 (pass 7) - Medium - FIXED (staged reconciliation pass, 2026-09-18)
 
 **Increasing retention does not restore older messages removed from the mirror**
 
 - Evidence: Confirmed — an incremental provider will not re-report unchanged old messages after local retention removed them; widening the window changes policy only.
-- Deferral: The fix is a durable `reconcile_requested` flag consumed only after a complete rescan — and the complete rescan is exactly the SYNC-03 staged-scan machinery. Deferred with it.
+- Fixed: `needsRetentionExpansion(old, new)` gates a `full_enumeration` reconcile job (old bounded AND (new unbounded OR wider)); the worker drives `Engine.RequestRescan` — staged scans for every mailbox, the same non-destructive machinery as SYNC-03, never the destructive reset — and the job is consumed (state complete, `applied_policy_version` advanced) only after every scan finished under the new policy. An interrupted rebuild leaves the request pending with its staged progress durable. Regression: `TestIntegrationRetentionIncreaseRestoresOlderMessages` (prune an unchanged month-old message at 7 days, widen to 90, provider reports no delta — the message returns), plus the interruption/resume case.
 
-## SYNC-03 (pass 7) - High - PARTIALLY FIXED (ordering), migration DEFERRED with SYNC-03 above
+## SYNC-03 (pass 7) - High - PARTIALLY FIXED (ordering), cross-pool promotion migration DEFERRED (needs OPS-03 bridge)
 
 **Identity promotion deletes the old message before its replacement is written**
 
-- Evidence: Confirmed — `apply` called `DeleteMessages` on the old identity before `PutEnvelopes` wrote the new one, so a failed write lost the only readable copy. FIXED in pass 7: the replacement envelope is now written first and the old identity retires only afterwards, so a failure leaves the old record intact and the next sync retries (commit tagged `audit 3-SYNC-03`).
-- Deferral (remainder): Product filing state keyed by the old account/message id is still not migrated on promotion (the engine cannot reach product tables; the orphan cleanup eventually drops it), and a truly transactional promotion carrying memberships, body, filing, and receipts across both pools needs the OPS-03 transaction bridge and the staged-migration design. Deferred with the SYNC family above.
+- Evidence: Confirmed — `apply` called `DeleteMessages` on the old identity before `PutEnvelopes` wrote the new one, so a failed write lost the only readable copy. FIXED in pass 7: the replacement envelope is now written first and the old identity retires only afterwards, so a failure leaves the old record intact and the next sync retries (commit tagged `audit 3-SYNC-03`). The staged-scan pass preserves this ordering inside scans (promotions retire after `ApplyScanPage` staged the replacement).
+- Deferral (remainder): Product filing state keyed by the old account/message id is still not migrated on promotion (the engine cannot reach product tables; the orphan cleanup eventually drops it), and a truly transactional promotion carrying memberships, body, filing, and receipts across both pools needs the OPS-03 cross-pool transaction bridge — one transaction spanning the engine's pgx pool and the product's database/sql pool. The bridge remains deferred as its own infrastructure item (it is also the prerequisite for transactional cross-pool account creation, see OPS-09); the identity-carrying migration lands with it.
 
 ## GMAIL-03 - Low - DEFERRED
 
@@ -196,12 +206,12 @@ as this register's one recorded product deferral, and the deferral stands.
 - Evidence: Confirmed scope: many JSON handlers read bodies uncapped; provider reads and export staging allocate before validation. Partial bounds exist (send handler 34 MiB wire cap, push 64 KiB, per-attachment caps, engine-side 90 MB part cap), pass 7 added strict bounded single-document decoding with unknown-field rejection on the account-settings routes (commit tagged `audit 3-DATA-07`) and an aggregate send-queue admission budget, and round 3 made that budget count the retained header fields — subject, recipients, references, attachment metadata — instead of bodies alone (F14, commits tagged `audit 4-F14`).
 - Deferral (remainder = F14's pre-decode admission + the rest of R19): a decode semaphore ahead of JSON allocation on the send route, route-specific body bounds across dozens of handlers, a bounded reader on every provider JSON path, export disk budgets and read deadlines is a cross-cutting hardening pass; deferred as its own review with a table of routes and limits rather than piecemeal in a sweep.
 
-## OPS-02 (pass 6) / OPS-02+OPS-03 (pass 7) - Medium - PARTIALLY FIXED, migration runner DEFERRED
+## OPS-02 (pass 6) / OPS-02+OPS-03 (pass 7) - Medium - FIXED (staged reconciliation pass, 2026-09-18)
 
 **Database connection budgeting and startup migrations are not production-safe by construction**
 
-- Evidence: Confirmed. FIXED in pass 7: the product pool is bounded (16 open / 4 idle, 5-minute idle / 30-minute lifetime caps) and the per-request `last_seen_at` session write is throttled to once per minute with a read fallback that still refuses revoked sessions immediately (commit tagged `audit 3-OPS-02`).
-- Deferral (remainder = pass-7 OPS-03): startup still reapplies all schema statements unconditionally with no version ledger, checksums, or installation-wide migration lock. A versioned migration table with advisory-lock serialization replaces the boot-time statement list every existing database converges through; rewriting it can brick upgrades if rushed and needs a tested migration path (engine + product ownership split included). Deferred to its own task.
+- Evidence: Confirmed. Fixed in pass 7: the product pool is bounded (16 open / 4 idle, 5-minute idle / 30-minute lifetime caps) and the per-request `last_seen_at` session write is throttled to once per minute with a read fallback that still refuses revoked sessions immediately (commit tagged `audit 3-OPS-02`).
+- Fixed (remainder = pass-7 OPS-03): both schema owners now converge through versioned migration runners with a ledger, checksums, and real advisory-lock serialization — the engine (`mail_migrations`, `mail-engine/migrate.go`) and the product (`app_migrations`, `migrate.go`). Version 1 on each side is the old boot-time statement list verbatim, so every existing database converges by recording it and moving on; nothing is rewritten in place, and a modified already-applied migration refuses to boot. `pg_advisory_lock` serializes concurrent runners on a dedicated connection (bootstrap inside the lock — two concurrent `CREATE TABLE IF NOT EXISTS` race on the catalog), with the pooled connection discarded rather than returned if the unlock fails. The ledger bootstrap and every migration application run in one transaction per version. Boot order is fixed everywhere (engine first, then product: product v2 reads `mail_messages`) so the two runners can never deadlock. Regressions: convergence of a simulated pre-ledger database with live data on both sides, two concurrent runners recording each version exactly once, and the direct advisory-lock proof (a runner waits while another session holds the key, then proceeds). Nucleus backends without `pg_advisory_lock` still migrate sequentially (probed once; the ledger's primary key remains the backstop) — lullmail deployments run real PostgreSQL. Per-suite database isolation for potentially destructive harness suites remains CI infrastructure work tracked under OPS-07 below.
 
 ## OPS-04 (pass 6) / OPS-04 (pass 7) - Medium - DEFERRED
 
@@ -230,7 +240,7 @@ as this register's one recorded product deferral, and the deferral stands.
 
 - Evidence: Confirmed — engine integration tests skip without `NEUTRON_MAIL_TEST_DATABASE_URL`. FIXED in pass 7: CI now runs a disposable postgres:17 service job that executes the engine store integration suite and race runs for all three Go modules (commit tagged `audit 3-OPS-07`); the normal green build no longer excludes every database test.
 - Fixed (remainder pass, 2026-09-18, `556e272`): `LULL_TEST_DATABASE_URL` gates a product-side integration suite with the same skip-offline contract as the engine's — it resets only product-owned tables, re-runs the real schema migration entry point inside one transaction, and executes the production push candidate SQL (hoisted to `pushCandidateSQL` so the suite runs the shipped statement, not a copy) plus the auth-epoch schema/lookup sync checks. The CI postgres job runs it with `-race` alongside the engine and MCP modules; the harness was verified end-to-end against a live local PostgreSQL (disposable database, created and dropped for the run).
-- Deferral (remainder): Isolated per-suite databases for potentially destructive suites and migration-upgrade tests remain CI infrastructure work. The harness precondition this register recorded is now met — AUTH-01's race regression tests landed through it (`4fbd4f6`) — so only SYNC-03/04 still await it.
+- Deferral (remainder): Isolated per-suite databases for potentially destructive suites and migration-upgrade tests remain CI infrastructure work. The harness precondition this register recorded was met — AUTH-01's race regression tests landed through it (`4fbd4f6`) and the staged reconciliation pass (SYNC-03/04/05, DATA-08/09, OPS-02) landed through it with kill-between-pages, concurrency, and migration-convergence regressions on both suites — so no open finding still waits on the harness.
 
 ## OPS-09 (pass 6) / OPS-09+PROVIDER-03-remainder (pass 7) - Medium/Low - DEFERRED
 
