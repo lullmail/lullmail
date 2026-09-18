@@ -10,7 +10,9 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 )
@@ -50,6 +52,11 @@ type boardCard struct {
 	Preview    string `json:"preview,omitempty"`
 	Note       string `json:"note,omitempty"`
 	Manual     bool   `json:"manual,omitempty"`
+	// Created is true only when this call inserted the card. A pin that
+	// found an existing card leaves it untouched — not its done state, not
+	// its note — and reports created=false so the client's undo cannot
+	// delete a pin it did not create (audit 4 F20).
+	Created bool `json:"created,omitempty"`
 }
 
 func cardFromThread(t briefThread) boardCard {
@@ -256,7 +263,10 @@ func (a *App) handleBoard(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleBoardPin pins a thread. The current subject is snapshotted as the
-// card title so the card survives its account being disconnected.
+// card title so the card survives its account being disconnected. Re-pinning
+// an already-pinned thread is a no-op on the existing card: it does not reset
+// the done state or clobber the note, and the response says created=false so
+// the pin's undo cannot erase a card that existed before it (audit 4 F20).
 func (a *App) handleBoardPin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Account  string `json:"account"`
@@ -282,7 +292,10 @@ func (a *App) handleBoardPin(w http.ResponseWriter, r *http.Request) {
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		WHERE (m.account_id = $2 OR ea.id::text = $2) AND m.thread_id = $3
 		ORDER BY m.received_at DESC NULLS LAST LIMIT 1`, uid, req.Account, req.ThreadID).Scan(&mirror, &subject); err != nil {
-		writeProblem(w, http.StatusNotFound, "Not Found", "no such thread")
+		if !errors.Is(err, sql.ErrNoRows) {
+			a.log.Error("pin thread lookup failed", "err", err)
+		}
+		writeLookupProblem(w, err, "thread")
 		return
 	}
 
@@ -290,13 +303,27 @@ func (a *App) handleBoardPin(w http.ResponseWriter, r *http.Request) {
 	err = a.db.QueryRowContext(r.Context(), `
 		INSERT INTO board_cards (user_id, account_id, thread_key, title) VALUES ($1, $2, $3, $4)
 		ON CONFLICT (user_id, account_id, thread_key) WHERE thread_key IS NOT NULL
-		DO UPDATE SET done_at = NULL, title = EXCLUDED.title
+		DO NOTHING
 		RETURNING id::text`, uid, mirror, req.ThreadID, subject).Scan(&id)
-	if err != nil {
+	switch {
+	case err == nil:
+		writeJSON(w, boardCard{CardID: id, Account: mirror, ThreadID: req.ThreadID, Subject: subject, Created: true})
+	case errors.Is(err, sql.ErrNoRows):
+		// Already pinned: report the existing card unchanged.
+		if err := a.db.QueryRowContext(r.Context(), `
+			SELECT id::text FROM board_cards
+			WHERE user_id = $1 AND account_id = $2 AND thread_key = $3`,
+			uid, mirror, req.ThreadID).Scan(&id); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				a.log.Error("existing pin lookup failed", "err", err)
+			}
+			writeLookupProblem(w, err, "thread pin")
+			return
+		}
+		writeJSON(w, boardCard{CardID: id, Account: mirror, ThreadID: req.ThreadID, Subject: subject})
+	default:
 		writeProblem(w, http.StatusInternalServerError, "Pin Failed", err.Error())
-		return
 	}
-	writeJSON(w, boardCard{CardID: id, Account: mirror, ThreadID: req.ThreadID, Subject: subject})
 }
 
 // handleBoardCard creates a manual note card — the only card with no mail

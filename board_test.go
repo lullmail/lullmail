@@ -104,3 +104,50 @@ func TestBoardWithoutAccountLensRunsUnscoped(t *testing.T) {
 		}
 	}
 }
+
+// Pinning must distinguish a card it created from one that already existed:
+// the undo of a pin may only delete the former, and a re-pin must leave the
+// existing card's state alone (audit 4 F20).
+func TestBoardPinReportsCreatedAndLeavesExistingCardsAlone(t *testing.T) {
+	pinSteps := func(insertSucceeds bool) []dbStep {
+		insert := dbStep{kind: "query", rows: &testRows{
+			columns: []string{"id"},
+			values:  [][]driver.Value{{"card-new"}},
+		}}
+		if !insertSucceeds {
+			// INSERT ... DO NOTHING RETURNING: no row comes back.
+			insert = dbStep{kind: "query", rows: emptyRows("id")}
+		}
+		steps := []dbStep{
+			dbStep{kind: "query", rows: &testRows{
+				columns: []string{"account_id", "subject"},
+				values:  [][]driver.Value{{"mirror-1", "The thread"}},
+			}},
+			insert,
+		}
+		if !insertSucceeds {
+			steps = append(steps, dbStep{kind: "query", rows: &testRows{
+				columns: []string{"id"},
+				values:  [][]driver.Value{{"card-existing"}},
+			}})
+		}
+		return steps
+	}
+
+	a := &App{log: discardLogger(), db: openStepDB(t, pinSteps(true)...)}
+	w := httptest.NewRecorder()
+	a.handleBoardPin(w, requestAsOwner(http.MethodPost, "/api/board/pin"))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"created":true`) {
+		t.Fatalf("new pin: status = %d body = %s", w.Code, w.Body.String())
+	}
+
+	a = &App{log: discardLogger(), db: openStepDB(t, pinSteps(false)...)}
+	w = httptest.NewRecorder()
+	a.handleBoardPin(w, requestAsOwner(http.MethodPost, "/api/board/pin"))
+	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), `"created":true`) {
+		t.Fatalf("existing pin: status = %d body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "card-existing") {
+		t.Fatalf("existing pin did not report the standing card id: %s", w.Body.String())
+	}
+}
