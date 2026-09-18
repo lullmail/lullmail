@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	netmail "net/mail"
 	"net/http"
 	"strings"
 	"time"
@@ -775,8 +776,38 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "Missing Account", "account is required for thread operations")
 		return
 	}
+	// The composer's default recipients are computed HERE, from the stored
+	// envelope and the owner's connected addresses — never client-side from
+	// the rendered From line, which ignored Reply-To and addressed replies
+	// to the owner whenever the thread's newest message was her own
+	// (audit 4 F06). Read BEFORE the thread rows open: two open result
+	// sets on one pool is the hold-and-wait shape audit 4 F08 removed.
+	ownRows, err := a.db.QueryContext(r.Context(), `SELECT lower(address) FROM email_accounts WHERE user_id = $1`, uid)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	ownAddresses := map[string]bool{}
+	for ownRows.Next() {
+		var addr string
+		if err := ownRows.Scan(&addr); err != nil {
+			ownRows.Close()
+			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
+			return
+		}
+		if addr != "" {
+			ownAddresses[addr] = true
+		}
+	}
+	scanErr := ownRows.Err()
+	closeErr := ownRows.Close()
+	if err := errors.Join(scanErr, closeErr); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+
 	threadQuery := `
-		SELECT m.id, m.account_id, m.subject, m.from_addrs, m.to_addrs, m.received_at,
+		SELECT m.id, m.account_id, m.subject, m.from_addrs, m.to_addrs, m.reply_to_addrs, m.received_at,
 		       COALESCE(h.bucket,''), b.text_body, b.html_body, b.parts, b.fetched_at
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
@@ -808,6 +839,12 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		// errored). Empty content with status "ready" is authoritative —
 		// a genuinely empty message (audit 3 DATA-12).
 		BodyStatus string `json:"body_status"`
+		// Server-computed default recipients for a reply to this message
+		// ("Name <a@b>, c@d"): the sender's Reply-To when set, else From —
+		// and the message's own recipients when the message came from one
+		// of the owner's addresses, so following up on sent mail goes back
+		// to the conversation, not to the owner. Empty means "ask".
+		ReplyTo string `json:"reply_to"`
 	}
 	out := []msgRow{}
 	type ref struct {
@@ -817,11 +854,11 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 	var refs []ref
 	for rows.Next() {
 		var row msgRow
-		var fromJSON, toJSON, parts sql.NullString
+		var fromJSON, toJSON, replyToJSON, parts sql.NullString
 		var textBody, htmlBody sql.NullString
 		var fetched sql.NullTime
 		var received sql.NullTime
-		if err := rows.Scan(&row.ID, &row.Account, &row.Subject, &fromJSON, &toJSON,
+		if err := rows.Scan(&row.ID, &row.Account, &row.Subject, &fromJSON, &toJSON, &replyToJSON,
 			&received, &row.Bucket, &textBody, &htmlBody, &parts, &fetched); err != nil {
 			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
 			return
@@ -839,6 +876,7 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		if json.Unmarshal([]byte(toJSON.String), &to) == nil && len(to) > 0 {
 			row.To = to[0].Email
 		}
+		row.ReplyTo = replyDefault(ownAddresses, fromJSON.String, replyToJSON.String, toJSON.String)
 		if received.Valid {
 			row.ReceivedAt = received.Time.Format(time.RFC3339)
 		}
@@ -930,6 +968,62 @@ type attachment struct {
 	Filename string `json:"filename"`
 	Type     string `json:"type"`
 	Size     int64  `json:"size"`
+}
+
+// replyDefault computes the composer's default recipients for a reply to
+// one message from the stored envelope and the owner's connected addresses
+// (audit 4 F06):
+//
+//   - Reply-To wins when the sender set one, otherwise From.
+//   - When the message itself came from one of the owner's addresses (a
+//     sent message the owner is following up on), the default is that
+//     message's recipients — never the owner.
+//   - The owner's own addresses are always filtered out, duplicates collapse.
+//
+// An empty result means "ask the user", never a silent self-address.
+func replyDefault(own map[string]bool, fromJSON, replyToJSON, toJSON string) string {
+	parse := func(s string) []mail.Address {
+		var addrs []mail.Address
+		if json.Unmarshal([]byte(s), &addrs) != nil {
+			return nil
+		}
+		return addrs
+	}
+	normalize := func(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+	from := parse(fromJSON)
+	fromOwn := false
+	for _, address := range from {
+		if own[normalize(address.Email)] {
+			fromOwn = true
+			break
+		}
+	}
+	candidates := parse(replyToJSON)
+	if fromOwn {
+		candidates = parse(toJSON)
+	} else if len(candidates) == 0 {
+		candidates = from
+	}
+
+	result := make([]mail.Address, 0, len(candidates))
+	seen := map[string]bool{}
+	for _, address := range candidates {
+		key := normalize(address.Email)
+		if key == "" || own[key] || seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, address)
+	}
+	if len(result) == 0 {
+		return ""
+	}
+	formatted := make([]string, 0, len(result))
+	for _, address := range result {
+		formatted = append(formatted, (&netmail.Address{Name: address.Name, Address: address.Email}).String())
+	}
+	return strings.Join(formatted, ", ")
 }
 
 // handleAttachment streams one attachment's decoded content. Attachment is

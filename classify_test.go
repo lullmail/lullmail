@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestClassifySender(t *testing.T) {
 	cases := []struct {
@@ -58,6 +61,81 @@ func TestAttachmentFilename(t *testing.T) {
 	} {
 		if got := attachmentFilename(tc.in); got != tc.want {
 			t.Errorf("attachmentFilename(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestReplyDefault(t *testing.T) {
+	addr := func(name, email string) string {
+		return `{"name":"` + name + `","email":"` + email + `"}` //nolint:dupl
+	}
+	list := func(items ...string) string {
+		return "[" + strings.Join(items, ",") + "]"
+	}
+	own := map[string]bool{"owner@example.com": true}
+	cases := []struct {
+		name      string
+		own       map[string]bool
+		from      string
+		replyTo   string
+		to        string
+		wantIn    string
+		wantEmpty bool
+	}{
+		{
+			name:   "inbound mail replies to its From",
+			own:    own,
+			from:   list(addr("Ada", "ada@example.com")),
+			wantIn: "ada@example.com",
+		},
+		{
+			name:    "Reply-To beats From",
+			own:     own,
+			from:    list(addr("Newsletter", "news@example.com")),
+			replyTo: list(addr("Support", "help@example.com")),
+			wantIn:  "help@example.com",
+		},
+		{
+			name:   "follow-up on own sent mail goes to its recipients, never the owner",
+			own:    own,
+			from:   list(addr("Owner", "owner@example.com")),
+			to:     list(addr("Bob", "bob@example.com")),
+			wantIn: "bob@example.com",
+		},
+		{
+			name:      "own sent mail with only own recipients asks",
+			own:       own,
+			from:      list(addr("Owner", "owner@example.com")),
+			to:        list(addr("Owner", "owner@example.com")),
+			wantEmpty: true,
+		},
+		{
+			name:   "a second connected account counts as own",
+			own:    map[string]bool{"owner@example.com": true, "alt@example.com": true},
+			from:   list(addr("Alt", "alt@example.com")),
+			to:     list(addr("Cara", "cara@example.com")),
+			wantIn: "cara@example.com",
+		},
+		{
+			name:      "broken envelope asks rather than guessing",
+			own:       own,
+			from:      "not json",
+			wantEmpty: true,
+		},
+	}
+	for _, tc := range cases {
+		got := replyDefault(tc.own, tc.from, tc.replyTo, tc.to)
+		if tc.wantEmpty {
+			if got != "" {
+				t.Errorf("%s: got %q, want empty", tc.name, got)
+			}
+			continue
+		}
+		if !strings.Contains(got, tc.wantIn) {
+			t.Errorf("%s: got %q, want it to contain %q", tc.name, got, tc.wantIn)
+		}
+		if strings.Contains(strings.ToLower(got), "owner@example.com") {
+			t.Errorf("%s: default addresses the owner: %q", tc.name, got)
 		}
 	}
 }
