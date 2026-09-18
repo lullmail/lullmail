@@ -111,9 +111,41 @@ export function SecurityView() {
   };
 
   const logout = async () => {
-    await authApi("/auth/logout", { method: "POST" }).catch(() => {});
-    authed.value = false; await refreshAuth(); navigate("/today");
+    setBusy("logout");
+    try {
+      await authApi("/auth/logout", { method: "POST" });
+      authed.value = false;
+      await refreshAuth();
+      navigate("/today");
+    } catch (e) {
+      // A failed revocation is not a sign-out: the session is still live
+      // server-side and this browser still holds the token it needs to
+      // retry. Flipping to signed-out here would hide a valid session
+      // (audit 4 F13).
+      report(e, "Sign-out failed; the session may still be active — try again");
+    } finally {
+      setBusy("");
+    }
   };
+
+  /** This device's own subscription state: the server's subscribed flag
+      counts every registered device, so using it for the toggle label
+      said "Disable" on a device that was never subscribed (audit 4 F22). */
+  const [deviceSubscribed, setDeviceSubscribed] = useState(false);
+  const refreshDevicePushState = async () => {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+      setDeviceSubscribed(false);
+      return;
+    }
+    try {
+      const registration = await navigator.serviceWorker.getRegistration();
+      const subscription = await registration?.pushManager.getSubscription();
+      setDeviceSubscribed(Boolean(subscription));
+    } catch {
+      setDeviceSubscribed(false);
+    }
+  };
+  useEffect(() => { refreshDevicePushState(); }, []);
 
   const togglePush = async () => {
     if (!push?.configured || !("serviceWorker" in navigator) || !("PushManager" in window)) return;
@@ -131,6 +163,7 @@ export function SecurityView() {
         await api("/push", { body: subscription.toJSON() }); showToast("Notifications enabled");
       }
       await load();
+      await refreshDevicePushState();
     } catch (e) { report(e, "Notification setup failed"); }
     finally { setBusy(""); }
   };
@@ -206,8 +239,8 @@ export function SecurityView() {
       </section>
 
       <section class="settings-section">
-        <div class="settings-section-head"><div><h2>New-mail notifications</h2><p>Private, generic web-push alerts when unread Inbox mail needs you. Message contents never appear on the lock screen.</p></div>
-          <button class="btn btn-outline btn-sm" type="button" disabled={!push?.configured || !!busy || !("PushManager" in window)} onClick={togglePush}>{busy === "push" ? "Updating…" : push?.subscribed ? "Disable" : "Enable"}</button></div>
+        <div class="settings-section-head"><div><h2>New-mail notifications</h2><p>Private, generic web-push alerts when unread Inbox mail needs you. Message contents never appear on the lock screen.{push?.subscribed && deviceSubscribed ? " Registered devices receive them; the toggle below controls this device." : ""}</p></div>
+          <button class="btn btn-outline btn-sm" type="button" disabled={!push?.configured || !!busy || !("PushManager" in window)} onClick={togglePush}>{busy === "push" ? "Updating…" : deviceSubscribed ? "Disable" : "Enable"}</button></div>
         {push && !push.configured && <p class="settings-callout">Server setup required: add a VAPID key pair and subject. The app keeps this control disabled until delivery can work.</p>}
       </section>
 
@@ -225,7 +258,7 @@ export function SecurityView() {
       </section>
 
       <section class="settings-section">
-        <div class="settings-section-head"><div><h2>Active sessions</h2><p>Thirty-day server-side sessions. Revoke anything you do not recognise.</p></div><button class="btn btn-outline btn-sm" type="button" onClick={logout}>Sign out here</button></div>
+        <div class="settings-section-head"><div><h2>Active sessions</h2><p>Thirty-day server-side sessions. Revoke anything you do not recognise.</p></div><button class="btn btn-outline btn-sm" type="button" disabled={busy === "logout"} onClick={logout}>{busy === "logout" ? "Signing out…" : "Sign out here"}</button></div>
         {sessions.length === 0 && <Empty title="No active sessions." />}
         {sessions.map((session) => <div class="security-row" key={session.id}><div><strong>{session.current ? "This session" : "Signed-in device"}</strong><span>{session.user_agent || "Unknown browser"} · seen {fmtDate(session.last_seen_at)}</span></div><button class="btn btn-quiet-danger btn-sm" type="button" onClick={async () => { try { await api("/security/sessions/" + encodeURIComponent(session.id), { method: "DELETE" }); if (session.current) { authed.value = false; await refreshAuth(); } else await load(); } catch (e) { report(e, "Could not revoke session"); } }}>Revoke</button></div>)}
       </section>
