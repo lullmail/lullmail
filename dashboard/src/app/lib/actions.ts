@@ -257,10 +257,14 @@ export async function pinThreads(rows: Row[]) {
   const threads = [...new Map(rows.map((r) => [r.account + "\u0000" + r.thread_id, r])).values()];
   if (!threads.length) return;
   try {
+    // Only cards this operation CREATED are undoable: the server reports
+    // created=false for a thread that was already pinned, and deleting that
+    // card on undo would erase a pin (and its note/state) which existed
+    // before the pin was clicked (audit 4 F20).
     const pinned: string[] = [];
     for (const row of threads) {
       const res = await api<BoardCard>("/board/pin", { body: { account: row.account, thread_id: row.thread_id } });
-      if (res.card_id) pinned.push(res.card_id);
+      if (res.card_id && res.created) pinned.push(res.card_id);
     }
     afterMutation();
     showToast(describe(rows, "Pinned to the board"), () => removeCards(pinned, true));
