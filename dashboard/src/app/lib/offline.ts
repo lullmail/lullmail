@@ -197,12 +197,17 @@ export async function prepareOfflineOwner(identity: OfflineOwnerIdentity): Promi
     storageSuspended = false;
     return;
   }
+  // First owner on this device: the one-time v1 migration may wipe a
+  // different owner's v1 remnants, and that wipe also removes the v2
+  // namespace markers — so it must run BEFORE this owner's markers are
+  // written, or the just-prepared namespace is stripped and every
+  // offline store silently no-ops.
+  await migrateV1Storage(ns, identity.email);
   if (!previous) {
     localStorage.setItem(NS_KEY, ns);
     localStorage.setItem(GEN_KEY, String(offlineGeneration() + 1));
     localStorage.setItem(EMAIL_KEY, identity.email);
   }
-  await migrateV1Storage(ns, identity.email);
   storageSuspended = false;
 }
 
