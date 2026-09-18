@@ -82,11 +82,25 @@ func dialJMAP(ctx context.Context, cred mail.Credential) (mail.Adapter, func(), 
 	return ad, func() { _ = ad.Close() }, nil
 }
 
+// The Gmail REST API is served from gmail.googleapis.com, not the
+// www.googleapis.com root the older generated clients used. The endpoint and
+// the bearer allowlist must name the SAME host: the pinned google.golang.org/api
+// Gmail client builds every request against its configured basePath, and a
+// transport that only authorizes a different host strips the token from every
+// request the SDK makes (audit 4 F01).
+const (
+	gmailAPIEndpoint = "https://gmail.googleapis.com/"
+	gmailAPIHost     = "gmail.googleapis.com"
+)
+
 func dialGmail(ctx context.Context, cred mail.Credential) (mail.Adapter, func(), error) {
 	// The token arrives already refreshed by the caller, so a fixed bearer
 	// is correct: this adapter must never attempt a refresh, having neither
 	// a refresh token nor a client secret.
-	ad, err := gmail.New(ctx, option.WithHTTPClient(bearerClient(cred.AccessToken, "www.googleapis.com")))
+	ad, err := gmail.New(ctx,
+		option.WithEndpoint(gmailAPIEndpoint),
+		option.WithHTTPClient(bearerClient(cred.AccessToken, gmailAPIHost)),
+	)
 	if err != nil {
 		return nil, nil, err
 	}
