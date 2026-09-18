@@ -36,6 +36,11 @@ type App struct {
 	accountOwnerMu    sync.RWMutex
 	accountStatesMu   sync.Mutex
 	accountStates     map[mail.AccountID]*accountLifecycle
+
+	// dial builds adapters from stored credentials. connectApp leaves it
+	// nil (the production resolver is constructed per invocation); tests
+	// substitute their own to drive sync paths deterministically.
+	dial mail.Resolver
 }
 
 type accountLifecycle struct {
@@ -202,9 +207,14 @@ func storedCredential(provider mail.Provider, address, username, secret, host st
 
 // accountResolver gives scheduler and engine HTTP operations stored
 // credentials and keeps their adapter lifetime inside the deletion gate.
+// The base dialer is read per invocation so a substituted test resolver
+// takes effect immediately.
 func (a *App) accountResolver() mail.Resolver {
-	base := newResolver()
 	return func(ctx context.Context, acct mail.AccountID, cred mail.Credential) (mail.Adapter, func(), error) {
+		base := a.dial
+		if base == nil {
+			base = newResolver()
+		}
 		releaseUse, ok := a.beginAccountUseCtx(ctx, acct)
 		if !ok {
 			return nil, nil, fmt.Errorf("account %s is being deleted", acct)

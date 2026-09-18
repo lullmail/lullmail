@@ -163,6 +163,11 @@ func (a *App) startBackground(ctx context.Context) {
 		t := time.NewTicker(2 * time.Minute)
 		defer t.Stop()
 		a.purgeExpired()
+		// A reconcile job left 'running' belongs to a previous process;
+		// it goes back to pending so this process's passes retry it.
+		if err := a.resetStaleReconcileJobs(ctx); err != nil {
+			a.log.Error("reconcile job reset failed", "err", err)
+		}
 		for {
 			uid, err := a.userID(ctx)
 			if err == nil {
@@ -177,6 +182,9 @@ func (a *App) startBackground(ctx context.Context) {
 				}
 				if err := a.applyRetention(ctx, uid); err != nil {
 					a.log.Error("retention sweep failed", "err", err)
+				}
+				if err := a.processReconcileJobs(ctx, uid); err != nil {
+					a.log.Error("reconcile pass failed", "err", err)
 				}
 				a.sendPushForUser(ctx, uid)
 			}

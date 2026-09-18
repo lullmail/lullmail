@@ -31,6 +31,10 @@ type accountJSON struct {
 	LastError     *string `json:"last_error"`
 	MessageCount  int     `json:"message_count"`
 	ScreenerCount int     `json:"screener_count"`
+
+	// Reconcile is the durable policy-transition job state (DATA-08):
+	// nil when no transition is outstanding.
+	Reconcile map[string]any `json:"reconcile,omitempty"`
 }
 
 func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
@@ -310,7 +314,32 @@ func (a *App) getAccountJSON(w http.ResponseWriter, r *http.Request, id string) 
 	if lastErr != "" {
 		acc.LastError = &lastErr
 	}
+	if job, err := a.loadReconcileJob(r.Context(), acc.ID); err == nil && job != nil {
+		acc.Reconcile = job.asJSON()
+	}
 	writeJSON(w, acc)
+}
+
+// loadReconcileJob reads the durable reconciliation job for one product
+// account, so the UI can show "rebuilding retained history" until the
+// staged rescan actually finished (audit DATA-08/SYNC-05).
+func (a *App) loadReconcileJob(ctx context.Context, id string) (*reconcileJob, error) {
+	row := a.db.QueryRowContext(ctx, `
+		SELECT j.account_id, j.policy_version, j.state, j.full_enumeration, COALESCE(j.last_error,'')
+		FROM account_reconcile_jobs j
+		JOIN email_accounts ea ON ea.mirror_account_id = j.account_id
+		WHERE ea.id::text = $1`, id)
+	var job reconcileJob
+	var state string
+	if err := row.Scan(&job.AccountID, &job.PolicyVersion, &state, &job.FullEnumeration, &job.LastError); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	job.State = state
+	job.HasError = job.LastError != ""
+	return &job, nil
 }
 
 // decodeSettingsJSON reads exactly one bounded JSON document with unknown
@@ -376,9 +405,10 @@ func (a *App) updateSyncEnabled(w http.ResponseWriter, r *http.Request, id strin
 
 // updateBackfill sets how much history the product organizes. Zero means
 // "All history": every mirrored message is eligible for the filing views.
-// Increasing the window classifies newly included historical mail; shrinking
-// it removes only product filing rows outside the window — the local mirror
-// is retention's business and provider mail is never touched.
+// The setting change and its durable reconciliation job commit together
+// (audit DATA-08): the transition itself — shrink deletes filing rows
+// outside the window, grow classifies newly included mail — is applied by
+// the job worker, and the endpoint answers 202 with the job state.
 func (a *App) updateBackfill(w http.ResponseWriter, r *http.Request, id string) {
 	uid, err := a.userID(r.Context())
 	if err != nil {
@@ -396,37 +426,57 @@ func (a *App) updateBackfill(w http.ResponseWriter, r *http.Request, id string) 
 		writeProblem(w, 422, "Invalid Backfill", "days is required and must be 0 (all history) through 3650")
 		return
 	}
-	var mirror string
-	err = a.db.QueryRowContext(r.Context(),
-		`UPDATE email_accounts SET backfill_days=$1 WHERE id=$2 AND user_id=$3 RETURNING mirror_account_id`,
-		*req.Days, id, uid).Scan(&mirror)
+
+	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
+		writeProblem(w, 500, "Backfill Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+
+	var mirror string
+	var version int64
+	if err := tx.QueryRowContext(r.Context(), `
+		UPDATE email_accounts SET backfill_days = $3, policy_version = policy_version + 1
+		WHERE id = $1 AND user_id = $2
+		RETURNING mirror_account_id, policy_version`,
+		id, uid, *req.Days).Scan(&mirror, &version); err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			a.log.Error("backfill account lookup failed", "err", err)
 		}
 		writeLookupProblem(w, err, "account")
 		return
 	}
-	// Shrink: drop filing rows that left the window (mirror data stays).
-	if _, err := a.db.ExecContext(r.Context(), `
-		DELETE FROM hey_messages WHERE user_id=$1 AND account_id=$2 AND message_id IN (
-		  SELECT m.id FROM mail_messages m
-		  WHERE m.account_id=$2
-		    AND $3 > 0
-		    AND (m.received_at AT TIME ZONE 'UTC') <= now() - make_interval(days => $3))`,
-		uid, mirror, *req.Days); err != nil {
+	// Backfill is the classification window, not the mirror window:
+	// restoring pruned mirror content is retention's job (SYNC-05), so
+	// this job is always a local transition.
+	if err := upsertReconcileJobTx(r.Context(), tx, mirror, version, false); err != nil {
 		writeProblem(w, 500, "Backfill Failed", err.Error())
 		return
 	}
-	// Grow (or no-op): classify whatever the window now includes.
-	if err := a.classifyUser(r.Context(), uid); err != nil {
+	if err := tx.Commit(); err != nil {
 		writeProblem(w, 500, "Backfill Failed", err.Error())
 		return
 	}
-	a.events.publish(uid, syncEvent{Type: "sync-finished", AccountID: id, Changed: true})
-	writeJSON(w, map[string]any{"backfill_days": *req.Days})
+
+	a.kickReconcileJob(mirror)
+	w.WriteHeader(http.StatusAccepted)
+	writeJSON(w, map[string]any{
+		"backfill_days": *req.Days,
+		"reconcile": (&reconcileJob{
+			PolicyVersion:    version,
+			State:            "pending",
+			FullEnumeration: false,
+		}).asJSON(),
+	})
 }
 
+// updateRetention commits the desired policy and a durable
+// reconciliation job in ONE transaction (audit DATA-08): the response is
+// 202 with the job state, never a claim that the data transition already
+// happened. Widening the window (or lifting it) needs a full staged
+// rescan to RESTORE older messages the incremental feed will never
+// re-report (audit SYNC-05); narrowing is a local sweep only.
 func (a *App) updateRetention(w http.ResponseWriter, r *http.Request, id string) {
 	uid, err := a.userID(r.Context())
 	if err != nil {
@@ -444,26 +494,61 @@ func (a *App) updateRetention(w http.ResponseWriter, r *http.Request, id string)
 		writeProblem(w, 422, "Invalid Retention", "days is required and must be 0 (forever) through 3650")
 		return
 	}
-	result, err := a.db.ExecContext(r.Context(), `UPDATE email_accounts SET retention_days=$1 WHERE id=$2 AND user_id=$3`, *req.Days, id, uid)
+
+	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeProblem(w, 500, "Retention Failed", err.Error())
 		return
 	}
-	if n, _ := result.RowsAffected(); n != 1 {
-		writeProblem(w, 404, "Not Found", "no such account")
-		return
-	}
-	if err := a.applyRetention(r.Context(), uid); err != nil {
+	defer tx.Rollback()
+
+	var oldDays int
+	var mirror string
+	if err := tx.QueryRowContext(r.Context(),
+		`SELECT retention_days FROM email_accounts WHERE id = $1 AND user_id = $2 FOR UPDATE`,
+		id, uid).Scan(&oldDays); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeProblem(w, 404, "Not Found", "no such account")
+			return
+		}
 		writeProblem(w, 500, "Retention Failed", err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"retention_days": *req.Days})
+
+	var version int64
+	if err := tx.QueryRowContext(r.Context(), `
+		UPDATE email_accounts SET retention_days = $3, policy_version = policy_version + 1
+		WHERE id = $1 AND user_id = $2
+		RETURNING mirror_account_id, policy_version`,
+		id, uid, *req.Days).Scan(&mirror, &version); err != nil {
+		writeProblem(w, 500, "Retention Failed", err.Error())
+		return
+	}
+	full := needsRetentionExpansion(oldDays, *req.Days)
+	if err := upsertReconcileJobTx(r.Context(), tx, mirror, version, full); err != nil {
+		writeProblem(w, 500, "Retention Failed", err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeProblem(w, 500, "Retention Failed", err.Error())
+		return
+	}
+
+	a.kickReconcileJob(mirror)
+	w.WriteHeader(http.StatusAccepted)
+	writeJSON(w, map[string]any{
+		"retention_days": *req.Days,
+		"reconcile": (&reconcileJob{
+			PolicyVersion:    version,
+			State:            "pending",
+			FullEnumeration: full,
+		}).asJSON(),
+	})
 }
 
 // Retention affects only the local encrypted/mirrored copy; it never issues a
 // delete operation to the mail provider. Zero means keep the mirror forever.
-func (a *App) applyRetention(ctx context.Context, uid string) error {
-	rows, err := a.db.QueryContext(ctx, `SELECT mirror_account_id,retention_days FROM email_accounts WHERE user_id=$1 AND retention_days>0`, uid)
+func (a *App) applyRetention(ctx context.Context, uid string) error {	rows, err := a.db.QueryContext(ctx, `SELECT mirror_account_id,retention_days FROM email_accounts WHERE user_id=$1 AND retention_days>0`, uid)
 	if err != nil {
 		return err
 	}
@@ -499,6 +584,31 @@ func (a *App) applyRetention(ctx context.Context, uid string) error {
 	return nil
 }
 
+// applyBackfillWindow enforces the classification window's shrink half:
+// filing rows for messages that left the window go; mirror data stays
+// (that is retention's business) and provider mail is never touched.
+func (a *App) applyBackfillWindow(ctx context.Context, uid string, acct mail.AccountID, days int) error {
+	if days <= 0 {
+		return nil
+	}
+	_, err := a.db.ExecContext(ctx, `
+		DELETE FROM hey_messages WHERE user_id=$1 AND account_id=$2 AND message_id IN (
+		  SELECT m.id FROM mail_messages m
+		  WHERE m.account_id=$2
+		    AND $3 > 0
+		    AND (m.received_at AT TIME ZONE 'UTC') <= now() - make_interval(days => $3))`,
+		uid, string(acct), days)
+	if err != nil {
+		return fmt.Errorf("backfill window: %w", err)
+	}
+	return nil
+}
+
+// applyAccountRetention prunes the local mirror past the cutoff under the
+// account maintenance advisory lock — the same lock every engine mirror
+// write takes as its first statement — so a concurrent sync writeback can
+// never reinsert what retention just removed or strand a body whose
+// parent expired mid-fetch (audit SYNC-04).
 func (a *App) applyAccountRetention(ctx context.Context, uid string, acct mail.AccountID, days int) error {
 	if days <= 0 {
 		return nil
@@ -508,6 +618,10 @@ func (a *App) applyAccountRetention(ctx context.Context, uid string, acct mail.A
 		return err
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock($1)`, mail.AccountLockKey(acct)); err != nil {
+		return fmt.Errorf("account maintenance lock: %w", err)
+	}
 	deletes := []struct {
 		query string
 		args  []any
@@ -552,18 +666,28 @@ func (a *App) deleteAccount(w http.ResponseWriter, r *http.Request, id string) {
 	defer func() { finishDelete(committed) }()
 	// Mirror rows are derived state; dropping them wholesale is a supported
 	// operation upstream. hey_messages cascade via their own delete first.
+	// The transaction takes the account maintenance advisory lock first,
+	// like every mirror writer (audit SYNC-04 lock order); scan staging
+	// rows for this account go with the rest.
 	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Begin Failed", err.Error())
 		return
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(r.Context(),
+		`SELECT pg_advisory_xact_lock($1)`, mail.AccountLockKey(mail.AccountID(mirror))); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Delete Failed", err.Error())
+		return
+	}
 	deletes := []struct {
 		query string
 		args  []any
 	}{
 		{`DELETE FROM hey_messages WHERE user_id = $1 AND account_id = $2`, []any{uid, mirror}},
 		{`DELETE FROM push_deliveries WHERE user_id = $1 AND account_id = $2`, []any{uid, mirror}},
+		{`DELETE FROM mirror_scan_seen WHERE scan_id IN (SELECT id FROM mirror_scans WHERE account_id = $1)`, []any{mirror}},
+		{`DELETE FROM mirror_scans WHERE account_id = $1`, []any{mirror}},
 		{`DELETE FROM mail_message_mailboxes WHERE account_id = $1`, []any{mirror}},
 		{`DELETE FROM mail_bodies WHERE account_id = $1`, []any{mirror}},
 		{`DELETE FROM mail_messages WHERE account_id = $1`, []any{mirror}},
@@ -727,12 +851,21 @@ func (a *App) finishSync(ctx context.Context, acct mail.AccountID, reports []mai
 	return nil
 }
 
+// cleanupMirrorOrphans drops product rows whose mirror message is gone.
+// With staged reconciliation (SYNC-03) mirror rows only ever disappear
+// after an authoritative completed scan, so this never sees a false
+// absence; the account maintenance lock still orders it against
+// concurrent retention and writeback (SYNC-04).
 func (a *App) cleanupMirrorOrphans(ctx context.Context, uid string, acct mail.AccountID) error {
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock($1)`, mail.AccountLockKey(acct)); err != nil {
+		return err
+	}
 	for _, query := range []string{
 		`DELETE FROM hey_messages h WHERE h.user_id=$1 AND h.account_id=$2 AND NOT EXISTS (SELECT 1 FROM mail_messages m WHERE m.account_id=h.account_id AND m.id=h.message_id)`,
 		`DELETE FROM push_deliveries p WHERE p.user_id=$1 AND p.account_id=$2 AND NOT EXISTS (SELECT 1 FROM mail_messages m WHERE m.account_id=p.account_id AND m.id=p.message_id)`,
