@@ -59,8 +59,15 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   undo snapshots across server, dashboard and MCP (`0e294ef`); OPS-01
   closed with route body bounds, decode admission, provider read caps and
   export budgets, registered in `docs/route-limits.md` (`f281466`).
+- Lifecycle + re-auth pass (2026-09-18, later still): the two standing
+  app-lifecycle deferrals and the two re-authentication deferrals closed
+  together. OPS-04/OPS-05 landed as one task-group + per-account-gate
+  pass (`c341e02`); AUTH-02 (pass 7)/AUTH-06 (pass 6) landed as the
+  re-authentication ceremony and AUTH-06 (pass 7) as the durable per-user
+  TOTP budget (`b9c1027` server, `b889d95` dashboard) — all three leave
+  this register.
 
-Open items: 16 (all deferrals; 4 of them are remainders of partial fixes)
+Open items: 12 (all deferrals; 4 of them are remainders of partial fixes)
 
 Standing decision: **SEND-01 = SEND-03 (pass 6) = lullmail-10 below.** The
 durable-outbox finding appears in both later reports; it is the same item
@@ -95,20 +102,20 @@ as this register's one recorded product deferral, and the deferral stands.
 - Deferral: sendqueue.go's design comment is the recorded decision this item argues against — "Five seconds is the whole feature — no queue table, no worker, just a timer map" (SPEC §6.1; the in-process undo window IS the shipped feature). A durable outbox with delivery states, a status endpoint, and retry/idempotency semantics is a product redesign of that surface, not a defect repair; reopening it is a product call, not an audit action. Pass-7 SEND-01 restates it with a full outbox_jobs design; same item, deferral stands. SEND-04 (durable Sent-copy filing state, pass 7) is a requirement on the same replacement and is deferred with it — today a failed Sent-file is logged (never silently dropped) and the delivered message is never re-sent. Partial hardening landed in pass 7: the queue now has an aggregate admission budget and delivery holds an account-use lease, so the volatile window is bounded and fenced (commits tagged `audit 3-SEND-02`, `audit 3-SEND-03`).
 - Review commit: `49d159b6654d3dbd27866f87ac783402f19c6cb7` (last reviewed 2026-09-10)
 
-## AUTH-06 (pass 6) / AUTH-02 (pass 7) - Medium - DEFERRED (hardening)
+## AUTH-02 (pass 7) / AUTH-06 (pass 6) - Medium - FIXED (lifecycle + re-auth pass, 2026-09-18)
 
 **Long-lived sessions can enroll durable replacement credentials without fresh proof**
 
 - Kind: Hardening; requires an already compromised authenticated session
 - Evidence: Confirmed per both reports — factor enrollment, recovery-code regeneration and agent-token creation require only a standing session. Password replacement and full account deletion already require fresh proof (the report credits this).
-- Deferral: The fix is a re-authentication ceremony (a dedicated password/passkey verification endpoint stamping `reauthenticated_at` on the session, a 10-minute freshness gate on security operations, and dashboard UI driving it). That is a product feature spanning API and UI, not a defect repair; record it as the security roadmap item it is.
+- Fixed (`b9c1027` + `b889d95`): the re-authentication ceremony landed as the roadmap item it was. `POST /security/reauthenticate` verifies the standing password with the same KDF admission, failure counting, and account lockout as sign-in, then stamps `reauthenticated_at` on the confirming session (epoch-matched; migration 5). Every credential-enrolling mutation — TOTP begin/confirm/delete, password set/delete, recovery-code regeneration, agent-token creation — refuses with 428 unless the session is younger than ten minutes or was confirmed within ten minutes; a fresh sign-in satisfies the gate by construction (the same rule full-account deletion applies), the setup token passes (it retires with the first credential), and passkey ceremonies stay outside the gate because WebAuthn user verification IS the fresh proof. The dashboard turns a 428 into an inline password-confirmation dialog that retries the parked action; a wrong confirmation keeps it parked with the server's message. Regressions on the live-PostgreSQL harness: stale-session 428s across the gated surface, fresh-session and confirmed-session passes, stamp expiry, wrong-password counting into the account lockout (`TestIntegrationReauthFreshnessGate`, `TestIntegrationReauthenticateWrongPasswordAndLockout`).
 
-## AUTH-06 (pass 7) - Medium - DEFERRED (hardening, deployment-dependent)
+## AUTH-06 (pass 7) - Medium - FIXED (lifecycle + re-auth pass, 2026-09-18)
 
 **Standalone TOTP guessing is limited per peer, not by a shared account budget**
 
 - Evidence: Confirmed — replay protection exists (step consumption) and the per-peer limiter is the repaired fail-closed parser, but guesses from many peers against one account share no budget. TOTP is an intentional alternative credential, not a second factor.
-- Deferral: A durable per-user fixed-window budget (the report's auth_factor_windows design) plus pruning, monitoring, and an ingress story is a new subsystem with lockout tradeoffs (a shared budget is also a denial-of-service lever against the owner). Exposed deployments should rate-limit TOTP at the ingress now; the account-wide budget belongs to the AUTH-02 re-authentication/security roadmap item above rather than a sweep.
+- Fixed (`b9c1027`): the report's `auth_factor_windows` design landed with product migration 5 — a durable per-user fixed five-minute window (server-computed boundaries, never client values) counts every failed standalone-TOTP guess through an atomic upsert; ten failures from any set of peers exhaust the window and further attempts — including the correct code — answer 429 with `Retry-After` to the boundary. The fixed deadline never extends on new failures, spent windows prune after a day in the housekeeping purge, the per-peer limiter stays in front, and the password/passkey/recovery paths are untouched (a shared budget is still a denial-of-service lever against the owner — the window is short and bounded for exactly that reason; ingress rate limiting for exposed deployments remains the deployment-policy item it was under OPS-05/OPS-06 below). Regressions: distributed exhaustion across distinct peers, correct-code refusal, rollover after the window passes, per-user isolation (`TestIntegrationTOTPPerUserBudgetExhaustion`, `TestIntegrationTOTPBudgetIsPerUser`).
 
 ## AUTH-07 (remainder) / AUTH-03 (pass 7) - Medium - DEFERRED (contained fix landed, installation design deferred)
 
@@ -228,19 +235,20 @@ as this register's one recorded product deferral, and the deferral stands.
 - Evidence: Confirmed. Fixed in pass 7: the product pool is bounded (16 open / 4 idle, 5-minute idle / 30-minute lifetime caps) and the per-request `last_seen_at` session write is throttled to once per minute with a read fallback that still refuses revoked sessions immediately (commit tagged `audit 3-OPS-02`).
 - Fixed (remainder = pass-7 OPS-03): both schema owners now converge through versioned migration runners with a ledger, checksums, and real advisory-lock serialization — the engine (`mail_migrations`, `mail-engine/migrate.go`) and the product (`app_migrations`, `migrate.go`). Version 1 on each side is the old boot-time statement list verbatim, so every existing database converges by recording it and moving on; nothing is rewritten in place, and a modified already-applied migration refuses to boot. `pg_advisory_lock` serializes concurrent runners on a dedicated connection (bootstrap inside the lock — two concurrent `CREATE TABLE IF NOT EXISTS` race on the catalog), with the pooled connection discarded rather than returned if the unlock fails. The ledger bootstrap and every migration application run in one transaction per version. Boot order is fixed everywhere (engine first, then product: product v2 reads `mail_messages`) so the two runners can never deadlock. Regressions: convergence of a simulated pre-ledger database with live data on both sides, two concurrent runners recording each version exactly once, and the direct advisory-lock proof (a runner waits while another session holds the key, then proceeds). Nucleus backends without `pg_advisory_lock` still migrate sequentially (probed once; the ledger's primary key remains the backstop) — lullmail deployments run real PostgreSQL. Per-suite database isolation for potentially destructive harness suites remains CI infrastructure work tracked under OPS-07 below.
 
-## OPS-04 (pass 6) / OPS-04 (pass 7) - Medium - DEFERRED
+## OPS-04 (pass 6) / OPS-04 (pass 7) - Medium - FIXED (lifecycle + re-auth pass, 2026-09-18)
 
 **Shutdown does not join all application-owned background work**
 
 - Evidence: Confirmed per both reports — async sends, initial syncs and post-sync work run on background contexts; pools close after the HTTP drain without joining them. Pass 7 bounded the finishSync detached context (previously bare `context.Background()`), so finalization work now carries its own deadline.
-- Deferral: A task group owning every background launch (admission-then-join lifecycle, cancellation propagated into provider I/O) is an app-lifecycle refactor. IMAP-02 (landed) removed the worst hang; the residual is failed writeback noise at shutdown, not lost mail.
+- Fixed (`c341e02`): one `backgroundTasks` group owns every background launch — scheduler, housekeeping loop, initial/manual/OAuth-callback syncs, reconcile jobs, push dispatches, and send-delivery workers — with admission refused once the drain begins. `stopBackground` cancels the group root and joins in-flight work (bounded 30 s) after the HTTP drain and BEFORE the pools close; account-gate contexts derive from the same root, so the cancellation reaches provider I/O. The writeback-noise residual is gone both ways: the join lets finalization land while the pools are open, and a sync canceled by the drain owes no finalization (no spurious `last_error`, no failed-record logs). Regressions: `TestIntegrationShutdownDrainsInFlightSync` (the join outlasts the provider call's post-cancel cleanup; cancellation reached the adapter; `last_error` stays clean; post-drain admission refused).
+- The deferral's IMAP-02 note is superseded: the residual it recorded (failed writeback noise at shutdown) is what this pass removed.
 
-## OPS-05 (pass 7) - Medium - DEFERRED (design)
+## OPS-05 (pass 7) - Medium - FIXED (lifecycle + re-auth pass, 2026-09-18)
 
 **Deleting one account can wait behind unrelated account work and uncancellable locks**
 
-- Evidence: Confirmed — the lifecycle gate is one global owner RWMutex; a long read on account A delays account B's deletion, and engine/OAuth refresh mutexes do not observe cancellation.
-- Deferral: Per-account cancellable admission gates with an active-operation counter (the report's design) plus coalesced manual-sync requests is the same lifecycle refactor as OPS-04 above — it touches every beginAccountUse call site and the deletion transaction. Deferred with it as one app-lifecycle pass; pass 7 at least fenced sends against deletion (SEND-02 fix).
+- Evidence: Confirmed — the lifecycle gate was one global owner RWMutex; a long read on account A delays account B's deletion, and engine/OAuth refresh mutexes do not observe cancellation.
+- Fixed (`c341e02`): per-account admission gates replace the global lock on the work path — an active-operation counter sealed by deletion plus a per-account context derived from the background root. Deletion seals the gate (new admissions fail), CANCELS the account context so in-flight provider I/O aborts, and waits for the count to drain bounded by the request context plus a hard cap; an uncommitted deletion resurrects the gate. The global owner lock survives only around full-owner deletion (which enumerates, seals, and drains every account while blocking creation and gated requests), account creation, and the middleware that holds a request's per-account lease. Duplicate manual syncs coalesce on a context-aware per-account lock: a queued waiter returns immediately on cancellation without another provider connection (the engine's own per-account mutex is unchanged — its critical sections are ctx-aware provider calls). Regressions: `TestIntegrationAccountDeletionIndependentAndCancelling` (B deletes while A's sync is parked; A's deletion cancels A's provider call and drains), `TestIntegrationDuplicateSyncCoalescesOnContextGate`, plus the offline gate-matrix in `accounts_test.go`.
 
 ## OPS-05 (pass 6) / OPS-06 (pass 7) - Medium - DEFERRED
 

@@ -25,8 +25,9 @@ is the register the audit asked for: route, auth, body bound, notes.
 | `GET/POST/DELETE /api/accounts/{id}` | session/agent | 16 KiB, strict single-object, unknown fields rejected | settings (`decodeSettingsJSON`, audit 3 DATA-07) |
 | `GET /api/accounts/{id}/export` | session/agent | — | build disk budget 2 GiB (`budgetedWriter`), per provider message read ≤128 MiB, temp file removed on every return path; stale temps swept at boot |
 | `GET /api/events` | session/agent | — | SSE |
-| `GET /api/security`, sessions, passkeys, TOTP, password | session | 4–16 KiB per ceremony | bootstrap begin 64 KiB (name/email form); TOTP confirm 4 KiB |
-| `POST/DELETE /api/security/agent-tokens…` | session | 16 KiB | |
+| `GET /api/security`, sessions, passkeys, TOTP, password | session | 4–16 KiB per ceremony | bootstrap begin 64 KiB (name/email form); TOTP confirm 4 KiB; TOTP/password/recovery mutations answer 428 without proof ≤10 min old (audit AUTH-02) |
+| `POST /api/security/reauthenticate` | session | 16 KiB | password confirmation; KDF admission + account lockout as sign-in (audit AUTH-02) |
+| `POST/DELETE /api/security/agent-tokens…` | session | 16 KiB | creation gated on ≤10 min proof (audit AUTH-02) |
 | `DELETE /api/account` | session | 16 KiB | full-account delete confirmation |
 | `GET /api/personal/export` | session/agent | — | trust export |
 | `GET/POST/DELETE /api/push` | session | 64 KiB | |
@@ -57,7 +58,7 @@ is the register the audit asked for: route, auth, body bound, notes.
 | `POST /api/auth/logout` | session | — |
 | `POST /api/auth/password` | public (proof-carrying) | 16 KiB |
 | `POST /api/auth/recovery` | public (code-carrying) | 16 KiB |
-| `POST /api/auth/totp` | public (code-carrying) | 16 KiB |
+| `POST /api/auth/totp` | public (code-carrying) | 16 KiB | per-peer limiter plus durable per-user fixed window (10 failures / 5 min, audit AUTH-06) |
 
 ## OAuth callbacks (public, `/api/oauth/...`)
 
