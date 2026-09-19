@@ -1,5 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
-import { api, authApi, authed, refreshAuth } from "../lib/api";
+import { ApiError, api, authApi, authed, refreshAuth } from "../lib/api";
 import { createPasskey } from "../lib/passkeys";
 import { fmtDate } from "../lib/fmt";
 import { resetSelection, setList, showToast } from "../lib/store";
@@ -41,6 +41,45 @@ export function SecurityView() {
   const message = (e: unknown, fallback: string) => e instanceof Error && e.message ? fallback + ": " + e.message : fallback;
   const report = (e: unknown, fallback: string) => setMutationError(message(e, fallback));
 
+  // Re-authentication ceremony (audit AUTH-02): a credential-enrolling
+  // mutation on a session older than ten minutes answers 428. The action
+  // parks here, the owner confirms the password once, and the action
+  // retries — matching how the rest of this view surfaces server problems.
+  const [reauth, setReauth] = useState<{ retry: () => Promise<void> } | null>(null);
+  const [reauthPw, setReauthPw] = useState("");
+  const [reauthErr, setReauthErr] = useState<string | null>(null);
+  const [reauthBusy, setReauthBusy] = useState(false);
+
+  const gated = async (action: () => Promise<void>) => {
+    try {
+      await action();
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 428) {
+        setReauthPw("");
+        setReauthErr(null);
+        setReauth({ retry: action });
+        return;
+      }
+      throw e;
+    }
+  };
+
+  const confirmReauth = async () => {
+    if (!reauth) return;
+    setReauthBusy(true);
+    try {
+      await api("/security/reauthenticate", { body: { password: reauthPw } });
+      const retry = reauth.retry;
+      setReauth(null);
+      setReauthPw("");
+      await retry();
+    } catch (e) {
+      setReauthErr(message(e, "Could not confirm"));
+    } finally {
+      setReauthBusy(false);
+    }
+  };
+
   const load = async () => {
     setLoading(true);
     setLoadError(null);
@@ -73,20 +112,20 @@ export function SecurityView() {
   const regenerate = async () => {
     if (!window.confirm("Replace every unused recovery code? Existing codes will stop working.")) return;
     setBusy("recovery");
-    try { const out = await api<{ recovery_codes: string[] }>("/security/recovery/regenerate", { method: "POST" }); setCodes(out.recovery_codes); await load(); }
+    try { await gated(async () => { const out = await api<{ recovery_codes: string[] }>("/security/recovery/regenerate", { method: "POST" }); setCodes(out.recovery_codes); }); await load(); }
     catch (e) { report(e, "Could not create recovery codes"); }
     finally { setBusy(""); }
   };
 
   const beginTOTP = async () => {
     setBusy("totp");
-    try { setTotp(await api("/security/totp/begin", { method: "POST" })); }
+    try { await gated(async () => { setTotp(await api("/security/totp/begin", { method: "POST" })); }); }
     catch (e) { report(e, "Could not start authenticator setup"); }
     finally { setBusy(""); }
   };
   const confirmTOTP = async () => {
     setBusy("totp");
-    try { await api("/security/totp/confirm", { body: { code: totpCode } }); setTotp(null); setTotpCode(""); showToast("Authenticator enabled"); await load(); }
+    try { await gated(async () => { await api("/security/totp/confirm", { body: { code: totpCode } }); }); setTotp(null); setTotpCode(""); showToast("Authenticator enabled"); await load(); }
     catch (e) { report(e, "Code did not match"); }
     finally { setBusy(""); }
   };
@@ -94,7 +133,9 @@ export function SecurityView() {
   const savePassword = async () => {
     setBusy("password");
     try {
-      await api("/security/password", { body: security?.password_set ? { current: pwCurrent, new: pwNew } : { new: pwNew } });
+      await gated(async () => {
+        await api("/security/password", { body: security?.password_set ? { current: pwCurrent, new: pwNew } : { new: pwNew } });
+      });
       setPwCurrent(""); setPwNew("");
       showToast(security?.password_set ? "Password changed" : "Password set"); await load();
     } catch (e) { report(e, "Could not save password"); }
@@ -105,7 +146,7 @@ export function SecurityView() {
     if (!pwCurrent) { report(new Error("enter the current password"), "Could not remove password"); return; }
     if (!window.confirm("Remove password sign-in? Your other sign-in methods keep working.")) return;
     setBusy("password");
-    try { await api("/security/password", { method: "DELETE", body: { current: pwCurrent } }); setPwCurrent(""); showToast("Password removed"); await load(); }
+    try { await gated(async () => { await api("/security/password", { method: "DELETE", body: { current: pwCurrent } }); }); setPwCurrent(""); showToast("Password removed"); await load(); }
     catch (e) { report(e, "Could not remove password"); }
     finally { setBusy(""); }
   };
@@ -178,8 +219,11 @@ export function SecurityView() {
     if (!name) return;
     setBusy("agent");
     try {
-      const out = await api<{ token: string }>("/security/agent-tokens", { body: { name } });
-      setNewToken(out.token); await load();
+      await gated(async () => {
+        const out = await api<{ token: string }>("/security/agent-tokens", { body: { name } });
+        setNewToken(out.token);
+      });
+      await load();
     } catch (e) { report(e, "Could not create token"); }
     finally { setBusy(""); }
   };
@@ -212,6 +256,19 @@ export function SecurityView() {
       <SettingsTabs here="/settings/security" />
       {loadError && <LoadError title="Some security details may be stale." error={loadError} retry={load} />}
       {mutationError && <div class="settings-callout" role="alert">{mutationError} <button class="btn btn-ghost btn-sm" type="button" onClick={() => setMutationError(null)}>Dismiss</button></div>}
+      {reauth && (
+        <div class="settings-callout" role="dialog" aria-label="Confirm your password">
+          <p><strong>Confirm your password to continue.</strong> This change needs fresh proof it is you — enter your current password, or sign out and sign back in.</p>
+          <div class="inline-form">
+            <label class="sr-only" for="reauth-password">Current password</label>
+            <input id="reauth-password" type="password" placeholder="Current password" autocomplete="current-password" value={reauthPw}
+              onInput={(e) => setReauthPw((e.target as HTMLInputElement).value)} />
+            <button class="btn btn-primary btn-sm" type="button" disabled={reauthBusy || !reauthPw} onClick={confirmReauth}>{reauthBusy ? "Confirming…" : "Confirm"}</button>
+            <button class="btn btn-ghost btn-sm" type="button" disabled={reauthBusy} onClick={() => setReauth(null)}>Cancel</button>
+          </div>
+          {reauthErr && <p role="alert">{reauthErr}</p>}
+        </div>
+      )}
 
       <section class="settings-section">
         <div class="settings-section-head"><div><h2>Password</h2>
@@ -257,7 +314,7 @@ export function SecurityView() {
 
       <section class="settings-section">
         <div class="settings-section-head"><div><h2>Authenticator app</h2><p>An optional TOTP fallback, encrypted at rest.</p></div>
-          {security.totp_enabled ? <button class="btn btn-quiet-danger btn-sm" type="button" disabled={!canRemoveTotp} onClick={async () => { try { await api("/security/totp", { method: "DELETE" }); await load(); } catch (e) { report(e, "Could not disable authenticator"); } }}>Disable</button>
+          {security.totp_enabled ? <button class="btn btn-quiet-danger btn-sm" type="button" disabled={!canRemoveTotp} onClick={async () => { try { await gated(async () => { await api("/security/totp", { method: "DELETE" }); }); await load(); } catch (e) { report(e, "Could not disable authenticator"); } }}>Disable</button>
             : <button class="btn btn-outline btn-sm" type="button" disabled={!!busy} onClick={beginTOTP}>Set up</button>}</div>
         {totp && <div class="totp-setup"><p>Enter this key in your authenticator app, then verify one code.</p><code>{totp.secret}</code><div class="inline-form"><input value={totpCode} inputMode="numeric" autocomplete="one-time-code" placeholder="6-digit code" onInput={(e) => setTotpCode((e.target as HTMLInputElement).value)} /><button class="btn btn-primary btn-sm" type="button" disabled={totpCode.length < 6 || !!busy} onClick={confirmTOTP}>Verify</button></div></div>}
       </section>
