@@ -34,7 +34,7 @@ type blockingAdapter struct {
 }
 
 func (b *blockingAdapter) Provider() mail.Provider { return b.provider }
-func (b *blockingAdapter) Close() error             { return nil }
+func (b *blockingAdapter) Close() error            { return nil }
 func (b *blockingAdapter) Mailboxes(ctx context.Context) ([]mail.Mailbox, error) {
 	return []mail.Mailbox{{ID: "INBOX", Name: "INBOX", Role: "inbox"}}, nil
 }
