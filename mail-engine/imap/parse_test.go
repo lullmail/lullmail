@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -430,5 +431,38 @@ func TestKeywordAtomRejectsCommandInjection(t *testing.T) {
 		if _, err := keywordAtom(bad); err == nil {
 			t.Errorf("keywordAtom(%q) accepted a hostile keyword", bad)
 		}
+	}
+}
+
+// ENVELOPE names only the parent. The References header, fetched beside it,
+// is what keeps the third message of a conversation in the first one's thread.
+func TestReferencesHeaderKeysTheThreadOnItsRoot(t *testing.T) {
+	refs := "References: <root@a.test>\r\n <reply@b.test>\r\n\r\n"
+	raw := "* 3 FETCH (UID 9 ENVELOPE (NIL \"Re: hi\" NIL NIL NIL NIL NIL NIL \"<reply@b.test>\" \"<third@a.test>\") " +
+		"BODY[HEADER.FIELDS (REFERENCES)] {" + strconv.Itoa(len(refs)) + "}\r\n" + refs + ")\r\n"
+	toks, err := newDecoder(strings.NewReader(raw)).readResponse()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &Adapter{conn: &Conn{uidValidity: 1}}
+	env, ok := a.parseFetch("INBOX", toks[3])
+	if !ok {
+		t.Fatal("parseFetch rejected the response")
+	}
+	if len(env.References) != 2 || string(env.ThreadID) != "root@a.test" {
+		t.Fatalf("references %v, thread %q; want the root's thread", env.References, env.ThreadID)
+	}
+
+	// No References header: the parent is the best link there is.
+	empty := "\r\n"
+	raw = "* 4 FETCH (UID 10 ENVELOPE (NIL \"Re: hi\" NIL NIL NIL NIL NIL NIL \"<root@a.test>\" \"<second@b.test>\") " +
+		"BODY[HEADER.FIELDS (REFERENCES)] {" + strconv.Itoa(len(empty)) + "}\r\n" + empty + ")\r\n"
+	toks, err = newDecoder(strings.NewReader(raw)).readResponse()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, _ = a.parseFetch("INBOX", toks[3])
+	if string(env.ThreadID) != "root@a.test" {
+		t.Fatalf("thread %q without a References header; want the parent's", env.ThreadID)
 	}
 }

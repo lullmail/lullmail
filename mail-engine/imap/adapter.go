@@ -265,7 +265,10 @@ func (a *Adapter) fetchRange(ctx context.Context, box mail.MailboxID, set, modif
 	return envs, err
 }
 
-const fetchItems = "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE)"
+// ENVELOPE has no References header, only In-Reply-To, and a thread is keyed
+// on its root: with the parent alone, every reply past the first opens a new
+// thread. The one header is fetched beside the envelope; PEEK leaves \Seen.
+const fetchItems = "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (REFERENCES)])"
 
 func (a *Adapter) fetchRangeWithVanished(ctx context.Context, box mail.MailboxID, set, modifier string) ([]mail.Envelope, map[uint32]mail.MessageID, []uint32, error) {
 	resp, err := a.conn.exec(ctx, "UID FETCH %s %s%s", set, fetchItems, modifier)
@@ -353,6 +356,11 @@ func (a *Adapter) parseFetch(box mail.MailboxID, items token) (mail.Envelope, bo
 
 	if e, ok := items.find("ENVELOPE"); ok {
 		applyEnvelope(&env, e)
+	}
+	if h, ok := items.findPrefix("BODY[HEADER.FIELDS"); ok {
+		if refs := mail.ParseReferences(h.text); len(refs) > 0 {
+			env.References = refs
+		}
 	}
 
 	// Identity is chosen by what the server actually gave us. A
