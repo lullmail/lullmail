@@ -151,7 +151,11 @@ function DraftForm({ seed }: { seed: ComposeState }) {
         to: to.trim(), cc: cc.trim(), bcc: bcc.trim(), subject,
         text: htmlMode ? "" : body,
         html: htmlMode ? body : undefined,
-        accountId: accountId || seed.accountId,
+        // A new message with no account chosen sends from the account the
+        // From menu is showing. Left empty, the server picks its own "first",
+        // which is not the menu's first. A reply stays empty: the server
+        // answers from the account that received the parent.
+        accountId: accountId || seed.accountId || (seed.replyToId ? undefined : accounts.value[0]?.id),
         replyToId: seed.replyToId,
         attachments,
       });
