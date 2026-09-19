@@ -176,6 +176,11 @@ func (a *App) handleAgentTokens(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, tokens)
 	case http.MethodPost:
+		// Minting shows a raw bearer secret that lives until revoked:
+		// recent proof first (audit AUTH-02).
+		if !a.requireRecentReauth(w, r) {
+			return
+		}
 		var req struct {
 			Name string `json:"name"`
 		}

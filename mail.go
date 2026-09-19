@@ -225,6 +225,9 @@ func (a *App) purgeExpired() {
 		// retention window the row goes and a retried mutation would
 		// re-apply — the window is the documented contract.
 		fmt.Sprintf(`DELETE FROM api_mutations WHERE created_at < now() - interval '%d days'`, idempotencyRetentionDays),
+		// Spent factor-budget windows are garbage the moment they roll
+		// over; a day of slack covers clock skew and investigation.
+		`DELETE FROM auth_factor_windows WHERE window_start < now() - interval '1 day'`,
 	} {
 		if _, err := a.db.Exec(q); err != nil {
 			a.log.Error("purge failed", "err", err, "query", q)
@@ -329,6 +332,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	api.Handle("GET /accounts/{id}/export", a.accountExportLifecycle(http.HandlerFunc(a.handleAccountExport)))
 	api.HandleFunc("GET /events", a.handleEvents)
 	api.HandleFunc("GET /security", a.handleSecurity)
+	api.HandleFunc("POST /security/reauthenticate", a.handleReauthenticate)
 	api.HandleFunc("POST /security/passkeys/begin", a.handlePasskeyRegisterBegin)
 	api.HandleFunc("POST /security/passkeys/finish", a.handlePasskeyRegisterFinish)
 	api.HandleFunc("DELETE /security/passkeys/{id}", a.handlePasskeyDelete)

@@ -103,11 +103,27 @@ var idempotencyStatements = []string{
 	)`,
 }
 
+// reauthStatements is the AUTH-02/AUTH-06 machinery: sessions record when
+// the owner last re-proved the credential (reauthenticated_at), and failed
+// standalone-TOTP guesses accumulate in a durable per-user fixed window so
+// distributed guessing across peers hits one shared account budget.
+var reauthStatements = []string{
+	`ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS reauthenticated_at timestamptz`,
+	`CREATE TABLE IF NOT EXISTS auth_factor_windows (
+		user_id      uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		factor       text NOT NULL,
+		window_start timestamptz NOT NULL,
+		attempts     integer NOT NULL CHECK (attempts > 0),
+		PRIMARY KEY (user_id, factor, window_start)
+	)`,
+}
+
 var productMigrations = []productMigration{
 	{Version: 1, Name: "product baseline schema", Statements: splitStatements(schemaSQL)},
 	{Version: 2, Name: "account-scoped product state", Statements: accountScopedStatements},
 	{Version: 3, Name: "reconciliation policy machinery", Statements: policyStatements},
 	{Version: 4, Name: "mutation idempotency ledger", Statements: idempotencyStatements},
+	{Version: 5, Name: "reauthentication and factor budgets", Statements: reauthStatements},
 }
 
 const productLedgerDDL = `CREATE TABLE IF NOT EXISTS app_migrations (

@@ -1376,6 +1376,20 @@ func (a *App) handleTOTPLogin(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 401, "Sign In Failed", "invalid authenticator code")
 		return
 	}
+	// The shared per-user budget comes before any verification work: once
+	// the fixed window is spent, guesses from every peer share one answer
+	// (audit AUTH-06 pass 7). The per-peer limiter above stays.
+	exhausted, retryAfter, budgetErr := a.totpBudgetExhausted(r.Context(), uid)
+	if budgetErr != nil {
+		writeProblem(w, 500, "Sign In Failed", budgetErr.Error())
+		return
+	}
+	if exhausted {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
+		writeProblem(w, 429, "Too Many Attempts",
+			"too many invalid authenticator codes — retry after the current window")
+		return
+	}
 	// The secret and the owner's auth epoch are read as one statement:
 	// the verification snapshot. AUTH-01's finding was that this read sat
 	// before the step-claim lock with nothing connecting the two — a
@@ -1403,6 +1417,10 @@ func (a *App) handleTOTPLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	step := totpMatchedStep(secret, req.Code, time.Now())
 	if step < 0 {
+		// A wrong guess lands in the shared budget even though the peer
+		// limiter already counted it: distributed guessing across peers is
+		// exactly what the per-peer allowance cannot see (audit AUTH-06).
+		a.recordTOTPFailure(r.Context(), uid)
 		writeProblem(w, 401, "Sign In Failed", "invalid authenticator code")
 		return
 	}
@@ -1619,6 +1637,11 @@ func (a *App) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleRecoveryRegenerate(w http.ResponseWriter, r *http.Request) {
 	uid, _ := a.userID(r.Context())
+	// Regenerating exposes a fresh secret set and invalidates the old one:
+	// it demands recent proof (audit AUTH-02).
+	if !a.requireRecentReauth(w, r) {
+		return
+	}
 	codes, err := a.replaceRecoveryCodes(r.Context(), r, uid)
 	if err != nil {
 		writeProblem(w, 500, "Recovery Failed", err.Error())
@@ -1629,6 +1652,11 @@ func (a *App) handleRecoveryRegenerate(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleTOTPBegin(w http.ResponseWriter, r *http.Request) {
 	uid, _ := a.userID(r.Context())
+	// Enrolling shows the secret and installs a durable replacement
+	// credential: recent proof first (audit AUTH-02).
+	if !a.requireRecentReauth(w, r) {
+		return
+	}
 	// Serialized with confirm against the owner row, and the upsert only
 	// replaces a still-pending enrollment: a begin that raced a confirm
 	// must not overwrite a factor the user just enabled (audit AUTH-04).
@@ -1685,6 +1713,10 @@ func (a *App) handleTOTPBegin(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	uid, _ := a.userID(r.Context())
+	// Enabling the factor is the mutation the enrollment gate protects.
+	if !a.requireRecentReauth(w, r) {
+		return
+	}
 	var req struct {
 		Code string `json:"code"`
 	}
@@ -1739,6 +1771,11 @@ func (a *App) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 	uid, _ := a.userID(r.Context())
+	// Disabling a standing credential is a credential change: recent proof
+	// first (audit AUTH-02).
+	if !a.requireRecentReauth(w, r) {
+		return
+	}
 	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeProblem(w, 500, "TOTP Failed", err.Error())
@@ -1786,6 +1823,12 @@ func (a *App) handlePasswordSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uid, _ := a.userID(r.Context())
+	// Changing the password enrolls a durable credential: recent proof
+	// first. A fresh sign-in or the setup token satisfies the gate, so
+	// first-run enrollment keeps working (audit AUTH-02).
+	if !a.requireRecentReauth(w, r) {
+		return
+	}
 	lockKey := "uid:" + uid
 	if remaining := a.passwordLockRemaining(lockKey); remaining > 0 {
 		writePasswordLocked(w, remaining)
@@ -1878,6 +1921,12 @@ func (a *App) handlePasswordSet(w http.ResponseWriter, r *http.Request) {
 // credential an owner can sign in with tomorrow.
 func (a *App) handlePasswordDelete(w http.ResponseWriter, r *http.Request) {
 	uid, _ := a.userID(r.Context())
+	// Removing a standing credential is a credential change: recent proof
+	// first, on top of the inline current-password verification (audit
+	// AUTH-02).
+	if !a.requireRecentReauth(w, r) {
+		return
+	}
 	var req struct {
 		Current string `json:"current"`
 	}

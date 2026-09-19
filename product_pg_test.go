@@ -41,8 +41,8 @@ var productTables = []string{
 	"api_mutations", "account_reconcile_jobs", "agent_tokens", "app_settings", "board_cards",
 	"sticky_notes", "email_accounts", "hey_messages", "hey_senders",
 	"oauth_states", "push_deliveries", "push_subscriptions",
-	"auth_passwords", "auth_totp", "auth_recovery_codes", "auth_challenges",
-	"auth_sessions", "auth_credentials", "users", "app_migrations",
+	"auth_factor_windows", "auth_passwords", "auth_totp", "auth_recovery_codes",
+	"auth_challenges", "auth_sessions", "auth_credentials", "users", "app_migrations",
 }
 
 func resetProductSchema(ctx context.Context, db *sql.DB) error {
