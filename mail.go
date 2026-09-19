@@ -157,16 +157,21 @@ func connectApp(cfg *Config) *App {
 // startBackground runs the sync scheduler and a classification pass on the
 // app's own cadence. Classification is idempotent; a slightly stale bucket
 // fixes itself on the next tick. The context is the server's shutdown
-// context, so both loops stop when the process drains.
+// context and roots the app's task group: both loops stop when the process
+// drains, and stopBackground joins them before the pools close (audit
+// OPS-04).
 func (a *App) startBackground(ctx context.Context) {
+	a.startBackgroundTasks(ctx)
 	// A crashed export build can leave its temp archive behind; the
 	// handler removes its own file on every return path, so anything
 	// matching the pattern before the server listens is garbage. Run
 	// synchronously ahead of ListenAndServe so the sweep can never race
 	// a live build from this process (audit OPS-01).
 	sweepStaleExportTemps()
-	go a.sched.Run(ctx)
-	go func() {
+	a.launch("sync-scheduler", func(ctx context.Context) {
+		_ = a.sched.Run(ctx)
+	})
+	a.launch("housekeeping", func(ctx context.Context) {
 		t := time.NewTicker(2 * time.Minute)
 		defer t.Stop()
 		a.purgeExpired()
@@ -202,7 +207,7 @@ func (a *App) startBackground(ctx context.Context) {
 			}
 			a.purgeExpired()
 		}
-	}()
+	})
 }
 
 // purgeExpired keeps auth tables bounded: ceremonies and OAuth states are
@@ -385,7 +390,10 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 			writeProblem(w, http.StatusInternalServerError, "Classify Failed", err.Error())
 			return
 		}
-		go a.sendPushForUser(context.Background(), uid)
+		pushUID := uid
+		a.launch("push-dispatch", func(ctx context.Context) {
+			a.sendPushForUser(ctx, pushUID)
+		})
 		writeJSON(w, map[string]any{"ok": true})
 	})
 

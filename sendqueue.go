@@ -567,12 +567,12 @@ func (a *App) enqueue(w http.ResponseWriter, deliver deliverFunc, outgoing *mail
 	}
 	a.sendq.mu.Lock()
 	id := time.Now().Format("150405.000") + "-" + newID()[:6]
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(a.bgRoot(), 60*time.Second)
 	done := make(chan error, 1)
 	a.sendq.sends[id] = &pendingSend{cancel: cancel, done: done}
 	a.sendq.mu.Unlock()
 
-	go func() {
+	a.launch("send-delivery", func(context.Context) {
 		defer func() {
 			a.sendq.mu.Lock()
 			delete(a.sendq.sends, id)
@@ -600,7 +600,7 @@ func (a *App) enqueue(w http.ResponseWriter, deliver deliverFunc, outgoing *mail
 			a.log.Error("send failed", "err", err)
 		}
 		done <- err
-	}()
+	})
 
 	writeJSON(w, map[string]any{"queued": id, "undo_seconds": int(undoWindow.Seconds())})
 }

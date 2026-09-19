@@ -121,9 +121,16 @@ func serve() {
 		log.Fatal(err)
 	}
 	// The listener is closed and the drain goroutine owns the remaining
-	// in-flight budget; wait it out, then release the pools.
+	// in-flight budget; wait it out, then join the background work before
+	// releasing the pools: cancel every launch context (account gates
+	// derive from the same root, so provider I/O aborts) and give the
+	// in-flight operations a bounded window to land their writeback (audit
+	// OPS-04 — pools used to close underneath running syncs).
 	<-drained
 	if app != nil {
+		if !app.stopBackground(30 * time.Second) {
+			log.Printf("shutdown: background drain incomplete after 30s; closing pools anyway")
+		}
 		app.db.Close()
 		app.store.Close()
 	}

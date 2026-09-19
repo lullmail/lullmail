@@ -164,8 +164,12 @@ func (a *App) handleOAuthCallback(w http.ResponseWriter, r *http.Request, provid
 	committed := false
 	defer func() {
 		if !committed {
-			_, _ = a.db.ExecContext(context.Background(),
-				`DELETE FROM mail_accounts ma WHERE id=$1 AND NOT EXISTS (SELECT 1 FROM email_accounts ea WHERE ea.mirror_account_id=ma.id)`, mirror)
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, err := a.db.ExecContext(cleanupCtx,
+				`DELETE FROM mail_accounts ma WHERE id=$1 AND NOT EXISTS (SELECT 1 FROM email_accounts ea WHERE ea.mirror_account_id=ma.id)`, mirror); err != nil {
+				a.log.Error("orphan mirror cleanup failed", "account", mirror, "err", err)
+			}
 		}
 	}()
 	if err := a.store.PutAccount(r.Context(), &mail.Account{ID: mail.AccountID(mirror), Provider: mail.Provider(provider), Email: email, Name: label}); err != nil {
@@ -178,10 +182,7 @@ func (a *App) handleOAuthCallback(w http.ResponseWriter, r *http.Request, provid
 		return
 	}
 	committed = true
-	go func() {
-		ctx := context.Background()
-		_ = a.syncAccount(ctx, mail.AccountID(mirror))
-	}()
+	a.launchAccountSync(mail.AccountID(mirror))
 	http.Redirect(w, r, "/settings/accounts?connected="+url.QueryEscape(provider)+"&mailboxes="+fmt.Sprint(len(boxes)), http.StatusSeeOther)
 }
 

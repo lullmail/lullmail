@@ -263,7 +263,7 @@ func TestGuardDeliveryFencesAccountDeletion(t *testing.T) {
 	// Deletion cannot COMPLETE while the admitted delivery holds the lease...
 	deletionDone := make(chan struct{})
 	go func() {
-		finish, ok := a.beginAccountDeletion(acct)
+		finish, ok := a.beginAccountDeletion(context.Background(), acct)
 		if !ok {
 			t.Error("deletion reported in-progress twice")
 			return

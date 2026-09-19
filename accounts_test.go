@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql/driver"
 	"net/http"
 	"net/http/httptest"
@@ -33,10 +34,10 @@ func TestStoredCredentialMapsJMAPSecretToAccessToken(t *testing.T) {
 	}
 }
 
-func TestAccountDeletionWaitsForUseAndTombstones(t *testing.T) {
+func TestAccountDeletionWaitsForUseAndCancelsWork(t *testing.T) {
 	app := &App{}
 	acct := mail.AccountID("account-1")
-	releaseUse, ok := app.beginAccountUse(acct)
+	workCtx, releaseUse, ok := app.beginAccountWork(acct)
 	if !ok {
 		t.Fatal("initial account use was rejected")
 	}
@@ -45,7 +46,7 @@ func TestAccountDeletionWaitsForUseAndTombstones(t *testing.T) {
 	finished := make(chan struct{})
 	go func() {
 		close(started)
-		finishDelete, ok := app.beginAccountDeletion(acct)
+		finishDelete, ok := app.beginAccountDeletion(context.Background(), acct)
 		if !ok {
 			t.Error("deletion was rejected")
 			close(finished)
@@ -58,7 +59,11 @@ func TestAccountDeletionWaitsForUseAndTombstones(t *testing.T) {
 	select {
 	case <-finished:
 		t.Fatal("deletion did not wait for active account use")
+	case <-workCtx.Done():
+		// Sealing cancels the account context first, then waits for the
+		// drain — the intended order.
 	case <-time.After(20 * time.Millisecond):
+		t.Fatal("sealing did not cancel the in-flight work's context")
 	}
 
 	releaseUse()
@@ -67,8 +72,7 @@ func TestAccountDeletionWaitsForUseAndTombstones(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("deletion stayed blocked after account use ended")
 	}
-	if release, ok := app.beginAccountUse(acct); ok {
-		release()
+	if _, ok := app.beginAccountUse(acct); ok {
 		t.Fatal("committed deletion did not tombstone stale account work")
 	}
 }
@@ -76,7 +80,7 @@ func TestAccountDeletionWaitsForUseAndTombstones(t *testing.T) {
 func TestFailedAccountDeletionClearsTombstone(t *testing.T) {
 	app := &App{}
 	acct := mail.AccountID("account-1")
-	finishDelete, ok := app.beginAccountDeletion(acct)
+	finishDelete, ok := app.beginAccountDeletion(context.Background(), acct)
 	if !ok {
 		t.Fatal("deletion was rejected")
 	}
@@ -89,61 +93,99 @@ func TestFailedAccountDeletionClearsTombstone(t *testing.T) {
 	release()
 }
 
-func TestFullAccountDeletionAcquiresOnceBlocksAndRetires(t *testing.T) {
+// A deletion whose drain window expires aborts and leaves the account
+// usable: the wedged operation is the failure, not a hung delete endpoint.
+func TestAccountDeletionAbortsWhenWorkNeverDrains(t *testing.T) {
 	app := &App{}
 	acct := mail.AccountID("account-1")
-	releaseUse, ok := app.beginAccountUse(acct)
+	if _, release, ok := app.beginAccountWork(acct); !ok {
+		t.Fatal("account use was rejected")
+	} else {
+		defer release()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, ok := app.beginAccountDeletion(ctx, acct); ok {
+		t.Fatal("deletion admitted with undrainable work inside a tiny window")
+	}
+	release, ok := app.beginAccountUse(acct)
+	if !ok {
+		t.Fatal("aborted deletion left the account tombstoned")
+	}
+	release()
+}
+
+// OPS-05's headline: one account's long operation must not delay another
+// account's deletion. The gates are per-account; the owner lock never
+// appears on this path.
+func TestUnrelatedAccountWorkDoesNotBlockDeletion(t *testing.T) {
+	app := &App{}
+	if _, release, ok := app.beginAccountWork("account-A"); !ok {
+		t.Fatal("account A use was rejected")
+	} else {
+		defer release()
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		finish, ok := app.beginAccountDeletion(context.Background(), "account-B")
+		if !ok {
+			t.Error("deletion of B was rejected")
+			return
+		}
+		finish(true)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("deletion of account B waited behind account A's work")
+	}
+}
+
+// Full-owner deletion seals every enumerated account and retires them on
+// commit; new work on those accounts fails while unrelated accounts stay
+// usable through ownership checks (the seal no longer fences the world).
+func TestFullOwnerSealDrainsAndRetires(t *testing.T) {
+	app := &App{db: openStepDB(t, dbStep{kind: "query", rows: &testRows{
+		columns: []string{"mirror_account_id"},
+		values:  [][]driver.Value{{"account-1"}},
+	}})}
+	acct := mail.AccountID("account-1")
+	workCtx, releaseUse, ok := app.beginAccountWork(acct)
 	if !ok {
 		t.Fatal("initial account use was rejected")
 	}
 
-	acquired := make(chan func([]mail.AccountID, bool), 1)
+	sealed := make(chan *ownerSeal, 1)
 	go func() {
-		acquired <- app.beginFullAccountDeletion()
+		seal, err := app.sealOwnerAccounts(context.Background(), "uid-1")
+		if err != nil {
+			t.Error("owner seal failed")
+			close(sealed)
+			return
+		}
+		sealed <- seal
 	}()
 	select {
-	case <-acquired:
-		t.Fatal("full deletion did not wait for active account use")
+	case <-sealed:
+		t.Fatal("owner seal did not wait for active account use")
+	case <-workCtx.Done():
 	case <-time.After(20 * time.Millisecond):
 	}
-
 	releaseUse()
-	var finishDelete func([]mail.AccountID, bool)
+	var seal *ownerSeal
 	select {
-	case finishDelete = <-acquired:
+	case seal = <-sealed:
 	case <-time.After(time.Second):
-		t.Fatal("full deletion stayed blocked after account use ended")
+		t.Fatal("owner seal stayed blocked after account use ended")
 	}
-
-	useResult := make(chan bool, 1)
-	go func() {
-		release, ok := app.beginAccountUse(acct)
-		if ok {
-			release()
-		}
-		useResult <- ok
-	}()
-	select {
-	case <-useResult:
-		t.Fatal("account work was not blocked during full deletion")
-	case <-time.After(20 * time.Millisecond):
+	if _, ok := app.beginAccountUse("unrelated-account"); !ok {
+		t.Fatal("owner seal fenced an account it never enumerated")
 	}
-
-	finishDelete([]mail.AccountID{acct}, true)
-	select {
-	case ok := <-useResult:
-		if ok {
-			t.Fatal("committed full deletion did not retire account work")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("account work stayed blocked after full deletion finished")
+	seal.finish(true)
+	if _, ok := app.beginAccountUse(acct); ok {
+		t.Fatal("committed owner deletion did not retire sealed account work")
 	}
-
-	release, ok := app.beginAccountUse("unrelated-account")
-	if !ok {
-		t.Fatal("full deletion did not release the owner lock")
-	}
-	release()
 }
 
 // The audit's deadlock scenario: a handler already inside the lifecycle gate
@@ -166,7 +208,7 @@ func TestAccountResolverUnderLifecycleGateWithPendingDeletion(t *testing.T) {
 		started := make(chan struct{})
 		go func() {
 			close(started)
-			finish, _ := app.beginAccountDeletion("account-1")
+			finish, _ := app.beginAccountDeletion(context.Background(), "account-1")
 			if finish != nil {
 				finish(false)
 			}

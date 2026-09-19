@@ -239,11 +239,10 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 	committed = true
 
 	// Initial sync in the background: the API answers immediately, the UI
-	// polls account status while envelopes land.
-	go func() {
-		ctx := context.Background()
-		_ = a.syncAccount(ctx, mail.AccountID(mirrorID))
-	}()
+	// polls account status while envelopes land. The launch is owned by
+	// the app's task group and runs on the account's gate context, so
+	// shutdown joins it and a deletion cancels it (audit OPS-04/05).
+	a.launchAccountSync(mail.AccountID(mirrorID))
 
 	writeJSON(w, map[string]any{"id": accID, "mailboxes": len(boxes), "with_roles": roleCount})
 }
@@ -658,9 +657,10 @@ func (a *App) deleteAccount(w http.ResponseWriter, r *http.Request, id string) {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return
 	}
-	finishDelete, ok := a.beginAccountDeletion(mail.AccountID(mirror))
+	finishDelete, ok := a.beginAccountDeletion(r.Context(), mail.AccountID(mirror))
 	if !ok {
-		writeProblem(w, http.StatusConflict, "Delete In Progress", "this account is already being deleted")
+		writeProblem(w, http.StatusServiceUnavailable, "Delete Busy",
+			"this account has work still draining — retry the deletion in a moment")
 		return
 	}
 	committed := false
@@ -735,17 +735,36 @@ func (a *App) triggerSync(w http.ResponseWriter, r *http.Request, id string) {
 		writeJSON(w, map[string]any{"synced": id})
 		return
 	}
-	go func() {
-		_ = a.syncAccount(context.Background(), mail.AccountID(mirror))
-	}()
+	a.launchAccountSync(mail.AccountID(mirror))
 	writeJSON(w, map[string]any{"syncing": id})
+}
+
+// launchAccountSync runs one whole-account sync as a group-owned background
+// unit on the account's gate context: shutdown joins it, a deletion of the
+// account cancels the provider I/O mid-flight (audit OPS-04/OPS-05).
+func (a *App) launchAccountSync(acct mail.AccountID) {
+	a.launch("account-sync", func(ctx context.Context) {
+		gateCtx, releaseGate, ok := a.beginAccountWork(acct)
+		if !ok {
+			return
+		}
+		defer releaseGate()
+		_ = a.syncAccount(gateCtx, acct)
+	})
 }
 
 // syncAccount dials with the stored credential and runs one full sync,
 // recording outcome on the account row. The returned error covers BOTH the
 // provider fetch and product finalization: a wait=1 caller must not be told
-// "synced" when reconciliation failed (audit 4 F16).
+// "synced" when reconciliation failed (audit 4 F16). Duplicate syncs for one
+// account coalesce on a context-aware gate — a queued request whose context
+// went away returns instead of stacking a provider connection.
 func (a *App) syncAccount(ctx context.Context, acct mail.AccountID) error {
+	releaseGate, err := accountSyncGate(acct).Lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseGate()
 	releaseUse, ok := a.beginAccountUse(acct)
 	if !ok {
 		return fmt.Errorf("account %s is being deleted", acct)
@@ -755,8 +774,7 @@ func (a *App) syncAccount(ctx context.Context, acct mail.AccountID) error {
 	if err != nil {
 		return a.finishSync(ctx, acct, nil, err)
 	}
-	resolve := newResolver()
-	adapter, release, err := resolve(ctx, acct, cred)
+	adapter, release, err := a.syncResolver()(ctx, acct, cred)
 	if err != nil {
 		return a.finishSync(ctx, acct, nil, err)
 	}
@@ -765,7 +783,25 @@ func (a *App) syncAccount(ctx context.Context, acct mail.AccountID) error {
 	return a.finishSync(ctx, acct, reports, err)
 }
 
+// syncResolver is the dial the sync paths use: the substituted test dialer
+// when one is installed, the production resolver otherwise.
+func (a *App) syncResolver() mail.Resolver {
+	if a.dial != nil {
+		return a.dial
+	}
+	return newResolver()
+}
+
 func (a *App) finishSync(ctx context.Context, acct mail.AccountID, reports []mail.SyncReport, syncErr error) error {
+	// The shutdown drain cancels syncs mid-flight (their contexts derive
+	// from the background root). Recording that cancellation as a
+	// last_error on the account row — or writing it after the pools are
+	// closing — was the failed-writeback noise this pass removes: a
+	// stopped process owes no finalization, and the next boot's sync
+	// refreshes the row (audit OPS-04).
+	if syncErr != nil && errors.Is(syncErr, context.Canceled) && a.shuttingDown() {
+		return nil
+	}
 	// A wait=1 browser request may vanish mid-sync; the outcome still has to
 	// land durably, so finish on a detached context rather than not at all —
 	// but a BOUNDED one, so finalization cannot outlive shutdown forever.

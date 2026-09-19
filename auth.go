@@ -32,7 +32,6 @@ import (
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
-	"github.com/neutron-build/neutron/mail"
 )
 
 const (
@@ -2023,10 +2022,14 @@ func (a *App) handleFullAccountDelete(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 422, "Confirmation Mismatch", "type the account email address exactly")
 		return
 	}
-	finishFullDelete := a.beginFullAccountDeletion()
+	seal, err := a.sealOwnerAccounts(r.Context(), uid)
+	if err != nil {
+		writeProblem(w, http.StatusServiceUnavailable, "Delete Busy",
+			"account work is still draining — retry the deletion in a moment")
+		return
+	}
 	committed := false
-	var mirrors []mail.AccountID
-	defer func() { finishFullDelete(mirrors, committed) }()
+	defer func() { seal.finish(committed) }()
 	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeProblem(w, 500, "Delete Failed", err.Error())
@@ -2052,7 +2055,19 @@ func (a *App) handleFullAccountDelete(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, 500, "Delete Failed", err.Error())
 			return
 		}
-		mirrors = append(mirrors, mail.AccountID(id))
+		// The owner seal drained exactly these mirrors before the
+		// transaction began; creation cannot add one while it runs.
+		for _, q := range []string{
+			`DELETE FROM mail_message_mailboxes WHERE account_id=$1`, `DELETE FROM mail_bodies WHERE account_id=$1`,
+			`DELETE FROM mail_messages WHERE account_id=$1`, `DELETE FROM mail_mailboxes WHERE account_id=$1`,
+			`DELETE FROM mail_sync_state WHERE account_id=$1`, `DELETE FROM mail_accounts WHERE id=$1`,
+		} {
+			if _, err = tx.ExecContext(r.Context(), q, id); err != nil {
+				rows.Close()
+				writeProblem(w, 500, "Delete Failed", err.Error())
+				return
+			}
+		}
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -2060,19 +2075,6 @@ func (a *App) handleFullAccountDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows.Close()
-	for _, mirror := range mirrors {
-		queries := []string{
-			`DELETE FROM mail_message_mailboxes WHERE account_id=$1`, `DELETE FROM mail_bodies WHERE account_id=$1`,
-			`DELETE FROM mail_messages WHERE account_id=$1`, `DELETE FROM mail_mailboxes WHERE account_id=$1`,
-			`DELETE FROM mail_sync_state WHERE account_id=$1`, `DELETE FROM mail_accounts WHERE id=$1`,
-		}
-		for _, q := range queries {
-			if _, err = tx.ExecContext(r.Context(), q, string(mirror)); err != nil {
-				writeProblem(w, 500, "Delete Failed", err.Error())
-				return
-			}
-		}
-	}
 	if _, err = tx.ExecContext(r.Context(), `DELETE FROM users WHERE id=$1`, uid); err != nil {
 		writeProblem(w, 500, "Delete Failed", err.Error())
 		return

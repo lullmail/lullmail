@@ -80,18 +80,19 @@ func upsertReconcileJobTx(ctx context.Context, tx *sql.Tx, mirror string, versio
 	return nil
 }
 
-// kickReconcileJob runs the durable job for one account on a detached,
-// bounded context: the HTTP response must not depend on a provider
-// enumeration finishing, and finalization must not outlive shutdown
-// forever (the same two-sided rule finishSync follows).
+// kickReconcileJob runs the durable job for one account on the task group:
+// the HTTP response must not depend on a provider enumeration finishing,
+// finalization must not outlive shutdown forever, and the drain joins the
+// job before the pools close (the same two-sided rule finishSync follows,
+// audit OPS-04).
 func (a *App) kickReconcileJob(mirror string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	go func() {
+	a.launch("reconcile-job", func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 		defer cancel()
 		if err := a.runReconcileJob(ctx, mirror); err != nil {
 			a.log.Error("reconcile job failed", "account", mirror, "err", err)
 		}
-	}()
+	})
 }
 
 // processReconcileJobs serves every pending or failed job of one owner
@@ -275,11 +276,17 @@ func (a *App) executeReconcileJob(ctx context.Context, job *reconcileJob) error 
 // until every mailbox's scan finished (SYNC-03), and the job only
 // completes when no scans remain.
 func (a *App) reconcileByFullEnumeration(ctx context.Context, acct mail.AccountID) error {
-	releaseUse, ok := a.beginAccountUse(acct)
+	// The work lease (not a plain use lease) so the enumeration's provider
+	// I/O observes the account gate's cancellation: a deletion aborts the
+	// rescan instead of waiting out every mailbox page (audit OPS-05).
+	gateCtx, releaseUse, ok := a.beginAccountWork(acct)
 	if !ok {
 		return fmt.Errorf("account %s is being deleted", acct)
 	}
 	defer releaseUse()
+	if ctx.Err() == nil && gateCtx.Err() != nil {
+		ctx = gateCtx
+	}
 
 	cred, err := a.Token(ctx, acct)
 	if err != nil {
