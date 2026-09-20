@@ -124,6 +124,16 @@ var productMigrations = []productMigration{
 	{Version: 3, Name: "reconciliation policy machinery", Statements: policyStatements},
 	{Version: 4, Name: "mutation idempotency ledger", Statements: idempotencyStatements},
 	{Version: 5, Name: "reauthentication and factor budgets", Statements: reauthStatements},
+	{Version: 6, Name: "reconcile job claim stamps", Statements: reconcileClaimStatements},
+}
+
+// reconcileClaimStatements stamps account_reconcile_jobs with the claim
+// time (audit 5 SYNC-06): a worker that dies or cannot finalize leaves a
+// 'running' row, and the periodic pass can now tell a stale claim from a
+// live one and requeue it — boot-time reset alone never recovered a job
+// wedged inside a still-serving process.
+var reconcileClaimStatements = []string{
+	`ALTER TABLE account_reconcile_jobs ADD COLUMN IF NOT EXISTS claimed_at timestamptz`,
 }
 
 const productLedgerDDL = `CREATE TABLE IF NOT EXISTS app_migrations (
