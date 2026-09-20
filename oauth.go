@@ -161,27 +161,32 @@ func (a *App) handleOAuthCallback(w http.ResponseWriter, r *http.Request, provid
 	mirror := newID()
 	a.accountOwnerMu.RLock()
 	defer a.accountOwnerMu.RUnlock()
-	committed := false
-	defer func() {
-		if !committed {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if _, err := a.db.ExecContext(cleanupCtx,
-				`DELETE FROM mail_accounts ma WHERE id=$1 AND NOT EXISTS (SELECT 1 FROM email_accounts ea WHERE ea.mirror_account_id=ma.id)`, mirror); err != nil {
-				a.log.Error("orphan mirror cleanup failed", "account", mirror, "err", err)
-			}
-		}
-	}()
-	if err := a.store.PutAccount(r.Context(), &mail.Account{ID: mail.AccountID(mirror), Provider: mail.Provider(provider), Email: email, Name: label}); err != nil {
-		writeProblem(w, 500, "Mirror Failed", err.Error())
-		return
-	}
-	_, err = a.db.ExecContext(r.Context(), `INSERT INTO email_accounts(user_id,mirror_account_id,provider,address,label,username,host,port,smtp_host,smtp_port,cred_ciphertext,backfill_days) VALUES($1,$2,$3,$4,$5,$4,'',0,'',0,$6,90)`, uid, mirror, provider, email, label, sealed)
+	// One transaction for both rows (audit 5 DATA-05): the mirror account
+	// and its email_accounts owner commit together — the engine pool's
+	// separate commit left an orphan mirror behind when the process died
+	// between them, and the deferred cleanup could not run after that.
+	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeProblem(w, 500, "Connect Failed", err.Error())
 		return
 	}
-	committed = true
+	defer tx.Rollback()
+	if err := putMirrorAccountTx(r.Context(), tx, mail.AccountID(mirror), mail.Provider(provider), email, label); err != nil {
+		writeProblem(w, 500, "Mirror Failed", err.Error())
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `INSERT INTO email_accounts(user_id,mirror_account_id,provider,address,label,username,host,port,smtp_host,smtp_port,cred_ciphertext,backfill_days) VALUES($1,$2,$3,$4,$5,$4,'',0,'',0,$6,90)`, uid, mirror, provider, email, label, sealed); err != nil {
+		if isUniqueViolation(err) {
+			writeProblem(w, http.StatusConflict, "Already Connected", "that address is already connected")
+			return
+		}
+		writeProblem(w, 500, "Connect Failed", err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeProblem(w, 500, "Connect Failed", err.Error())
+		return
+	}
 	a.launchAccountSync(mail.AccountID(mirror))
 	http.Redirect(w, r, "/settings/accounts?connected="+url.QueryEscape(provider)+"&mailboxes="+fmt.Sprint(len(boxes)), http.StatusSeeOther)
 }

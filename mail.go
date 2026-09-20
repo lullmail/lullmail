@@ -23,6 +23,21 @@ func writeJSON(w http.ResponseWriter, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+// writeJSONStatus serializes BEFORE committing headers (audit 5 API-03):
+// writing the status first makes every later header mutation — including
+// writeJSON's Content-Type — a silent no-op on the already-committed
+// response, so an accepted 202 arrived unidentifiable as JSON.
+func writeJSONStatus(w http.ResponseWriter, status int, v any) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		http.Error(w, "response encoding failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	w.Write(append(raw, '\n'))
+}
+
 // connectApp opens both pools (product database/sql + engine pgx) and
 // runs both versioned migrations, so a fresh deploy converges from zero
 // and an existing one converges through the ledger (audit OPS-02). The
@@ -119,7 +134,12 @@ func connectApp(cfg *Config) *App {
 	app.svc = mail.NewService(store, app.eng)
 	app.svc.Resolve = app.accountResolver()
 	app.svc.Senders = func(acct mail.AccountID) (*mail.Sender, mail.Address, bool) {
-		return app.SMTPFor(context.Background(), acct)
+		// Bounded context from the background root (audit 5 OPS-02): the
+		// two small reads inside SMTPFor are cancellable by the drain
+		// instead of running context-free past a closing pool.
+		ctx, cancel := context.WithTimeout(app.bgRoot(), 10*time.Second)
+		defer cancel()
+		return app.SMTPFor(ctx, acct)
 	}
 
 	app.sched = mail.NewScheduler(store, app.eng, nil, slog.Default())
@@ -136,9 +156,15 @@ func connectApp(cfg *Config) *App {
 	}
 	// email_accounts.sync_enabled is the product-level pause switch; the
 	// engine only knows the mirror, so the decision is supplied from here.
+	// The lookup carries a context linked to the background root with its
+	// own budget (audit 5 OPS-02): a context-free query could not be
+	// interrupted by the shutdown drain, which then waited on a stalled
+	// database call nothing could cancel.
 	app.sched.Include = func(acct mail.Account) bool {
+		ctx, cancel := context.WithTimeout(app.bgRoot(), 5*time.Second)
+		defer cancel()
 		var enabled bool
-		if err := db.QueryRow(`SELECT sync_enabled FROM email_accounts WHERE mirror_account_id=$1`, string(acct.ID)).Scan(&enabled); err != nil {
+		if err := db.QueryRowContext(ctx, `SELECT sync_enabled FROM email_accounts WHERE mirror_account_id=$1`, string(acct.ID)).Scan(&enabled); err != nil {
 			// Unknown to the product layer: not ours to sync.
 			return false
 		}
@@ -174,7 +200,7 @@ func (a *App) startBackground(ctx context.Context) {
 	a.launch("housekeeping", func(ctx context.Context) {
 		t := time.NewTicker(2 * time.Minute)
 		defer t.Stop()
-		a.purgeExpired()
+		a.purgeExpired(ctx)
 		// A reconcile job left 'running' belongs to a previous process;
 		// it goes back to pending so this process's passes retry it.
 		if err := a.resetStaleReconcileJobs(ctx); err != nil {
@@ -205,7 +231,7 @@ func (a *App) startBackground(ctx context.Context) {
 				return
 			case <-t.C:
 			}
-			a.purgeExpired()
+			a.purgeExpired(ctx)
 		}
 	})
 }
@@ -213,8 +239,11 @@ func (a *App) startBackground(ctx context.Context) {
 // purgeExpired keeps auth tables bounded: ceremonies and OAuth states are
 // consumed-or-deleted today, so anything expired is garbage; sessions are
 // filtered on read but would otherwise live in the table forever. It also
-// reclaims expired push-claim leases whose dispatch died mid-send.
-func (a *App) purgeExpired() {
+// reclaims expired push-claim leases whose dispatch died mid-send. Every
+// statement observes the worker's context with its own budget, so a
+// stalled database call is interrupted by the shutdown drain instead of
+// holding it (audit 5 OPS-02).
+func (a *App) purgeExpired(ctx context.Context) {
 	for _, q := range []string{
 		`DELETE FROM auth_challenges WHERE expires_at < now()`,
 		`DELETE FROM oauth_states WHERE expires_at < now()`,
@@ -229,7 +258,13 @@ func (a *App) purgeExpired() {
 		// over; a day of slack covers clock skew and investigation.
 		`DELETE FROM auth_factor_windows WHERE window_start < now() - interval '1 day'`,
 	} {
-		if _, err := a.db.Exec(q); err != nil {
+		opCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		_, err := a.db.ExecContext(opCtx, q)
+		cancel()
+		if err != nil {
+			if ctx.Err() != nil {
+				return // the drain is cancelling us; the next boot retries
+			}
 			a.log.Error("purge failed", "err", err, "query", q)
 		}
 	}
@@ -382,7 +417,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	api.HandleFunc("POST /messages/{message}/action", a.withIdempotency(a.handleMessageAction))
 	api.Handle("GET /messages/{message}/attachment/{part}", a.accountWorkLifecycle(http.HandlerFunc(a.handleAttachment)))
 	api.Handle("GET /messages/{message}/eml", a.accountWorkLifecycle(http.HandlerFunc(a.handleMessageEML)))
-	api.HandleFunc("POST /send", a.handleSend)
+	api.HandleFunc("POST /send", withBodyDeadline(sendBodyReadBudget, a.handleSend))
 	api.HandleFunc("DELETE /outbox/{id}", a.handleUndoSend)
 	api.HandleFunc("POST /classify", func(w http.ResponseWriter, r *http.Request) {
 		uid, err := a.userID(r.Context())

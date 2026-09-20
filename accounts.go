@@ -32,6 +32,11 @@ type accountJSON struct {
 	MessageCount  int     `json:"message_count"`
 	ScreenerCount int     `json:"screener_count"`
 
+	// Desired vs applied policy versions (audit 5 API-04): a client can
+	// tell a requested transition from one whose data work finished.
+	PolicyVersion        int64 `json:"policy_version"`
+	AppliedPolicyVersion int64 `json:"applied_policy_version"`
+
 	// Reconcile is the durable policy-transition job state (DATA-08):
 	// nil when no transition is outstanding.
 	Reconcile map[string]any `json:"reconcile,omitempty"`
@@ -54,6 +59,10 @@ func (a *App) listAccountsJSON(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
 		return
 	}
+	// The reconcile job rides along as one LEFT JOIN (audit 5 API-04):
+	// the response type always declared it, but the list never selected
+	// it — a polling client could not see a failed restoration job or
+	// tell desired from applied policy through this endpoint.
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT ea.id, ea.provider, ea.address, ea.label, ea.backfill_days, ea.retention_days, ea.sync_enabled,
 		       COALESCE(ea.last_sync_at::text,''), COALESCE(ea.last_error,''),
@@ -61,8 +70,11 @@ func (a *App) listAccountsJSON(w http.ResponseWriter, r *http.Request) {
 		       (SELECT count(*) FROM hey_messages h
 		         JOIN mail_messages m ON m.account_id = h.account_id AND m.id = h.message_id
 		          AND m.account_id = ea.mirror_account_id
-		         WHERE h.user_id = ea.user_id AND h.bucket = 'screener')
+		         WHERE h.user_id = ea.user_id AND h.bucket = 'screener'),
+		       ea.policy_version, ea.applied_policy_version,
+		       j.state, j.policy_version, j.full_enumeration, COALESCE(j.last_error,'')
 		FROM email_accounts ea
+		LEFT JOIN account_reconcile_jobs j ON j.account_id = ea.mirror_account_id
 		WHERE ea.user_id = $1 ORDER BY ea.created_at`, uid)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
@@ -74,8 +86,13 @@ func (a *App) listAccountsJSON(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var acc accountJSON
 		var lastSync, lastErr string
+		var jobState, jobError sql.NullString
+		var jobVersion sql.NullInt64
+		var jobFull sql.NullBool
 		if err := rows.Scan(&acc.ID, &acc.Provider, &acc.Address, &acc.Label, &acc.BackfillDays, &acc.RetentionDays, &acc.SyncEnabled,
-			&lastSync, &lastErr, &acc.MessageCount, &acc.ScreenerCount); err != nil {
+			&lastSync, &lastErr, &acc.MessageCount, &acc.ScreenerCount,
+			&acc.PolicyVersion, &acc.AppliedPolicyVersion,
+			&jobState, &jobVersion, &jobFull, &jobError); err != nil {
 			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
 			return
 		}
@@ -85,6 +102,17 @@ func (a *App) listAccountsJSON(w http.ResponseWriter, r *http.Request) {
 		if lastErr != "" {
 			acc.LastError = &lastErr
 		}
+		if jobState.Valid {
+			reconcile := map[string]any{
+				"state":            jobState.String,
+				"policy_version":   jobVersion.Int64,
+				"full_enumeration": jobFull.Bool,
+			}
+			if jobError.Valid && jobError.String != "" {
+				reconcile["last_error"] = jobError.String
+			}
+			acc.Reconcile = reconcile
+		}
 		out = append(out, acc)
 	}
 	if err := rows.Err(); err != nil {
@@ -92,6 +120,33 @@ func (a *App) listAccountsJSON(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, out)
+}
+
+// putMirrorAccountTx inserts the engine's mail_accounts row THROUGH the
+// product's own transaction (audit 5 DATA-05): the mirror account and its
+// email_accounts row must commit or vanish together, and the engine
+// pool's separate commit left an orphan mirror account whenever the
+// process died between the two. The account maintenance advisory lock is
+// the transaction's FIRST statement — the same lock order every mirror
+// writer shares (audit SYNC-04).
+func putMirrorAccountTx(ctx context.Context, tx *sql.Tx, acct mail.AccountID, provider mail.Provider, email, name string) error {
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock($1)`, mail.AccountLockKey(acct)); err != nil {
+		return fmt.Errorf("account maintenance lock: %w", err)
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO mail_accounts (id, provider, email, name, needs_reauth)
+		VALUES ($1, $2, $3, $4, false)`,
+		string(acct), string(provider), email, name)
+	return err
+}
+
+// isUniqueViolation reports a PostgreSQL unique-constraint rejection
+// (SQLSTATE 23505) — e.g. two validated connect requests racing past the
+// duplicate pre-check land here.
+func isUniqueViolation(err error) bool {
+	var pgErr interface{ SQLState() string }
+	return errors.As(err, &pgErr) && pgErr.SQLState() == "23505"
 }
 
 func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
@@ -196,29 +251,18 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Begin Failed", err.Error())
 		return
 	}
-	committed := false
-	mirrorCreated := false
-	defer func() {
-		_ = tx.Rollback()
-		if mirrorCreated && !committed {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if _, cleanupErr := a.db.ExecContext(ctx, `DELETE FROM mail_accounts ma WHERE id=$1 AND NOT EXISTS (SELECT 1 FROM email_accounts ea WHERE ea.mirror_account_id=ma.id)`, mirrorID); cleanupErr != nil {
-				a.log.Error("orphan mirror cleanup failed", "account", mirrorID, "err", cleanupErr)
-			}
-		}
-	}()
+	defer tx.Rollback()
 
-	if err := a.store.PutAccount(r.Context(), &mail.Account{
-		ID:       mail.AccountID(mirrorID),
-		Provider: cred.Provider,
-		Email:    req.Address,
-		Name:     req.Label,
-	}); err != nil {
-		writeProblem(w, http.StatusBadGateway, "Mirror Account Failed", err.Error())
+	// One transaction carries BOTH rows (audit 5 DATA-05): the mirror
+	// account and its email_accounts owner commit together or not at all
+	// — no orphan mirror can survive a crash between two commits, so the
+	// deferred cleanup that could not run after process death is gone.
+	// Two validated requests racing past the pre-check also land on the
+	// uniqueness constraint here, answering 409 instead of 500.
+	if err := putMirrorAccountTx(r.Context(), tx, mail.AccountID(mirrorID), cred.Provider, req.Address, req.Label); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Mirror Account Failed", err.Error())
 		return
 	}
-	mirrorCreated = true
 	var accID string
 	err = tx.QueryRowContext(r.Context(), `
 		INSERT INTO email_accounts
@@ -229,6 +273,10 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 		uid, string(mirrorID), req.Provider, req.Address, req.Label, req.Username,
 		req.Host, req.Port, req.SMTPHost, req.SMTPPort, ciphertext, backfill).Scan(&accID)
 	if err != nil {
+		if isUniqueViolation(err) {
+			writeProblem(w, http.StatusConflict, "Already Connected", "that address is already connected")
+			return
+		}
 		writeProblem(w, http.StatusInternalServerError, "Insert Failed", err.Error())
 		return
 	}
@@ -236,7 +284,6 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Commit Failed", err.Error())
 		return
 	}
-	committed = true
 
 	// Initial sync in the background: the API answers immediately, the UI
 	// polls account status while envelopes land. The launch is owned by
@@ -459,8 +506,7 @@ func (a *App) updateBackfill(w http.ResponseWriter, r *http.Request, id string) 
 	}
 
 	a.kickReconcileJob(mirror)
-	w.WriteHeader(http.StatusAccepted)
-	writeJSON(w, map[string]any{
+	writeJSONStatus(w, http.StatusAccepted, map[string]any{
 		"backfill_days": *req.Days,
 		"reconcile": (&reconcileJob{
 			PolicyVersion:   version,
@@ -534,8 +580,7 @@ func (a *App) updateRetention(w http.ResponseWriter, r *http.Request, id string)
 	}
 
 	a.kickReconcileJob(mirror)
-	w.WriteHeader(http.StatusAccepted)
-	writeJSON(w, map[string]any{
+	writeJSONStatus(w, http.StatusAccepted, map[string]any{
 		"retention_days": *req.Days,
 		"reconcile": (&reconcileJob{
 			PolicyVersion:   version,
@@ -689,6 +734,7 @@ func (a *App) deleteAccount(w http.ResponseWriter, r *http.Request, id string) {
 		{`DELETE FROM push_deliveries WHERE user_id = $1 AND account_id = $2`, []any{uid, mirror}},
 		{`DELETE FROM mirror_scan_seen WHERE scan_id IN (SELECT id FROM mirror_scans WHERE account_id = $1)`, []any{mirror}},
 		{`DELETE FROM mirror_scans WHERE account_id = $1`, []any{mirror}},
+		{`DELETE FROM mail_scan_done WHERE account_id = $1`, []any{mirror}},
 		{`DELETE FROM mail_message_mailboxes WHERE account_id = $1`, []any{mirror}},
 		{`DELETE FROM mail_bodies WHERE account_id = $1`, []any{mirror}},
 		{`DELETE FROM mail_messages WHERE account_id = $1`, []any{mirror}},
