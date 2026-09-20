@@ -118,6 +118,8 @@ func TestUndoSendOnlyCancelsPendingDelivery(t *testing.T) {
 	}
 }
 
+func ptr(s string) *string { return &s }
+
 func TestDecodeAttachments(t *testing.T) {
 	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 
@@ -125,8 +127,8 @@ func TestDecodeAttachments(t *testing.T) {
 		t.Fatalf("empty set = %v, %q; want nil, ok", atts, problem)
 	}
 	atts, problem := decodeAttachments([]sendAttachmentRequest{
-		{Filename: "a.txt", ContentType: "text/plain", DataB64: b64("hello")},
-		{Filename: "b.bin", DataB64: b64("xyz")},
+		{Filename: "a.txt", ContentType: "text/plain", DataB64: ptr(b64("hello"))},
+		{Filename: "b.bin", DataB64: ptr(b64("xyz"))},
 	}, 25<<20)
 	if problem != "" || len(atts) != 2 || string(atts[0].Data) != "hello" || atts[1].ContentType != "" {
 		t.Fatalf("valid set = %+v, %q", atts, problem)
@@ -137,7 +139,7 @@ func TestDecodeAttachments(t *testing.T) {
 		reqs []sendAttachmentRequest
 		want string
 	}{
-		{"bad base64", []sendAttachmentRequest{{Filename: "a", DataB64: "!!!"}}, "not valid base64"},
+		{"bad base64", []sendAttachmentRequest{{Filename: "a", DataB64: ptr("!!!")}}, "not valid base64"},
 		{"missing data", []sendAttachmentRequest{{Filename: "a"}}, "no data"},
 	} {
 		if _, problem := decodeAttachments(tc.reqs, 25<<20); problem == "" || !strings.Contains(problem, tc.want) {
@@ -146,7 +148,7 @@ func TestDecodeAttachments(t *testing.T) {
 	}
 
 	big := base64.StdEncoding.EncodeToString(make([]byte, 15<<20+1))
-	if _, problem := decodeAttachments([]sendAttachmentRequest{{Filename: "big", DataB64: big}}, 25<<20); !strings.Contains(problem, "15 MiB") {
+	if _, problem := decodeAttachments([]sendAttachmentRequest{{Filename: "big", DataB64: ptr(big)}}, 25<<20); !strings.Contains(problem, "15 MiB") {
 		t.Errorf("oversized file: problem = %q", problem)
 	}
 }
@@ -178,7 +180,7 @@ func TestHandleSendEnvelopeCoversAdvertisedAttachmentTotals(t *testing.T) {
 		}
 	}
 	file := func(size int) sendAttachmentRequest {
-		return sendAttachmentRequest{Filename: "f.bin", DataB64: base64.StdEncoding.EncodeToString(make([]byte, size))}
+		return sendAttachmentRequest{Filename: "f.bin", DataB64: ptr(base64.StdEncoding.EncodeToString(make([]byte, size)))}
 	}
 	post := func(atts ...sendAttachmentRequest) *httptest.ResponseRecorder {
 		body, _ := json.Marshal(map[string]any{"to": "dest@example.com", "subject": "files", "text": "hi", "attachments": atts})
@@ -226,7 +228,7 @@ func TestHandleSendRejectsGraphOversizeAttachmentsPreQueue(t *testing.T) {
 	big := base64.StdEncoding.EncodeToString(make([]byte, 3<<20+1))
 	body, _ := json.Marshal(map[string]any{
 		"to": "dest@example.com", "subject": "big", "text": "hi",
-		"attachments": []sendAttachmentRequest{{Filename: "f.bin", DataB64: big}},
+		"attachments": []sendAttachmentRequest{{Filename: "f.bin", DataB64: ptr(big)}},
 	})
 	r := httptest.NewRequest(http.MethodPost, "/api/send", bytes.NewReader(body))
 	r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, "owner-1"))
@@ -400,5 +402,92 @@ func TestOutgoingWeightCountsRetainedHeaderFields(t *testing.T) {
 	}
 	if outgoingWeight(plain) <= sendOverhead+int64(len("body")) {
 		t.Fatalf("recipient addresses do not count: plain = %d", outgoingWeight(plain))
+	}
+}
+
+// A present-but-empty data_base64 is a valid zero-byte attachment; only an
+// OMITTED field is missing data (audit 5 SEND-03).
+func TestDecodeAttachmentsAcceptsZeroByteAttachment(t *testing.T) {
+	empty := ""
+	atts, problem := decodeAttachments([]sendAttachmentRequest{
+		{Filename: "empty.txt", ContentType: "text/plain", DataB64: &empty},
+	}, 25<<20)
+	if problem != "" || len(atts) != 1 || len(atts[0].Data) != 0 || atts[0].Filename != "empty.txt" {
+		t.Fatalf("zero-byte attachment = %+v, problem = %q; want one empty attachment", atts, problem)
+	}
+	if _, problem := decodeAttachments([]sendAttachmentRequest{{Filename: "none"}}, 25<<20); problem == "" || !strings.Contains(problem, "no data") {
+		t.Fatalf("omitted data_base64: problem = %q, want the missing-data rejection", problem)
+	}
+}
+
+// A retried send acceptance under the same Idempotency-Key re-receives the
+// SAME queued id without a second submission; a different body under the
+// key is a 409 (audit 5 SEND-02). The step DB proves the retry never
+// reaches the database: only one acceptance's queries are staged.
+func TestHandleSendIdempotentAcceptance(t *testing.T) {
+	cfg := &Config{SecretKey: "0123456789abcdef0123456789abcdef"}
+	sendSteps := func() *App {
+		return &App{
+			cfg:   cfg,
+			log:   discardLogger(),
+			sendq: newSendQueue(),
+			db: openStepDB(t,
+				dbStep{kind: "query", rows: &testRows{
+					columns: []string{"mirror_account_id", "provider"},
+					values:  [][]driver.Value{{"mirror-1", "imap"}},
+				}},
+				dbStep{kind: "query", rows: &testRows{
+					columns: []string{"provider", "address"},
+					values:  [][]driver.Value{{"imap", "owner@example.com"}},
+				}},
+				dbStep{kind: "query", rows: &testRows{
+					columns: []string{"address", "display_name"},
+					values:  [][]driver.Value{{"owner@example.com", "Owner"}},
+				}},
+			),
+		}
+	}
+	post := func(a *App, key, text string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]any{"to": "dest@example.com", "subject": "again", "text": text})
+		r := httptest.NewRequest(http.MethodPost, "/api/send", bytes.NewReader(body))
+		r.Header.Set("Idempotency-Key", key)
+		r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, "owner-1"))
+		w := httptest.NewRecorder()
+		a.handleSend(w, r)
+		return w
+	}
+
+	a := sendSteps()
+	first := post(a, "key-1", "hello")
+	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"queued"`) {
+		t.Fatalf("first acceptance: status = %d body = %s", first.Code, first.Body.String())
+	}
+	var queued struct {
+		Queued string `json:"queued"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &queued); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same key, same body, immediately: the recorded answer — same queued
+	// id — with NO new database work (the step DB has none staged).
+	retry := post(a, "key-1", "hello")
+	if retry.Code != http.StatusOK {
+		t.Fatalf("retry acceptance: status = %d body = %s", retry.Code, retry.Body.String())
+	}
+	var retried struct {
+		Queued string `json:"queued"`
+	}
+	if err := json.Unmarshal(retry.Body.Bytes(), &retried); err != nil {
+		t.Fatal(err)
+	}
+	if retried.Queued != queued.Queued {
+		t.Fatalf("retry queued id = %q, want the original %q", retried.Queued, queued.Queued)
+	}
+
+	// Same key, DIFFERENT body: a conflict, never a second submission.
+	conflict := post(a, "key-1", "different")
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("key reuse with different body: status = %d body = %s", conflict.Code, conflict.Body.String())
 	}
 }
