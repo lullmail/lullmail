@@ -686,6 +686,14 @@ func (a *App) handleBootstrapPassword(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handlePasskeyRegisterBegin(w http.ResponseWriter, r *http.Request) {
+	// Enrolling a passkey installs a durable replacement credential: it
+	// demands proof of an EXISTING credential, not just a session. User
+	// verification on the new authenticator proves control of the NEW
+	// authenticator — useless as an account-ownership proof when the
+	// attacker is the one holding the session (audit 5 AUTH-01).
+	if !a.requireRecentReauth(w, r) {
+		return
+	}
 	uid, _ := a.userID(r.Context())
 	a.beginRegistration(w, r, uid, "register")
 }
@@ -720,6 +728,12 @@ func (a *App) beginRegistration(w http.ResponseWriter, r *http.Request, uid, kin
 }
 
 func (a *App) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Request) {
+	// Same gate as begin: the ceremony between them can outlive the
+	// freshness window, so the credential WRITE re-checks it (audit 5
+	// AUTH-01).
+	if !a.requireRecentReauth(w, r) {
+		return
+	}
 	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeProblem(w, 500, "Passkey Failed", err.Error())
@@ -1376,15 +1390,17 @@ func (a *App) handleTOTPLogin(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 401, "Sign In Failed", "invalid authenticator code")
 		return
 	}
-	// The shared per-user budget comes before any verification work: once
-	// the fixed window is spent, guesses from every peer share one answer
-	// (audit AUTH-06 pass 7). The per-peer limiter above stays.
-	exhausted, retryAfter, budgetErr := a.totpBudgetExhausted(r.Context(), uid)
+	// The shared per-user budget is RESERVED before any verification work:
+	// the atomic upsert both checks and charges, so concurrent guessers
+	// cannot all pass, and every admitted attempt counts (audit 5 AUTH-02;
+	// the per-peer limiter above stays as a separate defense).
+	admitted, retryAfter, budgetErr := a.reserveTOTPAttempt(r.Context(), uid)
 	if budgetErr != nil {
-		writeProblem(w, 500, "Sign In Failed", budgetErr.Error())
+		writeProblem(w, http.StatusServiceUnavailable, "Sign In Unavailable",
+			"could not check the authenticator budget — try again")
 		return
 	}
-	if exhausted {
+	if !admitted {
 		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
 		writeProblem(w, 429, "Too Many Attempts",
 			"too many invalid authenticator codes — retry after the current window")
@@ -1417,10 +1433,9 @@ func (a *App) handleTOTPLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	step := totpMatchedStep(secret, req.Code, time.Now())
 	if step < 0 {
-		// A wrong guess lands in the shared budget even though the peer
-		// limiter already counted it: distributed guessing across peers is
-		// exactly what the per-peer allowance cannot see (audit AUTH-06).
-		a.recordTOTPFailure(r.Context(), uid)
+		// The attempt was already charged at admission — a wrong guess and
+		// a correct one cost the same slot, which is exactly the property
+		// that makes the reservation race-free (audit 5 AUTH-02).
 		writeProblem(w, 401, "Sign In Failed", "invalid authenticator code")
 		return
 	}
@@ -1592,6 +1607,12 @@ func writeAuthBusy(w http.ResponseWriter) {
 
 func (a *App) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 	uid, _ := a.userID(r.Context())
+	// Removing a passkey removes an account credential; it receives the
+	// same fresh-proof protection as every other credential change
+	// (audit 5 AUTH-01).
+	if !a.requireRecentReauth(w, r) {
+		return
+	}
 	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeProblem(w, 500, "Delete Failed", err.Error())
@@ -2089,6 +2110,12 @@ func (a *App) handleFullAccountDelete(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Delete Failed", err.Error())
 		return
 	}
+	// Collect the mirror ids and CLOSE the result set before executing
+	// deletions on the same transaction: a database/sql transaction holds
+	// one connection, and Exec-ing while its Rows are still open is the
+	// busy-connection failure that made owner deletion fail on every
+	// account that actually had mailboxes connected (audit 5 DATA-01).
+	mirrors := []string{}
 	rows, err := tx.QueryContext(r.Context(), `SELECT mirror_account_id FROM email_accounts WHERE user_id=$1`, uid)
 	if err != nil {
 		writeProblem(w, 500, "Delete Failed", err.Error())
@@ -2104,26 +2131,29 @@ func (a *App) handleFullAccountDelete(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, 500, "Delete Failed", err.Error())
 			return
 		}
-		// The owner seal drained exactly these mirrors before the
-		// transaction began; creation cannot add one while it runs.
+		mirrors = append(mirrors, id)
+	}
+	scanErr := rows.Err()
+	closeErr := rows.Close()
+	if err := errors.Join(scanErr, closeErr); err != nil {
+		writeProblem(w, 500, "Delete Failed", err.Error())
+		return
+	}
+	// The owner seal drained exactly these mirrors before the
+	// transaction began; creation cannot add one while it runs.
+	for _, id := range mirrors {
 		for _, q := range []string{
 			`DELETE FROM mail_message_mailboxes WHERE account_id=$1`, `DELETE FROM mail_bodies WHERE account_id=$1`,
 			`DELETE FROM mail_messages WHERE account_id=$1`, `DELETE FROM mail_mailboxes WHERE account_id=$1`,
 			`DELETE FROM mail_sync_state WHERE account_id=$1`, `DELETE FROM mail_accounts WHERE id=$1`,
+			`DELETE FROM mail_scan_done WHERE account_id=$1`,
 		} {
 			if _, err = tx.ExecContext(r.Context(), q, id); err != nil {
-				rows.Close()
 				writeProblem(w, 500, "Delete Failed", err.Error())
 				return
 			}
 		}
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		writeProblem(w, 500, "Delete Failed", err.Error())
-		return
-	}
-	rows.Close()
 	if _, err = tx.ExecContext(r.Context(), `DELETE FROM users WHERE id=$1`, uid); err != nil {
 		writeProblem(w, 500, "Delete Failed", err.Error())
 		return

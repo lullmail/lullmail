@@ -7,8 +7,13 @@ package main
 // credentials. Now the credential-enrolling mutations demand proof that is
 // at most ten minutes old: a fresh sign-in (the same rule full account
 // deletion already applies) or a password confirmation that stamps
-// reauthenticated_at on the current session. Passkey ceremonies verify the
-// user intrinsically (UserVerification required) and stay outside the gate.
+// reauthenticated_at on the current session. Passkey ADD/REMOVE also sits
+// behind the gate (audit 5 AUTH-01): user verification on a newly
+// registered authenticator proves control of that NEW authenticator, not
+// of an existing account credential — an old stolen session must not be
+// able to enroll its own passkey. The bootstrap ceremony stays outside:
+// it is authorized by the setup token and retires with the first
+// credential.
 
 import (
 	"context"
@@ -59,7 +64,11 @@ func (a *App) handleReauthenticate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var encoded string
-	err := a.db.QueryRowContext(r.Context(), `SELECT hash FROM auth_passwords WHERE user_id=$1`, uid).Scan(&encoded)
+	var proofEpoch int64
+	err := a.db.QueryRowContext(r.Context(), `
+		SELECT p.hash, u.auth_epoch FROM auth_passwords p
+		JOIN users u ON u.id = p.user_id WHERE p.user_id=$1`, uid).
+		Scan(&encoded, &proofEpoch)
 	if errors.Is(err, sql.ErrNoRows) {
 		burnPasswordVerify(req.Password)
 		writeProblem(w, http.StatusConflict, "No Password Set",
@@ -87,13 +96,35 @@ func (a *App) handleReauthenticate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.clearPasswordFailures(lockKey)
-	// Stamp the confirming session only, epoch-matched so a session that a
-	// concurrent credential change retired cannot buy freshness.
-	result, err := a.db.ExecContext(r.Context(), `
+	// Stamp the confirming session only after re-checking the credential
+	// under the user-row lock: the hash and epoch were captured BEFORE the
+	// (slow) KDF, and a concurrent password rotation that carried this
+	// session into the new epoch could otherwise let an OLD password's
+	// proof buy freshness in the new one (audit 5 AUTH-03).
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeProblem(w, 500, "Confirmation Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+	var currentEpoch int64
+	var currentHash string
+	if err := tx.QueryRowContext(r.Context(), `
+		SELECT u.auth_epoch, p.hash FROM users u
+		JOIN auth_passwords p ON p.user_id = u.id
+		WHERE u.id = $1 FOR UPDATE OF u`, uid).Scan(&currentEpoch, &currentHash); err != nil {
+		writeProblem(w, 500, "Confirmation Failed", err.Error())
+		return
+	}
+	if currentEpoch != proofEpoch || currentHash != encoded {
+		writeProblem(w, http.StatusConflict, "Credentials Changed",
+			"the password changed during confirmation — confirm again with the current password")
+		return
+	}
+	result, err := tx.ExecContext(r.Context(), `
 		UPDATE auth_sessions SET reauthenticated_at = now()
-		WHERE id_hash=$1 AND user_id=$2
-		  AND auth_epoch = (SELECT auth_epoch FROM users WHERE users.id = auth_sessions.user_id)
-		  AND expires_at > now()`, session, uid)
+		WHERE id_hash=$1 AND user_id=$2 AND auth_epoch=$3 AND expires_at > now()`,
+		session, uid, proofEpoch)
 	if err != nil {
 		writeProblem(w, 500, "Confirmation Failed", err.Error())
 		return
@@ -101,6 +132,10 @@ func (a *App) handleReauthenticate(w http.ResponseWriter, r *http.Request) {
 	if n, _ := result.RowsAffected(); n != 1 {
 		writeProblem(w, http.StatusConflict, "Session Ended",
 			"this session is no longer active — sign in again")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeProblem(w, 500, "Confirmation Failed", err.Error())
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
@@ -141,41 +176,39 @@ func totpWindowStart(now time.Time) time.Time {
 	return now.UTC().Truncate(totpBudgetWindow)
 }
 
-// totpBudgetExhausted reports whether the user's shared TOTP budget for the
-// current fixed window is spent, and how long until the window rolls over.
-func (a *App) totpBudgetExhausted(ctx context.Context, uid string) (bool, time.Duration, error) {
-	window := totpWindowStart(time.Now())
-	var attempts int
-	err := a.db.QueryRowContext(ctx,
-		`SELECT attempts FROM auth_factor_windows WHERE user_id=$1 AND factor='totp' AND window_start=$2`,
-		uid, window).Scan(&attempts)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, 0, nil
-	}
-	if err != nil {
-		return false, 0, err
-	}
-	if attempts < maxTOTPWindowAttempts {
-		return false, 0, nil
-	}
+// retryAfterWindow reports how long until the current fixed window rolls
+// over, floored at zero.
+func retryAfterWindow(window time.Time) time.Duration {
 	remaining := time.Until(window.Add(totpBudgetWindow))
 	if remaining < 0 {
 		remaining = 0
 	}
-	return true, remaining, nil
+	return remaining
 }
 
-// recordTOTPFailure counts one wrong standalone-TOTP guess into the user's
-// shared fixed window. The upsert is the whole concurrency story: racing
-// guessers each add exactly one, and the count is the truth.
-func (a *App) recordTOTPFailure(ctx context.Context, uid string) {
+// reserveTOTPAttempt atomically charges one attempt against the user's
+// shared fixed window BEFORE any verification work runs (audit 5
+// AUTH-02): the conditional upsert is the whole admission decision — the
+// insert either wins the slot (first attempt) or the update fires only
+// while the stored count is still below the cap, so concurrent guessers
+// can never all observe an available budget and proceed. Every admitted
+// attempt is counted, successful or not; a database failure fails closed
+// (503, no verification) rather than admitting an uncounted guess.
+func (a *App) reserveTOTPAttempt(ctx context.Context, uid string) (bool, time.Duration, error) {
 	window := totpWindowStart(time.Now())
-	if _, err := a.db.ExecContext(ctx, `
+	var attempts int
+	err := a.db.QueryRowContext(ctx, `
 		INSERT INTO auth_factor_windows (user_id, factor, window_start, attempts)
 		VALUES ($1, 'totp', $2, 1)
-		ON CONFLICT (user_id, factor, window_start)
-		DO UPDATE SET attempts = auth_factor_windows.attempts + 1`,
-		uid, window); err != nil {
-		a.log.Error("totp budget record failed", "err", err)
+		ON CONFLICT (user_id, factor, window_start) DO UPDATE
+		  SET attempts = auth_factor_windows.attempts + 1
+		  WHERE auth_factor_windows.attempts < $3
+		RETURNING attempts`, uid, window, maxTOTPWindowAttempts).Scan(&attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, retryAfterWindow(window), nil
 	}
+	if err != nil {
+		return false, 0, err
+	}
+	return true, 0, nil
 }
