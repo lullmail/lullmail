@@ -62,7 +62,10 @@ func (j *reconcileJob) asJSON() map[string]any {
 // upsertReconcileJobTx records (or replaces) the durable job inside the
 // policy-change transaction (audit DATA-08). Replacing keeps exactly one
 // job per account: a newer setting wins and the worker for the older
-// request notices via the version guard at finalize time.
+// request notices via the version guard at finalize time. An unfinished
+// full-enumeration requirement SURVIVES replacement (audit 5 SYNC-07):
+// a restoration request followed by a non-expanding change must not lose
+// the restoration work the first request still owes.
 func upsertReconcileJobTx(ctx context.Context, tx *sql.Tx, mirror string, version int64, fullEnumeration bool) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO account_reconcile_jobs (account_id, policy_version, state, full_enumeration, requested_at)
@@ -70,7 +73,9 @@ func upsertReconcileJobTx(ctx context.Context, tx *sql.Tx, mirror string, versio
 		ON CONFLICT (account_id) DO UPDATE SET
 		  policy_version = excluded.policy_version,
 		  state = 'pending',
-		  full_enumeration = excluded.full_enumeration,
+		  full_enumeration = excluded.full_enumeration
+		    OR (account_reconcile_jobs.state <> 'complete'
+		        AND account_reconcile_jobs.full_enumeration),
 		  last_error = NULL,
 		  requested_at = now()`,
 		mirror, version, fullEnumeration)
@@ -97,8 +102,13 @@ func (a *App) kickReconcileJob(mirror string) {
 
 // processReconcileJobs serves every pending or failed job of one owner
 // on the background cadence. Serial on purpose: each job may drive a
-// provider enumeration.
+// provider enumeration. Stale running claims requeue first (audit 5
+// SYNC-06) — a worker that died or could not finalize no longer waits
+// for a server restart to be retried.
 func (a *App) processReconcileJobs(ctx context.Context, uid string) error {
+	if err := a.requeueStaleReconcileJobs(ctx); err != nil {
+		return err
+	}
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT j.account_id FROM account_reconcile_jobs j
 		JOIN email_accounts ea ON ea.mirror_account_id = j.account_id AND ea.user_id = $1
@@ -135,12 +145,31 @@ func (a *App) processReconcileJobs(ctx context.Context, uid string) error {
 	return errors.Join(errs...)
 }
 
+// staleReconcileClaimBound is how long a 'running' claim is trusted
+// without progress (audit 5 SYNC-06): the claim timestamp lets the
+// periodic pass requeue a job whose worker died or could not finalize —
+// boot-time reset alone never recovered a job wedged inside a
+// still-serving process. Generous by design: a full enumeration of a
+// large account legitimately runs long, and requeueing a LIVE job only
+// duplicates work (the version-guarded finalize keeps it safe).
+const staleReconcileClaimBound = 30 * time.Minute
+
+// requeueStaleReconcileJobs returns 'running' rows with expired claims to
+// pending. Called from the periodic pass, not only at boot.
+func (a *App) requeueStaleReconcileJobs(ctx context.Context) error {
+	_, err := a.db.ExecContext(ctx,
+		`UPDATE account_reconcile_jobs SET state = 'pending', claimed_at = NULL
+		  WHERE state = 'running' AND claimed_at < now() - make_interval(secs => $1)`,
+		int(staleReconcileClaimBound.Seconds()))
+	return err
+}
+
 // resetStaleReconcileJobs returns 'running' rows to pending at boot: a
 // previous process died holding the claim, and the work is resumable by
 // construction (staged scans keep their progress).
 func (a *App) resetStaleReconcileJobs(ctx context.Context) error {
 	_, err := a.db.ExecContext(ctx,
-		`UPDATE account_reconcile_jobs SET state = 'pending' WHERE state = 'running'`)
+		`UPDATE account_reconcile_jobs SET state = 'pending', claimed_at = NULL WHERE state = 'running'`)
 	return err
 }
 
@@ -148,7 +177,7 @@ func (a *App) resetStaleReconcileJobs(ctx context.Context) error {
 // captured policy version and mode.
 func (a *App) claimReconcileJob(ctx context.Context, mirror string) (*reconcileJob, error) {
 	row := a.db.QueryRowContext(ctx, `
-		UPDATE account_reconcile_jobs SET state = 'running'
+		UPDATE account_reconcile_jobs SET state = 'running', claimed_at = now()
 		WHERE account_id = $1 AND state IN ('pending','failed')
 		RETURNING account_id, policy_version, full_enumeration, COALESCE(last_error, '')`,
 		mirror)
@@ -165,7 +194,10 @@ func (a *App) claimReconcileJob(ctx context.Context, mirror string) (*reconcileJ
 // finalizeReconcileJob records the outcome. Every write is guarded by the
 // job's captured policy_version: if a newer setting replaced the row
 // while this worker ran, the guard makes this finalize a no-op and the
-// newer job stays pending for its own run.
+// newer job stays pending for its own run. The applied-version advance
+// is guarded in the SQL itself (`AND policy_version = $2`), not only by
+// a preceding read — an unguarded UPDATE let an older completion race a
+// newer policy's row between its check and its write (audit 5 SYNC-07).
 func (a *App) finalizeReconcileJob(ctx context.Context, job *reconcileJob, jobErr error) error {
 	if jobErr != nil {
 		state := "failed"
@@ -175,7 +207,7 @@ func (a *App) finalizeReconcileJob(ctx context.Context, job *reconcileJob, jobEr
 			state = "pending"
 		}
 		if _, err := a.db.ExecContext(ctx, `
-			UPDATE account_reconcile_jobs SET state = $2, last_error = $3
+			UPDATE account_reconcile_jobs SET state = $2, last_error = $3, claimed_at = NULL
 			WHERE account_id = $1 AND policy_version = $4`,
 			job.AccountID, state, jobErr.Error(), job.PolicyVersion); err != nil {
 			return err
@@ -190,7 +222,7 @@ func (a *App) finalizeReconcileJob(ctx context.Context, job *reconcileJob, jobEr
 	defer tx.Rollback()
 	var current int64
 	if err := tx.QueryRowContext(ctx,
-		`SELECT policy_version FROM email_accounts WHERE mirror_account_id = $1`,
+		`SELECT policy_version FROM email_accounts WHERE mirror_account_id = $1 FOR UPDATE`,
 		job.AccountID).Scan(&current); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// The account was disconnected mid-job; the job row is gone
@@ -204,13 +236,21 @@ func (a *App) finalizeReconcileJob(ctx context.Context, job *reconcileJob, jobEr
 		// not mark anything applied (the DATA-08 version race).
 		return nil
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE email_accounts SET applied_policy_version = $2 WHERE mirror_account_id = $1`,
-		job.AccountID, job.PolicyVersion); err != nil {
+	res, err := tx.ExecContext(ctx,
+		`UPDATE email_accounts SET applied_policy_version = $2
+		  WHERE mirror_account_id = $1 AND policy_version = $2`,
+		job.AccountID, job.PolicyVersion)
+	if err != nil {
 		return err
 	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		// Superseded between the locked read and this write — impossible
+		// under the row lock, but the guard is what makes it impossible,
+		// so the check stays (audit 5 SYNC-07).
+		return nil
+	}
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE account_reconcile_jobs SET state = 'complete', last_error = NULL
+		UPDATE account_reconcile_jobs SET state = 'complete', last_error = NULL, claimed_at = NULL
 		WHERE account_id = $1 AND policy_version = $2`,
 		job.AccountID, job.PolicyVersion); err != nil {
 		return err
@@ -219,6 +259,10 @@ func (a *App) finalizeReconcileJob(ctx context.Context, job *reconcileJob, jobEr
 }
 
 // runReconcileJob consumes one durable reconciliation job end to end.
+// Finalization runs on a short DETACHED context (audit 5 SYNC-06): the
+// job's own context is done exactly when finalization must succeed — a
+// timeout or shutdown cancel used to leave the row 'running', which the
+// processor never selects, until the server restarted.
 func (a *App) runReconcileJob(ctx context.Context, mirror string) error {
 	job, err := a.claimReconcileJob(ctx, mirror)
 	if err != nil {
@@ -228,30 +272,65 @@ func (a *App) runReconcileJob(ctx context.Context, mirror string) error {
 		return nil
 	}
 	jobErr := a.executeReconcileJob(ctx, job)
-	if ferr := a.finalizeReconcileJob(ctx, job, jobErr); ferr != nil {
-		return errors.Join(jobErr, ferr)
-	}
-	return jobErr
+	finalCtx, cancelFinal := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	ferr := a.finalizeReconcileJob(finalCtx, job, jobErr)
+	cancelFinal()
+	return errors.Join(jobErr, ferr)
 }
 
 func (a *App) executeReconcileJob(ctx context.Context, job *reconcileJob) error {
 	acct := mail.AccountID(job.AccountID)
 
-	var uid string
-	var retentionDays, backfillDays int
+	// Superseded before this worker even started (a newer policy rewrote
+	// the row pending for itself): applying a superseded job's destructive
+	// settings — pruning under a stale narrower retention — is exactly the
+	// race audit 5 SYNC-07 closes. Nothing to undo; the newer job runs.
+	var uid0 string
 	if err := a.db.QueryRowContext(ctx,
-		`SELECT user_id, retention_days, backfill_days FROM email_accounts WHERE mirror_account_id = $1`,
-		job.AccountID).Scan(&uid, &retentionDays, &backfillDays); err != nil {
+		`SELECT user_id FROM email_accounts WHERE mirror_account_id = $1 AND policy_version = $2`,
+		job.AccountID, job.PolicyVersion).Scan(&uid0); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
 		return err
 	}
+	uid := uid0
 
 	if job.FullEnumeration {
-		if err := a.reconcileByFullEnumeration(ctx, acct); err != nil {
+		if err := a.reconcileByFullEnumeration(ctx, acct, job.PolicyVersion); err != nil {
 			return err
 		}
+	}
+
+	// The policy is re-read under the account row lock immediately before
+	// the destructive steps apply (audit 5 SYNC-07): values captured at
+	// claim time can be minutes stale after a long enumeration, and a
+	// stale NARROW retention would prune mail the newer wider policy just
+	// restored.
+	var retentionDays, backfillDays int
+	var version int64
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := tx.QueryRowContext(ctx,
+		`SELECT policy_version, retention_days, backfill_days FROM email_accounts
+		  WHERE mirror_account_id = $1 FOR UPDATE`,
+		job.AccountID).Scan(&version, &retentionDays, &backfillDays); err != nil {
+		tx.Rollback()
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	if version != job.PolicyVersion {
+		tx.Rollback()
+		// The newer policy's own job is already pending; this worker is
+		// done without applying anything.
+		return nil
+	}
+	if err := tx.Commit(); err != nil {
+		return err
 	}
 
 	// Apply the (possibly restored) data under the current policy and
@@ -274,19 +353,24 @@ func (a *App) executeReconcileJob(ctx context.Context, job *reconcileJob) error 
 // completion (SYNC-05): older messages the incremental feed would never
 // re-report are restored by the enumeration itself, nothing is pruned
 // until every mailbox's scan finished (SYNC-03), and the job only
-// completes when no scans remain.
-func (a *App) reconcileByFullEnumeration(ctx context.Context, acct mail.AccountID) error {
+// completes when no scans remain. The rescan carries the job's policy
+// version as its GENERATION, so a retried job resumes staged progress and
+// skips completed mailboxes instead of re-enumerating from page one
+// (audit 5 SYNC-05).
+func (a *App) reconcileByFullEnumeration(ctx context.Context, acct mail.AccountID, policyVersion int64) error {
 	// The work lease (not a plain use lease) so the enumeration's provider
 	// I/O observes the account gate's cancellation: a deletion aborts the
-	// rescan instead of waiting out every mailbox page (audit OPS-05).
+	// rescan instead of waiting out every mailbox page (audit OPS-05). The
+	// joined context observes BOTH the job's deadline and the gate's
+	// cancellation — substituting the gate context only when it was
+	// already canceled missed every later cancellation (audit 5 LIFE-02).
 	gateCtx, releaseUse, ok := a.beginAccountWork(acct)
 	if !ok {
 		return fmt.Errorf("account %s is being deleted", acct)
 	}
 	defer releaseUse()
-	if ctx.Err() == nil && gateCtx.Err() != nil {
-		ctx = gateCtx
-	}
+	ctx, releaseJoin := joinAccountContext(ctx, gateCtx)
+	defer releaseJoin()
 
 	cred, err := a.Token(ctx, acct)
 	if err != nil {
@@ -299,7 +383,7 @@ func (a *App) reconcileByFullEnumeration(ctx context.Context, acct mail.AccountI
 	}
 	defer release()
 
-	if err := a.eng.RequestRescan(ctx, acct, adapter); err != nil {
+	if err := a.eng.RequestRescanVersion(ctx, acct, adapter, policyVersion); err != nil {
 		return err
 	}
 	if _, err := a.eng.SyncAccount(ctx, acct, adapter); err != nil {

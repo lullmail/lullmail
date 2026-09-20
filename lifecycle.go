@@ -28,19 +28,24 @@ type backgroundTasks struct {
 
 	mu     sync.Mutex
 	closed bool
+	// done closes exactly once, after the last admitted unit finishes.
+	// Every Stop caller waits on the SAME channel: once closing begins, a
+	// later Stop can no longer report a drain an earlier Stop is still
+	// waiting for (audit 5 LIFE-03).
+	done chan struct{}
 }
 
 func newBackgroundTasks(parent context.Context) *backgroundTasks {
 	ctx, cancel := context.WithCancel(parent)
-	return &backgroundTasks{ctx: ctx, cancel: cancel}
+	return &backgroundTasks{ctx: ctx, cancel: cancel, done: make(chan struct{})}
 }
 
-// Go admits one background unit. Admission fails once shutdown began, so a
-// request arriving during the drain cannot hand new work to a group that is
-// already leaving.
+// Go admits one background unit. Admission fails once shutdown began (or
+// the root is already canceled), so a request arriving during the drain
+// cannot hand new work to a group that is already leaving.
 func (t *backgroundTasks) Go(fn func(context.Context)) bool {
 	t.mu.Lock()
-	if t.closed {
+	if t.closed || t.ctx.Err() != nil {
 		t.mu.Unlock()
 		return false
 	}
@@ -54,26 +59,25 @@ func (t *backgroundTasks) Go(fn func(context.Context)) bool {
 }
 
 // Stop cancels the group root and joins every admitted unit, bounded by
-// timeout. It reports whether the join completed; units that outlive the
+// timeout. It reports whether the join completed. Repeated calls all wait
+// on the one shared drain channel, so the answer is honest for every
+// caller, not just the first (audit 5 LIFE-03). Units that outlive the
 // bound keep running against closed pools — the same cliff a process exit
 // always was, now with a drain in front of it.
 func (t *backgroundTasks) Stop(timeout time.Duration) bool {
 	t.mu.Lock()
-	if t.closed {
-		t.mu.Unlock()
-		return true
+	if !t.closed {
+		t.closed = true
+		t.cancel()
+		go func() {
+			t.wg.Wait()
+			close(t.done)
+		}()
 	}
-	t.closed = true
 	t.mu.Unlock()
-	t.cancel()
 
-	done := make(chan struct{})
-	go func() {
-		t.wg.Wait()
-		close(done)
-	}()
 	select {
-	case <-done:
+	case <-t.done:
 		return true
 	case <-time.After(timeout):
 		return false
@@ -113,13 +117,16 @@ func (a *App) bgRoot() context.Context {
 
 // launch runs one named background unit on the group, with panics contained
 // the way HTTP handlers are: a crashed sync must not take the process down.
-func (a *App) launch(name string, fn func(ctx context.Context)) {
+// It reports whether the unit was admitted — a caller whose work was
+// refused by a closing group must not acknowledge that work (audit 5
+// LIFE-03).
+func (a *App) launch(name string, fn func(ctx context.Context)) bool {
 	log := a.log
 	if log == nil {
 		log = slog.Default()
 	}
 	t := a.tasksGroup()
-	t.Go(func(ctx context.Context) {
+	return t.Go(func(ctx context.Context) {
 		defer func() {
 			if p := recover(); p != nil {
 				log.Error("background task panicked", "task", name, "panic", p)

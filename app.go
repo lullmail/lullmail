@@ -41,6 +41,8 @@ type App struct {
 	tasks             *backgroundTasks
 	instIDMu          sync.Mutex
 	instID            string
+	exportMu          sync.Mutex
+	export            *exportSlots
 
 	// dial builds adapters from stored credentials. connectApp leaves it
 	// nil (the production resolver is constructed per invocation); tests
@@ -92,7 +94,10 @@ func (a *App) beginAccountUse(acct mail.AccountID) (func(), bool) {
 // beginAccountWork is beginAccountUse for operations that drive provider
 // I/O: the returned context carries the account's own cancellation, so a
 // deletion (or the shutdown drain) aborts the dial, fetch, or submission
-// instead of waiting it out.
+// instead of waiting it out. The context is captured under the state
+// mutex — an unseal replaces it, and reading it after unlock could hand a
+// caller the canceled context of a deleted-and-resurrected account
+// (audit 5 LIFE-02).
 func (a *App) beginAccountWork(acct mail.AccountID) (context.Context, func(), bool) {
 	state := a.accountState(acct)
 	state.mu.Lock()
@@ -101,8 +106,9 @@ func (a *App) beginAccountWork(acct mail.AccountID) (context.Context, func(), bo
 		return nil, nil, false
 	}
 	state.active++
+	accountCtx := state.ctx
 	state.mu.Unlock()
-	return state.ctx, func() {
+	return accountCtx, func() {
 		state.mu.Lock()
 		state.active--
 		if state.deleting && state.active == 0 && state.drained != nil {
@@ -111,6 +117,24 @@ func (a *App) beginAccountWork(acct mail.AccountID) (context.Context, func(), bo
 		}
 		state.mu.Unlock()
 	}, true
+}
+
+// joinAccountContext derives a context that observes BOTH parents: the
+// caller's request/job deadline and values, and the account gate's
+// cancellation (audit 5 LIFE-02). Substituting the gate context only when
+// it is already canceled — the old pattern — missed every cancellation
+// that arrived later, so a deletion could wait out provider I/O it had
+// every right to interrupt.
+func joinAccountContext(parent, account context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	stop := context.AfterFunc(account, cancel)
+	if account.Err() != nil {
+		cancel()
+	}
+	return ctx, func() {
+		stop()
+		cancel()
+	}
 }
 
 // beginAccountDeletion seals the account, cancels its context so in-flight
@@ -189,12 +213,20 @@ func (s *accountLifecycle) currentDrain() <-chan struct{} {
 	return s.drained
 }
 
-// accountGateKey marks a request that already holds the account gate via
-// accountWorkLifecycle. The gate's per-account admission makes a nested
-// beginAccountUse under it redundant, and taking a second count would
-// double-release; carrying the gate in the context lets the inner
-// acquisition see it and become a no-op.
+// accountGateKey carries the mirror account id whose gate the request
+// already holds via accountWorkLifecycle (audit 5 LIFE-01): the value is
+// the EXACT leased account — a boolean marker claimed a lease that was
+// never acquired whenever the route carried no ?account=, an unresolvable
+// one, or one whose admission deletion had sealed, and nested code then
+// trusted it for ANY account.
 type accountGateKey struct{}
+
+// accountLeaseHeld reports whether ctx already holds the admission gate
+// for exactly this account.
+func accountLeaseHeld(ctx context.Context, id mail.AccountID) bool {
+	held, ok := ctx.Value(accountGateKey{}).(mail.AccountID)
+	return ok && held != "" && held == id
+}
 
 func (a *App) accountWorkLifecycle(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -204,44 +236,61 @@ func (a *App) accountWorkLifecycle(next http.Handler) http.Handler {
 		// account's deletion (audit OPS-05).
 		a.accountOwnerMu.RLock()
 		defer a.accountOwnerMu.RUnlock()
-		release := a.holdRequestAccount(r)
+		release, leased, ok := a.holdRequestAccount(r)
 		defer release()
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), accountGateKey{}, true)))
+		if !ok {
+			// The route names an account that is being deleted right now:
+			// proceeding WITHOUT a gate (the old silent no-op) is exactly
+			// the barrier defeat audit 5 LIFE-01 describes. Fail closed.
+			writeProblem(w, http.StatusConflict, "Account Closing",
+				"this account is being deleted — retry once it finishes")
+			return
+		}
+		ctx := r.Context()
+		if leased != "" {
+			ctx = context.WithValue(ctx, accountGateKey{}, leased)
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
 // holdRequestAccount takes the request's account gate when the route
-// carries an ?account= parameter that resolves to a connected mailbox, so a
-// deletion of that account waits for the stream. Unresolvable parameters
-// take no gate — the handler's own ownership lookup answers those.
-func (a *App) holdRequestAccount(r *http.Request) func() {
+// carries an ?account= parameter that resolves to a connected mailbox, so
+// a deletion of that account waits for the stream. Unresolvable or absent
+// parameters take no gate — the handler's own ownership lookup answers
+// those — and a sealed account fails the request closed instead of
+// pretending the gate is held.
+func (a *App) holdRequestAccount(r *http.Request) (func(), mail.AccountID, bool) {
 	uid, err := a.userID(r.Context())
 	if err != nil {
-		return func() {}
+		return func() {}, "", true
 	}
 	account := r.URL.Query().Get("account")
 	if account == "" {
-		return func() {}
+		return func() {}, "", true
 	}
 	var mirror string
 	err = a.db.QueryRowContext(r.Context(),
 		`SELECT mirror_account_id FROM email_accounts WHERE user_id=$1 AND (id::text=$2 OR mirror_account_id=$2)`,
 		uid, account).Scan(&mirror)
 	if err != nil {
-		return func() {}
+		return func() {}, "", true
 	}
 	release, ok := a.beginAccountUse(mail.AccountID(mirror))
 	if !ok {
-		return func() {}
+		return func() {}, "", false
 	}
-	return release
+	return release, mail.AccountID(mirror), true
 }
 
 // beginAccountUseCtx is beginAccountUse for call chains that may already run
 // inside accountWorkLifecycle. The request-level gate excludes deletion
-// outright, so a nested use needs no second count.
+// outright for the SAME account, so a nested use for that account needs no
+// second count; a nested use for a DIFFERENT account still takes its own
+// gate — the middleware's lease is account-specific, never owner-wide
+// (audit 5 LIFE-01).
 func (a *App) beginAccountUseCtx(ctx context.Context, acct mail.AccountID) (func(), bool) {
-	if ctx.Value(accountGateKey{}) != nil {
+	if accountLeaseHeld(ctx, acct) {
 		return func() {}, true
 	}
 	return a.beginAccountUse(acct)

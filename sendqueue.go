@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"log/slog"
+	"io"
 	"net/http"
 	netmail "net/mail"
 	"regexp"
@@ -28,6 +30,13 @@ type pendingSend struct {
 	cancel context.CancelFunc
 	done   <-chan error
 	state  sendState
+	// Idempotent-acceptance bookkeeping (audit 5 SEND-02): the client's
+	// Idempotency-Key and the request hash it was answered for. The key
+	// indexes the entry for the entry's lifetime — the acknowledged
+	// window a lost response can be retried within.
+	key        string
+	reqHash    string
+	enqueuedAt time.Time
 }
 
 type sendState uint8
@@ -40,6 +49,11 @@ const (
 type sendQueue struct {
 	mu    sync.Mutex
 	sends map[string]*pendingSend
+	// keyed maps Idempotency-Key -> queued send id while that send lives
+	// in the queue (audit 5 SEND-02): a retried acceptance whose first
+	// response was lost re-receives the SAME queued id instead of
+	// submitting a second message. Entries leave with their send.
+	keyed map[string]string
 	// Aggregate admission budget: per-request caps alone do not bound how
 	// many accepted compositions (decoded attachments included) can sit in
 	// the process at once (audit 3 SEND-03).
@@ -126,11 +140,50 @@ func acquireDecodeSlot(ctx context.Context) (func(), bool) {
 	}
 }
 
+// sendBodyReadBudget bounds how long one send request may take to UPLOAD
+// its body (audit 5 OPS-01): the decode slot and its 34 MiB allocation
+// used to be holdable by an arbitrarily slow client, and two of those
+// wedged every other send. The header timeout never sees body bytes.
+const sendBodyReadBudget = 60 * time.Second
+
+// withBodyDeadline gives one body-bearing handler a hard upload deadline:
+// a context bound for handler work AND a transport read deadline, so a
+// client that trickles bytes (or never finishes) is cut at the budget
+// instead of holding admission indefinitely. Test recorders and exotic
+// proxies may not support transport deadlines; there the context bound
+// still applies and the deadline degrades with a warning rather than
+// failing every request (audit 5 OPS-01).
+func withBodyDeadline(limit time.Duration, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), limit)
+		defer cancel()
+		controller := http.NewResponseController(w)
+		if err := controller.SetReadDeadline(time.Now().Add(limit)); err != nil {
+			slog.Default().Warn("request transport cannot enforce upload deadlines", "err", err)
+		} else {
+			defer controller.SetReadDeadline(time.Time{})
+		}
+		next(w, r.WithContext(ctx))
+	}
+}
+
 func newSendQueue() *sendQueue {
-	return &sendQueue{sends: map[string]*pendingSend{}}
+	return &sendQueue{sends: map[string]*pendingSend{}, keyed: map[string]string{}}
 }
 
 func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
+	// Idempotent acceptance (audit 5 SEND-02): the send route is excluded
+	// from the generic api_mutations wrapper (a 34 MiB body cannot ride
+	// the 1 MiB ledger buffer), but a lost acceptance response still needs
+	// the same one-submission contract. The raw body is hashed BEFORE
+	// decoding so the retry comparison is exact; the key is honored for
+	// the acknowledged entry's lifetime.
+	idempotencyKey := r.Header.Get("Idempotency-Key")
+	if len(idempotencyKey) > idempotencyKeyLimit {
+		writeProblem(w, http.StatusRequestEntityTooLarge, "Key Too Long",
+			fmt.Sprintf("Idempotency-Key must be at most %d characters", idempotencyKeyLimit))
+		return
+	}
 	var req struct {
 		AccountID string `json:"account_id"` // email_accounts.id; empty = first
 		To        string `json:"to"`
@@ -157,13 +210,42 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer releaseDecode()
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 34<<20)).Decode(&req); err != nil {
+	rawBody, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 34<<20))
+	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
 			writeProblem(w, http.StatusRequestEntityTooLarge, "Request Too Large",
 				fmt.Sprintf("request exceeds the %d MiB cap; attachments are capped at 25 MiB decoded in total", maxErr.Limit>>20))
 			return
 		}
+		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
+		return
+	}
+	if idempotencyKey != "" {
+		reqHash := mutationRequestHash(r.Method, r.URL.Path, r.URL.RawQuery, rawBody)
+		a.sendq.mu.Lock()
+		existingID, hit := a.sendq.keyed[idempotencyKey]
+		existing := a.sendq.sends[existingID]
+		a.sendq.mu.Unlock()
+		if hit && existing != nil {
+			if existing.reqHash != reqHash {
+				writeProblem(w, http.StatusConflict, "Key Reused",
+					"this Idempotency-Key was already used for a different send")
+				return
+			}
+			remaining := int(undoWindow.Seconds() - time.Since(existing.enqueuedAt).Seconds())
+			if remaining < 0 {
+				remaining = 0
+			}
+			writeJSON(w, map[string]any{"queued": existingID, "undo_seconds": remaining})
+			return
+		}
+		// No live entry under this key: the previous send under it already
+		// completed (or the process restarted). A retry past the entry's
+		// lifetime is a genuinely new submission — the durable-outbox
+		// deferral (SEND-01/lullmail-10) owns the beyond-restart contract.
+	}
+	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
@@ -300,7 +382,7 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(req.Subject) != "" {
 			outgoing.Subject = req.Subject
 		}
-		a.enqueue(w, deliver, outgoing)
+		a.enqueue(w, deliver, outgoing, idempotencyKey, sendRequestHash(r, rawBody))
 		return
 	}
 
@@ -319,13 +401,25 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		HTML:        req.HTML,
 		Attachments: attachments,
 	}
-	a.enqueue(w, deliver, outgoing)
+	a.enqueue(w, deliver, outgoing, idempotencyKey, sendRequestHash(r, rawBody))
+}
+
+// sendRequestHash binds one send acceptance to its exact wire body. The
+// hash is only meaningful together with a client Idempotency-Key.
+func sendRequestHash(r *http.Request, rawBody []byte) string {
+	if r.Header.Get("Idempotency-Key") == "" {
+		return ""
+	}
+	return mutationRequestHash(r.Method, r.URL.Path, r.URL.RawQuery, rawBody)
 }
 
 type sendAttachmentRequest struct {
-	Filename    string `json:"filename"`
-	ContentType string `json:"content_type"`
-	DataB64     string `json:"data_base64"`
+	Filename    string  `json:"filename"`
+	ContentType string  `json:"content_type"`
+	// DataB64 is a POINTER so a present-but-empty string — the valid
+	// base64 of a zero-byte file — is distinguishable from an omitted
+	// field (audit 5 SEND-03).
+	DataB64 *string `json:"data_base64"`
 }
 
 // validateTransportAttachments runs the chosen transport's attachment
@@ -343,8 +437,10 @@ func validateTransportAttachments(provider string, attachments []mail.Attachment
 
 // decodeAttachments turns JSON-carried base64 attachments into engine
 // attachments with hard caps: one file at most 15 MiB decoded, the set at
-// most totalMiB. The engine sanitizes header values; these caps exist so a
-// fat request cannot balloon server memory before composition.
+// most totalMiB. A PRESENT empty data_base64 is a valid zero-byte
+// attachment and is kept; an OMITTED one is rejected (audit 5 SEND-03).
+// The engine sanitizes header values; these caps exist so a fat request
+// cannot balloon server memory before composition.
 func decodeAttachments(reqs []sendAttachmentRequest, totalBytes int) ([]mail.Attachment, string) {
 	if len(reqs) == 0 {
 		return nil, ""
@@ -355,10 +451,13 @@ func decodeAttachments(reqs []sendAttachmentRequest, totalBytes int) ([]mail.Att
 	out := make([]mail.Attachment, 0, len(reqs))
 	var total int
 	for i, ra := range reqs {
-		if ra.DataB64 == "" {
+		if ra.DataB64 == nil {
 			return nil, fmt.Sprintf("attachment %d has no data", i+1)
 		}
-		data, err := base64.StdEncoding.DecodeString(ra.DataB64)
+		if len(*ra.DataB64) > base64.StdEncoding.EncodedLen(15<<20) {
+			return nil, fmt.Sprintf("attachment %d exceeds 15 MiB (encoded size limit)", i+1)
+		}
+		data, err := base64.StdEncoding.DecodeString(*ra.DataB64)
 		if err != nil {
 			return nil, fmt.Sprintf("attachment %d is not valid base64", i+1)
 		}
@@ -496,7 +595,7 @@ func (a *App) guardDelivery(account mail.AccountID, next deliverFunc) deliverFun
 			return fmt.Errorf("account %s is being deleted", account)
 		}
 		defer release()
-		ctx = context.WithValue(ctx, accountGateKey{}, true)
+		ctx = context.WithValue(ctx, accountGateKey{}, account)
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -555,7 +654,7 @@ func (a *App) fileSent(ctx context.Context, account mail.AccountID, raw []byte) 
 	a.sched.Wake(account)
 }
 
-func (a *App) enqueue(w http.ResponseWriter, deliver deliverFunc, outgoing *mail.Outgoing) {
+func (a *App) enqueue(w http.ResponseWriter, deliver deliverFunc, outgoing *mail.Outgoing, idempotencyKey, reqHash string) {
 	// Admission before acceptance: a full budget answers 429 rather than
 	// accepting work the process cannot responsibly hold (audit 3 SEND-03).
 	release, err := a.sendq.budget.acquire(outgoingWeight(outgoing))
@@ -569,13 +668,22 @@ func (a *App) enqueue(w http.ResponseWriter, deliver deliverFunc, outgoing *mail
 	id := time.Now().Format("150405.000") + "-" + newID()[:6]
 	ctx, cancel := context.WithTimeout(a.bgRoot(), 60*time.Second)
 	done := make(chan error, 1)
-	a.sendq.sends[id] = &pendingSend{cancel: cancel, done: done}
+	a.sendq.sends[id] = &pendingSend{
+		cancel:     cancel,
+		done:       done,
+		key:        idempotencyKey,
+		reqHash:    reqHash,
+		enqueuedAt: time.Now(),
+	}
+	if idempotencyKey != "" {
+		a.sendq.keyed[idempotencyKey] = id
+	}
 	a.sendq.mu.Unlock()
 
-	a.launch("send-delivery", func(context.Context) {
+	worker := func(context.Context) {
 		defer func() {
 			a.sendq.mu.Lock()
-			delete(a.sendq.sends, id)
+			a.sendq.forgetSend(id)
 			a.sendq.mu.Unlock()
 			cancel()
 			release()
@@ -600,9 +708,33 @@ func (a *App) enqueue(w http.ResponseWriter, deliver deliverFunc, outgoing *mail
 			a.log.Error("send failed", "err", err)
 		}
 		done <- err
-	})
+	}
+	// The admission result is load-bearing: a group already draining
+	// refuses the launch, and the accepted send would otherwise be
+	// acknowledged with no worker ever running — while holding budget and
+	// a queue slot until restart (audit 5 LIFE-03). Refused work unrolls
+	// its reservations and answers 503.
+	if !a.launch("send-delivery", worker) {
+		cancel()
+		a.sendq.mu.Lock()
+		a.sendq.forgetSend(id)
+		a.sendq.mu.Unlock()
+		release()
+		writeProblem(w, http.StatusServiceUnavailable, "Shutting Down",
+			"the server is shutting down — the message was NOT queued; try again after it restarts")
+		return
+	}
 
 	writeJSON(w, map[string]any{"queued": id, "undo_seconds": int(undoWindow.Seconds())})
+}
+
+// forgetSend drops a queue entry and its idempotency-key index. Callers
+// hold sendq.mu.
+func (q *sendQueue) forgetSend(id string) {
+	if p, ok := q.sends[id]; ok && p.key != "" && q.keyed[p.key] == id {
+		delete(q.keyed, p.key)
+	}
+	delete(q.sends, id)
 }
 
 func (a *App) handleUndoSend(w http.ResponseWriter, r *http.Request) {
@@ -610,7 +742,7 @@ func (a *App) handleUndoSend(w http.ResponseWriter, r *http.Request) {
 	a.sendq.mu.Lock()
 	p, ok := a.sendq.sends[id]
 	if ok && p.state == sendPending {
-		delete(a.sendq.sends, id)
+		a.sendq.forgetSend(id)
 	} else {
 		ok = false
 	}
