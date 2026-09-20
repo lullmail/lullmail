@@ -9,6 +9,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -145,6 +146,18 @@ func (a *App) handleAccountExport(w http.ResponseWriter, r *http.Request) {
 
 	filename := safeExportName(address) + "-mail-export.zip"
 
+	// One export at a time (audit 5 OPS-03): the per-request budgets (2
+	// GiB archive, 128 MiB raw reads) do not bound CONCURRENT exports —
+	// parallel requests multiplied them. A busy export answers 429 with a
+	// retry hint rather than stacking a second temp archive.
+	releaseExport, admitted := a.acquireExportSlot(r.Context())
+	if !admitted {
+		w.Header().Set("Retry-After", "30")
+		writeProblem(w, http.StatusTooManyRequests, "Export Busy", "another export is running — retry shortly")
+		return
+	}
+	defer releaseExport()
+
 	// The archive is built in a temp file and streamed only once complete:
 	// provider reads fail mid-build, and a failure must surface as a clean
 	// 5xx rather than a truncated zip that already left with 200 headers.
@@ -171,6 +184,14 @@ func (a *App) handleAccountExport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, box := range plans {
+		// A disconnected client stops the build (audit 5 OPS-03):
+		// continuing to walk provider pages for a canceled request is
+		// work nobody will receive, and a canceled read must not be
+		// mistaken for a provider failure worth degrading over.
+		if err := r.Context().Err(); err != nil {
+			writeProblem(w, 499, "Client Closed Request", "the export was abandoned mid-build")
+			return
+		}
 		report := exportMailboxReport{Name: box.name, File: box.filename}
 		if adapter != nil && adapter.Provider() == nmail.ProviderIMAP {
 			if cursor, cursorErr := a.store.Cursor(r.Context(), nmail.AccountID(mirrorID), box.id); cursorErr == nil {
@@ -202,6 +223,12 @@ func (a *App) handleAccountExport(w http.ResponseWriter, r *http.Request) {
 			}
 			if rawErr == nil {
 				report.Raw++
+			} else if errors.Is(rawErr, context.Canceled) || errors.Is(rawErr, context.DeadlineExceeded) {
+				// Cancellation is not degradation (audit 5 OPS-03): a
+				// canceled export stops, it does not continue as a
+				// mirror-rendered "success" for a client that left.
+				writeProblem(w, 499, "Client Closed Request", "the export was abandoned mid-build")
+				return
 			} else {
 				report.Fallback++
 				body, _ := a.store.Body(r.Context(), nmail.AccountID(mirrorID), msg.id)
@@ -265,6 +292,30 @@ func (a *App) handleAccountExport(w http.ResponseWriter, r *http.Request) {
 	if _, err := io.Copy(w, tmp); err != nil {
 		a.log.Error("mail export stream failed", "err", err)
 	}
+}
+
+// exportSlots bounds concurrent account exports to one (audit 5 OPS-03):
+// each holds a temp archive under a 2 GiB budget and walks provider
+// pages; without admission, N parallel requests multiplied all of it.
+type exportSlots struct{ sem chan struct{} }
+
+func (s *exportSlots) acquire(ctx context.Context) (func(), bool) {
+	select {
+	case s.sem <- struct{}{}:
+		return func() { <-s.sem }, true
+	case <-ctx.Done():
+		return nil, false
+	}
+}
+
+// acquireExportSlot admits one export at a time per process.
+func (a *App) acquireExportSlot(ctx context.Context) (func(), bool) {
+	a.exportMu.Lock()
+	if a.export == nil {
+		a.export = &exportSlots{sem: make(chan struct{}, 1)}
+	}
+	a.exportMu.Unlock()
+	return a.export.acquire(ctx)
 }
 
 // handleMessageEML downloads one original message. account is the mirror id
