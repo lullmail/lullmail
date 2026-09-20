@@ -267,6 +267,22 @@ func (e *Engine) SyncMailbox(ctx context.Context, acct AccountID, box MailboxID,
 // including older ones an incremental feed would never re-report — are
 // staged back into the mirror by the enumeration itself.
 func (e *Engine) RequestRescan(ctx context.Context, acct AccountID, ad Adapter) error {
+	return e.RequestRescanVersion(ctx, acct, ad, 0)
+}
+
+// RequestRescanVersion is the generation-aware rescan (audit 5 SYNC-05).
+// A retry used to re-BeginScan every mailbox, discarding the previous
+// attempt's durable staged progress and restarting mailboxes that had
+// already completed. With the policy version as the scan generation:
+//
+//   - a mailbox whose scan for THIS generation is already running keeps
+//     its staged pages and resumes;
+//   - a mailbox whose scan for this generation already completed (its
+//     mail_scan_done marker) is not restarted at all;
+//   - a mailbox with a stale-generation scan (a superseding policy) has
+//     it replaced, which is correct — the old enumeration answers a
+//     question nobody is asking anymore.
+func (e *Engine) RequestRescanVersion(ctx context.Context, acct AccountID, ad Adapter, generation int64) error {
 	unlock := e.lockAccount(acct)
 	defer unlock()
 	scans, ok := e.store.(ScanStore)
@@ -280,8 +296,36 @@ func (e *Engine) RequestRescan(ctx context.Context, acct AccountID, ad Adapter) 
 	if err := e.store.PutMailboxes(ctx, acct, boxes); err != nil {
 		return err
 	}
+	// Done markers of other generations are stale the moment this one
+	// starts; drop them so the table stays bounded by the live generation.
+	if generation != 0 {
+		if err := scans.PruneScanDone(ctx, acct, generation); err != nil {
+			return err
+		}
+	}
 	for _, box := range boxes {
-		if _, err := scans.BeginScan(ctx, acct, box.ID); err != nil {
+		scan, err := scans.RunningScan(ctx, acct, box.ID)
+		if err != nil && !errors.Is(err, ErrNoStore) {
+			return err
+		}
+		if scan != nil {
+			if scan.Generation == generation {
+				continue // resume this generation's staged progress
+			}
+			// A superseding policy replaces the stale enumeration.
+			if _, err := scans.BeginScanGeneration(ctx, acct, box.ID, generation); err != nil {
+				return err
+			}
+			continue
+		}
+		done, err := scans.ScanDone(ctx, acct, box.ID, generation)
+		if err != nil {
+			return err
+		}
+		if done {
+			continue // this generation already finished this mailbox
+		}
+		if _, err := scans.BeginScanGeneration(ctx, acct, box.ID, generation); err != nil {
 			return err
 		}
 	}
@@ -304,8 +348,17 @@ func (e *Engine) beginScanAndRun(ctx context.Context, acct AccountID, box Mailbo
 // in the entire recovery path happens inside FinishScan after the final
 // page staged successfully. A failure or page-budget exhaustion between
 // pages leaves the scan durable and resumable and the mirror untouched.
+//
+// A provider that rejects the scan's stored continuation (typed
+// ErrCursorInvalid, or an explicit Reset) gets ONE bounded replacement:
+// the invalid scan bookkeeping is discarded and a fresh scan begins from
+// empty, retaining all live mail. The old behavior — return an error and
+// leave the same rejected continuation stored — retried that continuation
+// forever across calls (audit 5 SYNC-03). A provider that rejects even a
+// fresh empty cursor is an error, not a loop.
 func (e *Engine) resumeScan(ctx context.Context, acct AccountID, box MailboxID, ad Adapter, scan *Scan, rep *SyncReport, first *Changes) (*SyncReport, error) {
 	scans := e.store.(ScanStore)
+	restarted := false
 
 	for page := 0; page < e.MaxPages; page++ {
 		var changes *Changes
@@ -315,13 +368,32 @@ func (e *Engine) resumeScan(ctx context.Context, acct AccountID, box MailboxID, 
 			var err error
 			changes, err = ad.Sync(ctx, box, scan.Continuation)
 			if err != nil {
+				if errors.Is(err, ErrCursorInvalid) && !restarted {
+					restarted = true
+					rep.Reset = true
+					fresh, berr := scans.BeginScan(ctx, acct, box)
+					if berr != nil {
+						return nil, berr
+					}
+					scan = fresh
+					first = nil
+					continue
+				}
 				return nil, e.classify(ctx, acct, err)
 			}
 			if changes.Reset {
-				// The provider rejected the cursor of the recovery scan
-				// itself. Restarting inside one call risks a refetch loop;
-				// the staged scan stays and the next call retries.
-				return nil, fmt.Errorf("mail: %s/%s reset twice in one sync; provider rejected the recovery enumeration too", acct, box)
+				if restarted {
+					return nil, fmt.Errorf("mail: %s/%s provider rejected a fresh recovery enumeration; retrying later", acct, box)
+				}
+				restarted = true
+				rep.Reset = true
+				fresh, berr := scans.BeginScan(ctx, acct, box)
+				if berr != nil {
+					return nil, berr
+				}
+				scan = fresh
+				first = nil
+				continue
 			}
 		}
 
@@ -333,16 +405,18 @@ func (e *Engine) resumeScan(ctx context.Context, acct AccountID, box MailboxID, 
 			case ChangeUpdated:
 				rep.Updated++
 			}
-			// Destroyed is intentionally ignored inside a scan: an
-			// enumeration reports what exists, and absence from it is the
-			// deletion signal — handled by the prune at completion.
+			// Destroyed inside a scan is NEGATIVE evidence, not noise: a
+			// message seen on an earlier page and destroyed at the
+			// provider before completion must not ride the seen set into
+			// survival — it is removed from the staged set and the live
+			// membership by ApplyScanPage (audit 5 SYNC-04).
 		}
 
 		prepared, err := e.prepareUpserts(ctx, acct, box, ad, changes)
 		if err != nil {
 			return nil, err
 		}
-		if err := scans.ApplyScanPage(ctx, scan.ID, prepared.upsert, prepared.seen, changes.Next); err != nil {
+		if err := scans.ApplyScanPage(ctx, scan.ID, prepared.upsert, prepared.seen, prepared.destroy, changes.Next); err != nil {
 			return nil, err
 		}
 

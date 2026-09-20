@@ -869,12 +869,19 @@ var _ ScanStore = (*PgStore)(nil)
 // BeginScan starts a staged scan, discarding any previous staged progress
 // for the mailbox. Nothing live is touched.
 func (s *PgStore) BeginScan(ctx context.Context, acct AccountID, box MailboxID) (*Scan, error) {
+	return s.BeginScanGeneration(ctx, acct, box, 0)
+}
+
+// BeginScanGeneration starts a generation-tagged staged scan (audit 5
+// SYNC-05); generation 0 is the policy-agnostic recovery scan.
+func (s *PgStore) BeginScanGeneration(ctx context.Context, acct AccountID, box MailboxID, generation int64) (*Scan, error) {
 	scan := &Scan{
 		ID:           NewScanID(),
 		Account:      acct,
 		Mailbox:      box,
 		Continuation: "",
 		StartedAt:    time.Now().UTC(),
+		Generation:   generation,
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -894,9 +901,9 @@ func (s *PgStore) BeginScan(ctx context.Context, acct AccountID, box MailboxID) 
 		}
 	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO mirror_scans (id, account_id, mailbox_id, continuation, started_at)
-		 VALUES ($1, $2, $3, $4, $5)`,
-		string(scan.ID), string(acct), string(box), string(scan.Continuation), scan.StartedAt); err != nil {
+		`INSERT INTO mirror_scans (id, account_id, mailbox_id, continuation, started_at, generation)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		string(scan.ID), string(acct), string(box), string(scan.Continuation), scan.StartedAt, scan.Generation); err != nil {
 		return nil, fmt.Errorf("mail: insert scan: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -905,8 +912,34 @@ func (s *PgStore) BeginScan(ctx context.Context, acct AccountID, box MailboxID) 
 	return scan, nil
 }
 
-func scanFromRow(acct AccountID, id, mailbox, continuation string, startedAt *time.Time) *Scan {
-	scan := &Scan{ID: ScanID(id), Account: acct, Mailbox: MailboxID(mailbox), Continuation: Cursor(continuation)}
+// ScanDone reports whether a generation's scan of one mailbox already
+// completed (audit 5 SYNC-05): the marker outlives the scan rows.
+func (s *PgStore) ScanDone(ctx context.Context, acct AccountID, box MailboxID, generation int64) (bool, error) {
+	var done bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM mail_scan_done
+		  WHERE account_id = $1 AND mailbox_id = $2 AND generation = $3)`,
+		string(acct), string(box), generation).Scan(&done)
+	if err != nil {
+		return false, fmt.Errorf("mail: scan done: %w", err)
+	}
+	return done, nil
+}
+
+// PruneScanDone drops every other generation's completion markers for the
+// account (audit 5 SYNC-05).
+func (s *PgStore) PruneScanDone(ctx context.Context, acct AccountID, keepGeneration int64) error {
+	_, err := s.pool.Exec(ctx,
+		`DELETE FROM mail_scan_done WHERE account_id = $1 AND generation <> $2`,
+		string(acct), keepGeneration)
+	if err != nil {
+		return fmt.Errorf("mail: prune scan done: %w", err)
+	}
+	return nil
+}
+
+func scanFromRow(acct AccountID, id, mailbox, continuation string, startedAt *time.Time, generation int64) *Scan {
+	scan := &Scan{ID: ScanID(id), Account: acct, Mailbox: MailboxID(mailbox), Continuation: Cursor(continuation), Generation: generation}
 	if startedAt != nil {
 		scan.StartedAt = *startedAt
 	}
@@ -916,22 +949,23 @@ func scanFromRow(acct AccountID, id, mailbox, continuation string, startedAt *ti
 func (s *PgStore) RunningScan(ctx context.Context, acct AccountID, box MailboxID) (*Scan, error) {
 	var id, mailbox, continuation string
 	var startedAt *time.Time
+	var generation int64
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, mailbox_id, continuation, started_at FROM mirror_scans
+		`SELECT id, mailbox_id, continuation, started_at, generation FROM mirror_scans
 		  WHERE account_id = $1 AND mailbox_id = $2`,
-		string(acct), string(box)).Scan(&id, &mailbox, &continuation, &startedAt)
+		string(acct), string(box)).Scan(&id, &mailbox, &continuation, &startedAt, &generation)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNoStore
 	}
 	if err != nil {
 		return nil, fmt.Errorf("mail: running scan: %w", err)
 	}
-	return scanFromRow(acct, id, mailbox, continuation, startedAt), nil
+	return scanFromRow(acct, id, mailbox, continuation, startedAt, generation), nil
 }
 
 func (s *PgStore) RunningScans(ctx context.Context, acct AccountID) ([]Scan, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, mailbox_id, continuation, started_at FROM mirror_scans
+		`SELECT id, mailbox_id, continuation, started_at, generation FROM mirror_scans
 		  WHERE account_id = $1 ORDER BY mailbox_id`, string(acct))
 	if err != nil {
 		return nil, fmt.Errorf("mail: running scans: %w", err)
@@ -941,23 +975,26 @@ func (s *PgStore) RunningScans(ctx context.Context, acct AccountID) ([]Scan, err
 	for rows.Next() {
 		var id, mailbox, continuation string
 		var startedAt *time.Time
-		if err := rows.Scan(&id, &mailbox, &continuation, &startedAt); err != nil {
+		var generation int64
+		if err := rows.Scan(&id, &mailbox, &continuation, &startedAt, &generation); err != nil {
 			return nil, fmt.Errorf("mail: running scans scan: %w", err)
 		}
-		out = append(out, *scanFromRow(acct, id, mailbox, continuation, startedAt))
+		out = append(out, *scanFromRow(acct, id, mailbox, continuation, startedAt, generation))
 	}
 	return out, rows.Err()
 }
 
 // ApplyScanPage stages one page atomically: envelopes upserted, seen IDs
-// recorded, continuation advanced — one transaction under the account
-// maintenance lock. A failure stages nothing.
-func (s *PgStore) ApplyScanPage(ctx context.Context, scan ScanID, envs []Envelope, seen []MessageID, next Cursor) error {
+// recorded, destroyed IDs removed from the staged seen set AND this
+// mailbox's live membership, continuation advanced — one transaction
+// under the account maintenance lock. A failure stages nothing.
+func (s *PgStore) ApplyScanPage(ctx context.Context, scan ScanID, envs []Envelope, seen, destroyed []MessageID, next Cursor) error {
 	var acct AccountID
 	var box MailboxID
+	var generation int64
 	if err := s.pool.QueryRow(ctx,
-		`SELECT account_id, mailbox_id FROM mirror_scans WHERE id = $1`,
-		string(scan)).Scan(&acct, &box); err != nil {
+		`SELECT account_id, mailbox_id, generation FROM mirror_scans WHERE id = $1`,
+		string(scan)).Scan(&acct, &box, &generation); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNoStore
 		}
@@ -982,6 +1019,17 @@ func (s *PgStore) ApplyScanPage(ctx context.Context, scan ScanID, envs []Envelop
 		batch.Queue(`INSERT INTO mirror_scan_seen (scan_id, message_id) VALUES ($1, $2)
 		             ON CONFLICT (scan_id, message_id) DO NOTHING`, string(scan), string(id))
 	}
+	// Negative evidence from the enumeration's own catch-up (audit 5
+	// SYNC-04): a message this scan previously staged as seen and that
+	// the provider has since destroyed must leave both the seen set and
+	// the live membership, in the same transaction as the page.
+	for _, id := range destroyed {
+		batch.Queue(`DELETE FROM mirror_scan_seen WHERE scan_id = $1 AND message_id = $2`,
+			string(scan), string(id))
+		batch.Queue(`DELETE FROM mail_message_mailboxes
+		              WHERE account_id = $1 AND mailbox_id = $2 AND message_id = $3`,
+			string(acct), string(box), string(id))
+	}
 	batch.Queue(`UPDATE mirror_scans SET continuation = $2 WHERE id = $1`, string(scan), string(next))
 	if err := tx.SendBatch(ctx, batch).Close(); err != nil {
 		return fmt.Errorf("mail: stage scan page: %w", err)
@@ -993,8 +1041,9 @@ func (s *PgStore) ApplyScanPage(ctx context.Context, scan ScanID, envs []Envelop
 // the account maintenance lock: memberships of this mailbox absent from
 // the seen set are pruned, messages left with no membership anywhere are
 // deleted (their bodies explicitly, so the semantics hold on backends
-// without FK enforcement), the terminal cursor is published, and the scan
-// rows drop. This is the ONLY deletion in the recovery path.
+// without FK enforcement), the terminal cursor is published, the
+// generation-completion marker is recorded (audit 5 SYNC-05), and the
+// scan rows drop. This is the ONLY deletion in the recovery path.
 func (s *PgStore) FinishScan(ctx context.Context, acct AccountID, box MailboxID, scan ScanID, terminal Cursor) (int, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1005,10 +1054,15 @@ func (s *PgStore) FinishScan(ctx context.Context, acct AccountID, box MailboxID,
 		return 0, err
 	}
 
+	var generation int64
 	var exists bool
 	if err := tx.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM mirror_scans WHERE id = $1 AND account_id = $2 AND mailbox_id = $3)`,
-		string(scan), string(acct), string(box)).Scan(&exists); err != nil {
+		`SELECT generation, EXISTS(SELECT 1 FROM mirror_scans WHERE id = $1 AND account_id = $2 AND mailbox_id = $3)
+		   FROM mirror_scans WHERE id = $1`,
+		string(scan), string(acct), string(box)).Scan(&generation, &exists); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, ErrNoStore
+		}
 		return 0, err
 	}
 	if !exists {
@@ -1057,6 +1111,16 @@ func (s *PgStore) FinishScan(ctx context.Context, acct AccountID, box MailboxID,
 		 ON CONFLICT (account_id, mailbox_id) DO UPDATE SET cursor = $3, synced_at = $4`,
 		string(acct), string(box), string(terminal), time.Now().UTC()); err != nil {
 		return 0, fmt.Errorf("mail: publish scan cursor: %w", err)
+	}
+
+	// Record this generation's completion BEFORE dropping the scan rows:
+	// the marker is what lets a reconciliation retry skip a mailbox whose
+	// scan already finished instead of re-enumerating it (audit 5 SYNC-05).
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO mail_scan_done (account_id, generation, mailbox_id)
+		 VALUES ($1, $2, $3) ON CONFLICT (account_id, generation, mailbox_id) DO NOTHING`,
+		string(acct), generation, string(box)); err != nil {
+		return 0, fmt.Errorf("mail: record scan completion: %w", err)
 	}
 
 	for _, stmt := range []string{

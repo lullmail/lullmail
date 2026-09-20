@@ -132,6 +132,29 @@ var ScanSchema = []string{
 	)`,
 }
 
+// GenerationSchema gives staged scans a policy-generation identity and a
+// per-generation completion marker (audit 5 SYNC-05). A reconciliation
+// retry used to call BeginScan for every mailbox, discarding the previous
+// attempt's durable progress and re-enumerating mailboxes that had already
+// finished. With generations:
+//
+//   - mirror_scans.generation tags each scan with the policy version it
+//     is enumerating for (0 = a policy-agnostic recovery scan).
+//   - mail_scan_done records, per (account, generation, mailbox), that
+//     this generation's scan of that mailbox FINISHED — the knowledge
+//     FinishScan used to lose when it dropped the scan rows. A retry of
+//     the same generation resumes in-progress scans and skips completed
+//     mailboxes instead of restarting them.
+var GenerationSchema = []string{
+	`ALTER TABLE mirror_scans ADD COLUMN generation BIGINT NOT NULL DEFAULT 0`,
+	`CREATE TABLE IF NOT EXISTS mail_scan_done (
+		account_id  TEXT NOT NULL,
+		generation  BIGINT NOT NULL,
+		mailbox_id  TEXT NOT NULL,
+		PRIMARY KEY (account_id, generation, mailbox_id)
+	)`,
+}
+
 // ReferentialSchema hardens the mirror against retention/write races
 // (audit SYNC-04): bodies and memberships may never reference a message
 // the mirror no longer holds. The orphan deletes run first so an existing
@@ -180,6 +203,7 @@ var ReferentialSchema = []string{
 // rather than a test fixture: when a provider reports that a cursor is no
 // longer usable, discarding and refetching is the correct recovery.
 var DropSchema = []string{
+	`DROP TABLE IF EXISTS mail_scan_done`,
 	`DROP TABLE IF EXISTS mirror_scan_seen`,
 	`DROP TABLE IF EXISTS mirror_scans`,
 	`DROP TABLE IF EXISTS mail_sync_state`,

@@ -8,6 +8,7 @@ package graph
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -239,11 +240,58 @@ const messageFields = "id,conversationId,subject,bodyPreview,receivedDateTime," 
 	"sentDateTime,from,toRecipients,ccRecipients,bccRecipients,replyTo," +
 	"isRead,isDraft,flag,hasAttachments,internetMessageId,parentFolderId"
 
+// graphCursorV2 carries the enumeration phase through multi-page initial
+// syncs (audit 5 SYNC-01): `initial` used to be derived from
+// `cur == ""`, which is true only for the FIRST page — every nextLink
+// page looked like an incremental delta, the terminal page never set
+// Complete, and the staged scan polled its own deltaLink forever. The
+// versioned cursor keeps the phase explicit; a bare legacy cursor decodes
+// as invalid and enters the engine's typed reset path (a fresh staged
+// scan), never a guessed phase.
+type graphCursorV2 struct {
+	URL         string `json:"url"`
+	Enumerating bool   `json:"enumerating"`
+}
+
+const graphCursorPrefix = "graph-v2:"
+
+func encodeGraphCursor(c graphCursorV2) mail.Cursor {
+	raw, _ := json.Marshal(c) // string + bool cannot fail
+	return mail.Cursor(graphCursorPrefix + base64.RawURLEncoding.EncodeToString(raw))
+}
+
+func decodeGraphCursor(cur mail.Cursor) (graphCursorV2, error) {
+	const prefix = graphCursorPrefix
+	if !strings.HasPrefix(string(cur), prefix) || len(cur) > 64<<10 {
+		return graphCursorV2{}, mail.ErrCursorInvalid
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(string(cur), prefix))
+	if err != nil {
+		return graphCursorV2{}, mail.ErrCursorInvalid
+	}
+	var c graphCursorV2
+	if json.Unmarshal(raw, &c) != nil || c.URL == "" {
+		return graphCursorV2{}, mail.ErrCursorInvalid
+	}
+	return c, nil
+}
+
 // Sync returns changes since cur using the delta query.
 func (a *Adapter) Sync(ctx context.Context, box mail.MailboxID, cur mail.Cursor) (*mail.Changes, error) {
-	endpoint := string(cur)
-	initial := endpoint == ""
-	if initial {
+	// An empty cursor starts a full enumeration. Anything else decodes
+	// through the versioned cursor: a legacy bare URL is cursor-invalid
+	// by construction (audit 5 SYNC-01) — the engine replaces it with a
+	// fresh staged scan instead of guessing its phase.
+	state := graphCursorV2{Enumerating: true}
+	if cur != "" {
+		decoded, err := decodeGraphCursor(cur)
+		if err != nil {
+			return nil, fmt.Errorf("graph: cursor: %w", err)
+		}
+		state = decoded
+	}
+	endpoint := state.URL
+	if cur == "" {
 		endpoint = fmt.Sprintf("/me/mailFolders/%s/messages/delta?$select=%s&$top=200",
 			url.PathEscape(string(box)), url.QueryEscape(messageFields))
 	}
@@ -260,17 +308,20 @@ func (a *Adapter) Sync(ctx context.Context, box mail.MailboxID, cur mail.Cursor)
 		return nil, err
 	}
 
-	changes := &mail.Changes{More: out.NextLink != "", EnumerationStart: initial}
+	changes := &mail.Changes{More: out.NextLink != "", EnumerationStart: cur == ""}
 	if out.NextLink != "" {
-		changes.Next = mail.Cursor(out.NextLink)
+		// Mid-enumeration pages keep the phase they came from.
+		changes.Next = encodeGraphCursor(graphCursorV2{URL: out.NextLink, Enumerating: state.Enumerating})
 	} else {
-		changes.Next = mail.Cursor(out.DeltaLink)
+		if out.DeltaLink == "" {
+			return nil, errors.New("graph: terminal delta page carried no deltaLink")
+		}
+		changes.Next = encodeGraphCursor(graphCursorV2{URL: out.DeltaLink, Enumerating: false})
+		// Only the terminal page of a FULL ENUMERATION closes a complete
+		// listing; an ordinary incremental delta response never does
+		// (audit 5 SYNC-01).
+		changes.Complete = state.Enumerating
 	}
-
-	// An initial delta run enumerates the folder, so the final page closes
-	// a complete listing. Subsequent runs are deltas and report removals
-	// directly, so they are never complete.
-	changes.Complete = initial && out.NextLink == ""
 
 	for _, m := range out.Value {
 		// A deleted item arrives as an annotation rather than a full
@@ -284,7 +335,7 @@ func (a *Adapter) Sync(ctx context.Context, box mail.MailboxID, cur mail.Cursor)
 		}
 		env := m.toEnvelope()
 		kind := mail.ChangeUpdated
-		if initial {
+		if state.Enumerating {
 			kind = mail.ChangeCreated
 		}
 		changes.Changes = append(changes.Changes, mail.Change{

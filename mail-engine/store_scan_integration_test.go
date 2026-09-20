@@ -79,7 +79,7 @@ func TestIntegrationStagedScanSurvivesKillBetweenPages(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := s.ApplyScanPage(ctx, scan.ID, []Envelope{page1},
-		[]MessageID{page1.ID}, "page-1"); err != nil {
+		[]MessageID{page1.ID}, nil, "page-1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -109,7 +109,7 @@ func TestIntegrationStagedScanSurvivesKillBetweenPages(t *testing.T) {
 
 	// Completion: page 2 stages, FinishScan prunes exactly the absence.
 	if err := s2.ApplyScanPage(ctx, resumed.ID, []Envelope{page2},
-		[]MessageID{page1.ID, page2.ID}, "terminal"); err != nil {
+		[]MessageID{page1.ID, page2.ID}, nil, "terminal"); err != nil {
 		t.Fatal(err)
 	}
 	pruned, err := s2.FinishScan(ctx, acct, "INBOX", resumed.ID, "terminal")
@@ -156,7 +156,7 @@ func TestIntegrationFinishScanKeepsOtherMailboxMembership(t *testing.T) {
 	fresh := HeaderMessageID("<k3@example.com>")
 	if err := s.ApplyScanPage(ctx, scan.ID,
 		[]Envelope{{ID: fresh, MailboxIDs: []MailboxID{"INBOX"}, Subject: "three"}},
-		[]MessageID{fresh}, "done"); err != nil {
+		[]MessageID{fresh}, nil, "done"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.FinishScan(ctx, acct, "INBOX", scan.ID, "done"); err != nil {

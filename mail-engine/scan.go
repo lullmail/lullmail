@@ -35,6 +35,10 @@ type Scan struct {
 	Mailbox      MailboxID
 	Continuation Cursor
 	StartedAt    time.Time
+	// Generation is the policy generation this scan enumerates for: 0 for
+	// a policy-agnostic recovery scan, the product's policy_version for a
+	// reconciliation rescan (audit 5 SYNC-05).
+	Generation int64
 }
 
 // ScanStore is the staged-reconciliation surface of a store (audit
@@ -48,6 +52,21 @@ type ScanStore interface {
 	// current mirror contents and cursor stay exactly as they are.
 	BeginScan(ctx context.Context, acct AccountID, box MailboxID) (*Scan, error)
 
+	// BeginScanGeneration is BeginScan tagged with a policy generation;
+	// the generation rides the scan rows so retries can distinguish
+	// "resume this generation's progress" from "a newer policy
+	// supersedes it" (audit 5 SYNC-05).
+	BeginScanGeneration(ctx context.Context, acct AccountID, box MailboxID, generation int64) (*Scan, error)
+
+	// ScanDone reports whether this generation's scan of the mailbox
+	// already completed (its completion outlives the dropped scan rows).
+	ScanDone(ctx context.Context, acct AccountID, box MailboxID, generation int64) (bool, error)
+
+	// PruneScanDone drops completion markers for every generation but the
+	// kept one — called when a new generation starts, so the marker table
+	// stays bounded by the live generation.
+	PruneScanDone(ctx context.Context, acct AccountID, keepGeneration int64) error
+
 	// RunningScan returns the staged scan for a mailbox, or ErrNoStore
 	// when none is running.
 	RunningScan(ctx context.Context, acct AccountID, box MailboxID) (*Scan, error)
@@ -57,16 +76,22 @@ type ScanStore interface {
 	RunningScans(ctx context.Context, acct AccountID) ([]Scan, error)
 
 	// ApplyScanPage stages one page atomically: the envelopes are
-	// upserted, their (post-promotion) IDs recorded as seen, and the
-	// continuation advanced — one transaction. A failure stages nothing.
-	ApplyScanPage(ctx context.Context, scan ScanID, envs []Envelope, seen []MessageID, next Cursor) error
+	// upserted, their (post-promotion) IDs recorded as seen, destroyed
+	// IDs are removed from both the staged seen set and this mailbox's
+	// live membership, and the continuation advanced — one transaction.
+	// A failure stages nothing. The destroyed set exists so a message
+	// seen on an earlier page and deleted at the provider before the
+	// enumeration finished cannot survive the prune as a false positive
+	// (audit 5 SYNC-04).
+	ApplyScanPage(ctx context.Context, scan ScanID, envs []Envelope, seen, destroyed []MessageID, next Cursor) error
 
 	// FinishScan completes the scan authoritatively under one
 	// transaction: memberships of this mailbox absent from the seen set
 	// are pruned, messages left with no membership anywhere are deleted,
-	// the terminal cursor is published, and the scan rows are dropped.
-	// It returns the number of pruned memberships. Nothing is pruned
-	// before this call, ever.
+	// the terminal cursor is published, the scan's generation-completion
+	// marker is recorded, and the scan rows are dropped. It returns the
+	// number of pruned memberships. Nothing is pruned before this call,
+	// ever.
 	FinishScan(ctx context.Context, acct AccountID, box MailboxID, scan ScanID, terminal Cursor) (int, error)
 }
 

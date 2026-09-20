@@ -49,6 +49,7 @@ var EngineMigrations = []migration{
 	{Version: 1, Name: "mirror baseline", Statements: Schema},
 	{Version: 2, Name: "staged reconciliation scans", Statements: ScanSchema},
 	{Version: 3, Name: "mirror referential integrity", Statements: ReferentialSchema},
+	{Version: 4, Name: "scan generations", Statements: GenerationSchema},
 }
 
 const engineLedgerDDL = `CREATE TABLE IF NOT EXISTS mail_migrations (

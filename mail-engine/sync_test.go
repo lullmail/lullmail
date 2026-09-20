@@ -42,6 +42,7 @@ type memStore struct {
 	scanSeq int64
 	scans   map[AccountID]map[MailboxID]*Scan
 	scanSeen map[ScanID]map[MessageID]bool
+	scanDone map[AccountID]map[int64]map[MailboxID]bool
 
 	// failPutEnvelopes makes the next PutEnvelopes fail, to simulate a
 	// crash between storing data and advancing the cursor.
@@ -58,6 +59,7 @@ func newMemStore() *memStore {
 		cursors:   map[AccountID]map[MailboxID]Cursor{},
 		scans:     map[AccountID]map[MailboxID]*Scan{},
 		scanSeen:  map[ScanID]map[MessageID]bool{},
+		scanDone: map[AccountID]map[int64]map[MailboxID]bool{},
 	}
 }
 
@@ -531,11 +533,13 @@ func TestProviderResetRefetchesWithoutDuplicating(t *testing.T) {
 }
 
 func TestRepeatedResetIsRefusedRatherThanLooping(t *testing.T) {
-	// A provider that always rejects its own cursor would otherwise spin
-	// forever, refetching the whole mailbox on each pass.
+	// A provider that always rejects its own cursor — including the fresh
+	// empty cursor of a replacement scan — must not loop. One bounded
+	// replacement per call, then an honest error (audit 5 SYNC-03).
 	eng, _, acct := setup(t)
 	ad := &scriptedAdapter{
 		pages: []*Changes{
+			{Reset: true, Next: ""},
 			{Reset: true, Next: ""},
 			{Reset: true, Next: ""},
 		},
@@ -543,10 +547,10 @@ func TestRepeatedResetIsRefusedRatherThanLooping(t *testing.T) {
 
 	_, err := eng.SyncMailbox(context.Background(), acct, "INBOX", ad)
 	if err == nil {
-		t.Fatal("expected an error on a second reset in one sync")
+		t.Fatal("expected an error after the fresh enumeration was rejected too")
 	}
-	if !strings.Contains(err.Error(), "reset twice") {
-		t.Errorf("error = %v, want it to name the repeated reset", err)
+	if !strings.Contains(err.Error(), "rejected a fresh recovery enumeration") {
+		t.Errorf("error = %v, want it to name the refused fresh enumeration", err)
 	}
 }
 

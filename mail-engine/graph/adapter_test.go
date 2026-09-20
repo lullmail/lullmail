@@ -46,7 +46,7 @@ func TestExpiredDeltaTokenBecomesAReset(t *testing.T) {
 
 	useBase(t, srv.URL)
 	a := New(srv.Client())
-	changes, err := a.Sync(context.Background(), "inbox", mail.Cursor(srv.URL+"/stale"))
+	changes, err := a.Sync(context.Background(), "inbox", encodeGraphCursor(graphCursorV2{URL: srv.URL + "/stale", Enumerating: false}))
 	if err != nil {
 		t.Fatalf("expected a reset, got error: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestRemovedAnnotationBecomesADestroy(t *testing.T) {
 
 	useBase(t, srv.URL)
 	a := New(srv.Client())
-	changes, err := a.Sync(context.Background(), "inbox", mail.Cursor(srv.URL+"/delta"))
+	changes, err := a.Sync(context.Background(), "inbox", encodeGraphCursor(graphCursorV2{URL: srv.URL + "/delta", Enumerating: false}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestDeltaContinuationIsNeverComplete(t *testing.T) {
 
 	useBase(t, srv.URL)
 	a := New(srv.Client())
-	changes, err := a.Sync(context.Background(), "inbox", mail.Cursor(srv.URL+"/delta"))
+	changes, err := a.Sync(context.Background(), "inbox", encodeGraphCursor(graphCursorV2{URL: srv.URL + "/delta", Enumerating: false}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,8 +113,8 @@ func TestDeltaContinuationIsNeverComplete(t *testing.T) {
 	if changes.More {
 		t.Error("a page with a deltaLink and no nextLink reported more pages")
 	}
-	if changes.Next != "https://next" {
-		t.Errorf("Next = %q, want the deltaLink", changes.Next)
+	if next, err := decodeGraphCursor(changes.Next); err != nil || next.URL != "https://next" || next.Enumerating {
+		t.Errorf("Next = %q (decoded %+v, %v), want the deltaLink with enumerating off", changes.Next, next, err)
 	}
 }
 
@@ -128,15 +128,95 @@ func TestNextLinkPagesBeforeDeltaLink(t *testing.T) {
 
 	useBase(t, srv.URL)
 	a := New(srv.Client())
-	changes, err := a.Sync(context.Background(), "inbox", mail.Cursor(srv.URL+"/delta"))
+	changes, err := a.Sync(context.Background(), "inbox", encodeGraphCursor(graphCursorV2{URL: srv.URL + "/delta", Enumerating: true}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !changes.More {
 		t.Error("a page with a nextLink did not report more pages")
 	}
-	if changes.Next != "https://page2" {
-		t.Errorf("Next = %q, want the nextLink", changes.Next)
+	next, err := decodeGraphCursor(changes.Next)
+	if err != nil || next.URL != "https://page2" {
+		t.Errorf("Next = %q (decoded %+v, %v), want the nextLink", changes.Next, next, err)
+	}
+	if !next.Enumerating {
+		t.Error("a nextLink page lost its enumerating phase")
+	}
+	if changes.Complete {
+		t.Error("a nextLink page claimed the enumeration was complete")
+	}
+}
+
+// THE SYNC-01 REGRESSION: a multi-page initial enumeration completes only
+// at its terminal page. The old cursor derived `initial` from
+// cur == "", so page two onward looked like deltas and the enumeration
+// never finished.
+func TestMultiPageInitialEnumerationCompletesAtTerminalPage(t *testing.T) {
+	var srv *httptest.Server
+	request := 0
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		request++
+		w.Header().Set("Content-Type", "application/json")
+		if request == 1 {
+			_, _ = w.Write([]byte(`{"value":[{"id":"m1"}],"@odata.nextLink":"` + srv.URL + `/page2"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"value":[{"id":"m2"}],"@odata.deltaLink":"` + srv.URL + `/delta"}`))
+	}))
+	t.Cleanup(srv.Close)
+	useBase(t, srv.URL)
+	a := New(srv.Client())
+
+	changes, err := a.Sync(context.Background(), "inbox", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changes.EnumerationStart || changes.Complete || !changes.More {
+		t.Fatalf("page one = start=%v complete=%v more=%v; want start, not complete, more", changes.EnumerationStart, changes.Complete, changes.More)
+	}
+	next, err := decodeGraphCursor(changes.Next)
+	if err != nil || !next.Enumerating {
+		t.Fatalf("page-one cursor = %+v (%v), want the enumerating phase carried", next, err)
+	}
+
+	changes, err = a.Sync(context.Background(), "inbox", changes.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changes.Complete {
+		t.Fatal("the TERMINAL page of an initial enumeration did not complete it")
+	}
+	if changes.EnumerationStart {
+		t.Error("a continuation page claimed to start the enumeration")
+	}
+	next, err = decodeGraphCursor(changes.Next)
+	if err != nil || next.Enumerating {
+		t.Fatalf("terminal cursor = %+v (%v), want the deltaLink with enumerating off", next, err)
+	}
+
+	// An ordinary incremental delta response on that cursor is never
+	// complete, even with no changes and no next page.
+	changes, err = a.Sync(context.Background(), "inbox", changes.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changes.Complete {
+		t.Error("an incremental delta response was marked complete")
+	}
+}
+
+// A bare legacy Graph cursor (a raw nextLink/deltaLink) is cursor-invalid
+// by construction: its phase cannot be known, so the engine replaces it
+// with a fresh staged scan instead of guessing (audit 5 SYNC-01).
+func TestLegacyBareCursorIsCursorInvalid(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"value":[],"@odata.deltaLink":"https://x"}`))
+	}))
+	t.Cleanup(srv.Close)
+	useBase(t, srv.URL)
+	a := New(srv.Client())
+	if _, err := a.Sync(context.Background(), "inbox", mail.Cursor(srv.URL+"/delta")); !errors.Is(err, mail.ErrCursorInvalid) {
+		t.Fatalf("err = %v, want ErrCursorInvalid for a bare legacy cursor", err)
 	}
 }
 

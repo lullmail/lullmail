@@ -11,6 +11,7 @@
 package gmail
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -606,11 +607,15 @@ func (a *Adapter) Raw(ctx context.Context, id mail.MessageID) (io.ReadCloser, er
 	if err != nil {
 		return nil, classify(err)
 	}
-	raw, err := base64.URLEncoding.WithPadding(base64.NoPadding).DecodeString(m.Raw)
+	// The shared bounded decoder accepts padded and unpadded base64url —
+	// the same tolerance the part decoder has always had. A padded raw
+	// value used to fail here and fall the export back to a lossy mirror
+	// rewrite (audit 5 GMAIL-01).
+	raw, err := decodeURLBytes(m.Raw)
 	if err != nil {
 		return nil, fmt.Errorf("gmail: decode raw: %w", err)
 	}
-	return io.NopCloser(strings.NewReader(string(raw))), nil
+	return io.NopCloser(bytes.NewReader(raw)), nil
 }
 
 // Attachment streams one part's decoded content. The part object — not

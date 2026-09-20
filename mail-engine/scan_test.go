@@ -15,7 +15,11 @@ import (
 // atomic (envelopes + seen + continuation), and nothing is pruned outside
 // FinishScan.
 
-func (m *memStore) BeginScan(_ context.Context, acct AccountID, box MailboxID) (*Scan, error) {
+func (m *memStore) BeginScan(ctx context.Context, acct AccountID, box MailboxID) (*Scan, error) {
+	return m.BeginScanGeneration(ctx, acct, box, 0)
+}
+
+func (m *memStore) BeginScanGeneration(_ context.Context, acct AccountID, box MailboxID, generation int64) (*Scan, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	id := ScanID(fmt.Sprintf("scan-%d", atomic.AddInt64(&m.scanSeq, 1)))
@@ -26,10 +30,27 @@ func (m *memStore) BeginScan(_ context.Context, acct AccountID, box MailboxID) (
 	if m.scans[acct] == nil {
 		m.scans[acct] = map[MailboxID]*Scan{}
 	}
-	scan := &Scan{ID: id, Account: acct, Mailbox: box, StartedAt: time.Now().UTC()}
+	scan := &Scan{ID: id, Account: acct, Mailbox: box, StartedAt: time.Now().UTC(), Generation: generation}
 	m.scans[acct][box] = scan
 	m.scanSeen[id] = map[MessageID]bool{}
 	return scan, nil
+}
+
+func (m *memStore) ScanDone(_ context.Context, acct AccountID, box MailboxID, generation int64) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.scanDone[acct][generation][box], nil
+}
+
+func (m *memStore) PruneScanDone(_ context.Context, acct AccountID, keepGeneration int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for gen := range m.scanDone[acct] {
+		if gen != keepGeneration {
+			delete(m.scanDone[acct], gen)
+		}
+	}
+	return nil
 }
 
 func (m *memStore) RunningScan(_ context.Context, acct AccountID, box MailboxID) (*Scan, error) {
@@ -53,7 +74,7 @@ func (m *memStore) RunningScans(_ context.Context, acct AccountID) ([]Scan, erro
 	return out, nil
 }
 
-func (m *memStore) ApplyScanPage(_ context.Context, scan ScanID, envs []Envelope, seen []MessageID, next Cursor) error {
+func (m *memStore) ApplyScanPage(_ context.Context, scan ScanID, envs []Envelope, seen, destroyed []MessageID, next Cursor) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var acct AccountID
@@ -91,6 +112,27 @@ func (m *memStore) ApplyScanPage(_ context.Context, scan ScanID, envs []Envelope
 	}
 	for _, id := range seen {
 		m.scanSeen[scan][id] = true
+	}
+	var scanAcct AccountID
+	var scanBox MailboxID
+	for _, byMailbox := range m.scans {
+		for _, s := range byMailbox {
+			if s.ID == scan {
+				scanAcct = s.Account
+				scanBox = s.Mailbox
+			}
+		}
+	}
+	for _, id := range destroyed {
+		delete(m.scanSeen[scan], id)
+		if m.members[scanAcct] != nil && m.members[scanAcct][id] != nil {
+			delete(m.members[scanAcct][id], scanBox)
+			if len(m.members[scanAcct][id]) == 0 {
+				delete(m.messages[scanAcct], id)
+				delete(m.members[scanAcct], id)
+				delete(m.bodies[scanAcct], id)
+			}
+		}
 	}
 	for _, byMailbox := range m.scans {
 		for _, s := range byMailbox {
@@ -130,6 +172,13 @@ func (m *memStore) FinishScan(_ context.Context, acct AccountID, box MailboxID, 
 		m.cursors[acct] = map[MailboxID]Cursor{}
 	}
 	m.cursors[acct][box] = terminal
+	if m.scanDone[acct] == nil {
+		m.scanDone[acct] = map[int64]map[MailboxID]bool{}
+	}
+	if m.scanDone[acct][s.Generation] == nil {
+		m.scanDone[acct][s.Generation] = map[MailboxID]bool{}
+	}
+	m.scanDone[acct][s.Generation][box] = true
 	delete(m.scanSeen, scan)
 	delete(m.scans[acct], box)
 	return pruned, nil
@@ -432,7 +481,7 @@ func TestRunningScanTakesPrecedenceOverDelta(t *testing.T) {
 	}
 	if err := store.ApplyScanPage(ctx, scan.ID,
 		[]Envelope{envelope("9", "INBOX")},
-		[]MessageID{NativeMessageID(ProviderIMAP, "9")}, "scan-page-1"); err != nil {
+		[]MessageID{NativeMessageID(ProviderIMAP, "9")}, nil, "scan-page-1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -506,20 +555,206 @@ func TestFinishScanWithoutScanIsErrNoStore(t *testing.T) {
 	}
 }
 
-// A provider that rejects even the recovery enumeration surfaces the
-// reset-twice error instead of looping.
+// A provider that rejects even a FRESH recovery enumeration surfaces the
+// bounded refusal instead of looping: one replacement per call, then an
+// honest error (audit 5 SYNC-03). The first reset still restarts the scan
+// non-destructively — that is the new capability — so it takes three
+// rejections to be refused.
 func TestResetDuringRecoveryScanIsRefused(t *testing.T) {
 	eng, store, acct, _ := stagedScenario(t)
 	ad := &scriptedAdapter{pages: []*Changes{
 		{Reset: true, Next: ""},
 		{Reset: true, Next: ""},
+		{Reset: true, Next: ""},
 	}}
 	_, err := eng.SyncMailbox(context.Background(), acct, "INBOX", ad)
-	if err == nil || !strings.Contains(err.Error(), "reset twice") {
-		t.Fatalf("err = %v, want the reset-twice refusal", err)
+	if err == nil || !strings.Contains(err.Error(), "rejected a fresh recovery enumeration") {
+		t.Fatalf("err = %v, want the fresh-enumeration refusal", err)
 	}
 	// The mirror survived the refused recovery.
 	if store.count(acct) != 2 {
 		t.Errorf("stored %d, want 2 intact", store.count(acct))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Bounded recovery restart + destroyed evidence + generations (audit 5
+// SYNC-03/SYNC-04/SYNC-05)
+// ---------------------------------------------------------------------------
+
+// rejectCursorAdapter fails any Sync called with the poisoned continuation
+// and delegates everything else — the provider that expired the stored
+// scan continuation but serves a fresh enumeration happily.
+type rejectCursorAdapter struct {
+	scriptedAdapter
+	reject Cursor
+}
+
+func (a *rejectCursorAdapter) Sync(ctx context.Context, box MailboxID, cur Cursor) (*Changes, error) {
+	if cur == a.reject {
+		return nil, fmt.Errorf("imap: session state expired: %w", ErrCursorInvalid)
+	}
+	return a.scriptedAdapter.Sync(ctx, box, cur)
+}
+
+// A stored scan continuation the provider rejects is REPLACED, not retried
+// forever: the scan restarts from empty, keeps every live message, and the
+// replacement enumeration completes in the same call (audit 5 SYNC-03).
+func TestRejectedScanContinuationIsReplacedNotWedged(t *testing.T) {
+	eng, store, acct, _ := stagedScenario(t)
+	ctx := context.Background()
+
+	// A scan is mid-flight with a stored continuation the provider now
+	// rejects; the fresh enumeration (page at cursor "") reports message 3
+	// new, message 2 gone, and completes.
+	scan, err := store.BeginScan(ctx, acct, "INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ApplyScanPage(ctx, scan.ID, nil, nil, nil, "poisoned"); err != nil {
+		t.Fatal(err)
+	}
+	ad := &rejectCursorAdapter{reject: "poisoned"}
+	ad.boxes = []Mailbox{{ID: "INBOX", Name: "INBOX"}}
+	ad.pages = []*Changes{{
+		Changes:  []Change{created(envelope("1", "INBOX")), created(envelope("3", "INBOX"))},
+		Next:     "fresh-terminal",
+		Complete: true,
+	}}
+	rep, err := eng.SyncMailbox(ctx, acct, "INBOX", ad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.Reset {
+		t.Error("report did not record the replacement")
+	}
+	if _, err := store.Envelope(ctx, acct, NativeMessageID(ProviderIMAP, "2")); !errors.Is(err, ErrNoStore) {
+		t.Error("message 2 (absent from the complete replacement enumeration) survived")
+	}
+	if _, err := store.Envelope(ctx, acct, NativeMessageID(ProviderIMAP, "3")); err != nil {
+		t.Error("message 3 (present in the replacement) was not stored")
+	}
+}
+
+// Destroyed evidence from an enumeration's own catch-up removes the
+// message from the staged seen set AND the live membership — a message
+// deleted at the provider mid-enumeration must not ride the seen set into
+// survival (audit 5 SYNC-04).
+func TestStagedScanAppliesDestroyedEvidence(t *testing.T) {
+	_, store, acct, _ := stagedScenario(t)
+	ctx := context.Background()
+
+	// Page one stages the mailbox as [1, 2, 3]; the provider then
+	// destroys message 1 before the terminal page completes. Without the
+	// destroyed-evidence path, 1's staged presence would ride the seen
+	// set into survival.
+	scan, err := store.BeginScan(ctx, acct, "INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ApplyScanPage(ctx, scan.ID,
+		[]Envelope{envelope("1", "INBOX"), envelope("3", "INBOX")},
+		[]MessageID{NativeMessageID(ProviderIMAP, "1"), NativeMessageID(ProviderIMAP, "2"), NativeMessageID(ProviderIMAP, "3")},
+		nil, "page-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ApplyScanPage(ctx, scan.ID, nil, nil,
+		[]MessageID{NativeMessageID(ProviderIMAP, "1")}, "terminal"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinishScan(ctx, acct, "INBOX", scan.ID, "terminal"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Envelope(ctx, acct, NativeMessageID(ProviderIMAP, "1")); !errors.Is(err, ErrNoStore) {
+		t.Error("destroyed message 1 survived the scan")
+	}
+	for _, id := range []string{"2", "3"} {
+		if _, err := store.Envelope(ctx, acct, NativeMessageID(ProviderIMAP, id)); err != nil {
+			t.Errorf("live message %s did not survive: %v", id, err)
+		}
+	}
+}
+
+// A reconciliation retry must RESUME its generation's staged progress and
+// SKIP mailboxes that generation already completed — never re-request page
+// one of anything (audit 5 SYNC-05).
+func TestRequestRescanVersionPreservesProgressAcrossRetries(t *testing.T) {
+	eng, store, acct := setup(t)
+	ctx := context.Background()
+
+	ad := &scriptedAdapter{
+		boxes: []Mailbox{{ID: "INBOX", Name: "INBOX"}, {ID: "Archive", Name: "Archive"}},
+	}
+	// Archive completes on the first pass; INBOX is still mid-scan.
+	archivePages := []*Changes{{
+		Changes:  []Change{created(envelope("a1", "Archive"))},
+		Next:     "archive-terminal",
+		Complete: true,
+	}}
+	inboxPage := &Changes{
+		Changes: []Change{created(envelope("1", "INBOX"))},
+		Next:    "inbox-page-1",
+	}
+
+	// RequestRescanVersion for generation 7, then sync: Archive completes,
+	// INBOX stages one page.
+	if err := eng.RequestRescanVersion(ctx, acct, ad, 7); err != nil {
+		t.Fatal(err)
+	}
+	ad.pages = archivePages
+	if _, err := eng.SyncMailbox(ctx, acct, "Archive", ad); err != nil {
+		t.Fatal(err)
+	}
+	ad.call = 0
+	ad.pages = []*Changes{inboxPage}
+	if _, err := eng.SyncMailbox(ctx, acct, "INBOX", ad); err != nil {
+		t.Fatal(err)
+	}
+
+	// The retry: same generation, new RequestRescanVersion call — the
+	// destructive old behavior restarted BOTH mailboxes from page one.
+	if err := eng.RequestRescanVersion(ctx, acct, ad, 7); err != nil {
+		t.Fatal(err)
+	}
+	if scans, _ := store.RunningScans(ctx, acct); len(scans) != 1 {
+		t.Fatalf("retry restarted scans: %d running, want only INBOX's", len(scans))
+	}
+	scan, err := store.RunningScan(ctx, acct, "INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.Generation != 7 {
+		t.Fatalf("INBOX scan generation = %d, want 7", scan.Generation)
+	}
+	if scan.Continuation != "inbox-page-1" {
+		t.Fatalf("INBOX staged continuation = %q, want the preserved inbox-page-1", scan.Continuation)
+	}
+	done, err := store.ScanDone(ctx, acct, "Archive", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !done {
+		t.Error("Archive's completion marker was lost with its scan rows")
+	}
+
+	// The resumed INBOX scan finishes from its stored continuation — page
+	// one is NOT requested again.
+	ad.call = 0
+	ad.seenCursors = nil
+	ad.pages = []*Changes{{
+		Changes:  []Change{created(envelope("2", "INBOX"))},
+		Next:     "inbox-terminal",
+		Complete: true,
+	}}
+	if _, err := eng.SyncMailbox(ctx, acct, "INBOX", ad); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range ad.seenCursors {
+		if c == "" {
+			t.Fatal("the retry re-requested page one of INBOX instead of resuming")
+		}
+	}
+	if scans, _ := store.RunningScans(ctx, acct); len(scans) != 0 {
+		t.Fatalf("scans still running after completion: %d", len(scans))
 	}
 }
