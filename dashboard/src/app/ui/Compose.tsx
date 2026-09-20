@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { accounts, closeCompose, compose, cycleDraft, draftIndex, draftsUnsaved, draftStack, newDraft, retireDraft, showToast, undoSeconds, updateDraft, type ComposeState } from "../lib/store";
+import { accounts, closeCompose, compose, cycleDraft, draftIndex, draftsUnsaved, draftStack, newDraft, retireDraft, showToast, undoSeconds, updateDraft, updateDraftById, type ComposeState } from "../lib/store";
 import { sendMail, type SendAttachment } from "../lib/actions";
-import { deleteDraft, saveDraftAttachments, saveDraftFields } from "../lib/offline";
+import { deleteDraft, saveDraftFields } from "../lib/offline";
 
 const previewPolicy = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data: cid:; style-src \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'">';
 
@@ -78,41 +78,69 @@ function DraftForm({ seed }: { seed: ComposeState }) {
 
   const fileBytes = attachments.reduce((n, a) => n + Math.round(a.dataBase64.length * 3 / 4), 0);
 
+  // Pending file reads for THIS draft (audit 5 DRAFT-02): a read that
+  // started while the composer was idle used to complete after send or a
+  // draft switch — the message left without the file, or the completion
+  // wrote into a retired slot. Send eligibility requires zero pending.
+  const [pendingReads, setPendingReads] = useState(0);
+
   const addFiles = async (files: FileList | null) => {
     // No additions while submitting — the send already captured its set
     // (audit 4 F03).
     if (!files || busy || sending.current) return;
     const next: SendAttachment[] = [];
-    for (const f of files) {
-      const att = await fileToAttachment(f);
-      if (att) { next.push(att); }
+    setPendingReads((n) => n + files.length);
+    try {
+      for (const f of files) {
+        const att = await fileToAttachment(f);
+        if (att) { next.push(att); }
+      }
+    } finally {
+      setPendingReads((n) => Math.max(0, n - files.length));
     }
-    if (next.length) {
-      // Functional merge: two selections decoding concurrently must not
-      // overwrite one another (audit WEB-06).
-      setAttachments((current) => [...current, ...next]);
-    }
+    if (!next.length) return;
+    if (retired.current) return; // the draft ended mid-read: discard
+    // Functional merge: two selections decoding concurrently must not
+    // overwrite one another (audit WEB-06). The merged set lands in the
+    // draft stack — the single authoritative document — so the carousel
+    // seed, the flush, and this component can never disagree about what
+    // the draft carries (audit 5 DRAFT-01).
+    setAttachments((current) => {
+      const merged = [...current, ...next];
+      updateDraftById(seed.id, { attachments: merged });
+      return merged;
+    });
   };
 
   const removeAttachment = (i: number) => {
     if (busy || sending.current) return;
-    setAttachments((current) => current.filter((_, idx) => idx !== i));
+    setAttachments((current) => {
+      const next = current.filter((_, idx) => idx !== i);
+      updateDraftById(seed.id, { attachments: next });
+      return next;
+    });
   };
 
   // An undo-restored seed carries its attachments in memory; they are
-  // re-persisted here into the draft's single record. Every other case
+  // written into the draft's single record here. Every other case
   // hydrates from that record already (no second engine to wait for).
+  // The stack patch and the record write carry the same payload — the
+  // stack is what later flushes read (audit 5 DRAFT-01).
   useEffect(() => {
-    if (!seed.attachments) return;
-    const seeded = [...seed.attachments];
-    queueSave(() => (retired.current ? Promise.resolve() : saveDraftAttachments(seed.id, seeded)));
+    const seeded = seed.attachments;
+    if (!seeded) return;
+    const payload = [...seeded];
+    updateDraftById(seed.id, { attachments: payload });
+    queueSave(() => (retired.current ? Promise.resolve() : saveDraftFields(seed.id, { attachments: payload })));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Attachment changes persist into the same record the fields do.
-  useEffect(() => {
-    queueSave(() => (retired.current ? Promise.resolve() : saveDraftAttachments(seed.id, attachments)));
-  }, [attachments, seed.id]);
+  // Attachment persistence rides the ONE flush path: attachment changes
+  // patch the draft stack (updateDraftById), the stack subscription
+  // schedules the debounced flush, and flushDrafts writes the whole
+  // record — fields AND attachments together. A separate per-change
+  // attachment writer here is what let a stale whole-draft flush
+  // overwrite the saved attachment list (audit 5 DRAFT-01).
 
   // Debounced autosave that FLUSHES on unmount: clearing the timer and
   // dropping a pending write left the per-draft snapshot older than the
@@ -141,8 +169,10 @@ function DraftForm({ seed }: { seed: ComposeState }) {
 
   const send = async () => {
     // The guard lives in send(), not only on the button: the keyboard path
-    // reaches here directly (audit 4 F03).
-    if (!to.trim() || busy || sending.current) return;
+    // reaches here directly (audit 4 F03). Pending file reads block the
+    // send — a message that leaves without its attachment is silent data
+    // loss (audit 5 DRAFT-02).
+    if (!to.trim() || busy || pendingReads > 0 || sending.current) return;
     sending.current = true;
     setBusy(true);
     let ok = false;
@@ -277,8 +307,8 @@ function DraftForm({ seed }: { seed: ComposeState }) {
       <div class="compose-btns">
         <span class="hint"><span class="kbd">⌘↵</span> send · <span class="kbd">Esc</span> park · <span class="kbd">c</span> new draft · {undoSeconds}s to undo</span>
         <button class="btn btn-ghost btn-sm" type="button" onClick={retireLocalDraft}>Discard</button>
-        <button class="btn btn-accent" type="button" disabled={!to.trim() || busy} onClick={send}>
-          {busy ? "Sending…" : "Send"}
+        <button class="btn btn-accent" type="button" disabled={!to.trim() || busy || pendingReads > 0} onClick={send}>
+          {busy ? "Sending…" : pendingReads > 0 ? "Reading files…" : "Send"}
         </button>
       </div>
     </>

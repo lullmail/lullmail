@@ -69,12 +69,25 @@ export function SecurityView() {
     setReauthBusy(true);
     try {
       await api("/security/reauthenticate", { body: { password: reauthPw } });
-      const retry = reauth.retry;
-      setReauth(null);
-      setReauthPw("");
+    } catch (e) {
+      // The CONFIRMATION failed: the modal is still up, so its own error
+      // slot is the right place.
+      setReauthErr(message(e, "Could not confirm"));
+      return;
+    }
+    const retry = reauth.retry;
+    // Close only what the password fields were for; the parked action
+    // stays pending until its retry resolves (audit 5 UI-01). A retry
+    // failure used to be written into modal state that had already been
+    // unmounted — the error disappeared with the dialog.
+    setReauthPw("");
+    setReauth(null);
+    try {
       await retry();
     } catch (e) {
-      setReauthErr(message(e, "Could not confirm"));
+      // The retried action failed: surface it in the page-level error
+      // slot, which is visible after the modal closed.
+      setMutationError(message(e, "The confirmed action failed"));
     } finally {
       setReauthBusy(false);
     }
@@ -101,9 +114,15 @@ export function SecurityView() {
     if (!name) return;
     setBusy("passkey");
     try {
-      const options = await api<Record<string, unknown>>("/security/passkeys/begin", { method: "POST" });
-      const credential = await createPasskey(options);
-      await api("/security/passkeys/finish?name=" + encodeURIComponent(name), { body: credential });
+      // Enrolling a passkey installs a durable credential and now sits
+      // behind the fresh-proof gate like every other enrollment (audit 5
+      // AUTH-01): a 428 parks the whole ceremony here and retries it
+      // after confirmation — a NEW ceremony, never the expired one.
+      await gated(async () => {
+        const options = await api<Record<string, unknown>>("/security/passkeys/begin", { method: "POST" });
+        const credential = await createPasskey(options);
+        await api("/security/passkeys/finish?name=" + encodeURIComponent(name), { body: credential });
+      });
       showToast("Passkey added"); await load();
     } catch (e) { report(e, "Could not add passkey"); }
     finally { setBusy(""); }
@@ -297,7 +316,7 @@ export function SecurityView() {
         <div class="settings-section-head"><div><h2>Passkeys</h2><p>Device-bound credentials with user verification. Optional — a password is enough to sign in.</p></div>
           <button class="btn btn-primary btn-sm" type="button" disabled={!!busy} onClick={addPasskey}>{busy === "passkey" ? "Waiting…" : "Add passkey"}</button></div>
         {security.passkeys.map((key) => <div class="security-row" key={key.id}><div><strong>{key.name}</strong><span>Added {fmtDate(key.created_at)}{key.last_used_at ? " · used " + fmtDate(key.last_used_at) : " · not used yet"}</span></div>
-          <button class="btn btn-quiet-danger btn-sm" type="button" disabled={!canRemovePasskey} onClick={async () => { try { await api("/security/passkeys/" + encodeURIComponent(key.id), { method: "DELETE" }); await load(); } catch (e) { report(e, "Could not remove passkey"); } }}>Remove</button></div>)}
+          <button class="btn btn-quiet-danger btn-sm" type="button" disabled={!canRemovePasskey} onClick={async () => { try { await gated(async () => { await api("/security/passkeys/" + encodeURIComponent(key.id), { method: "DELETE" }); }); await load(); } catch (e) { report(e, "Could not remove passkey"); } }}>Remove</button></div>)}
       </section>
 
       <section class="settings-section">

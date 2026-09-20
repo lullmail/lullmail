@@ -70,8 +70,34 @@ export function clearMemoryCache() {
   memoryResponses.clear();
 }
 
+/** The memory cache key is owner+generation-scoped (audit 5 OFF-02): a
+ *  route-only key let owner B's first read hit owner A's cached private
+ *  response after an in-browser owner switch, and nothing tied entries
+ *  to the generation that fetched them. */
+function memoryKey(owner: string, gen: number, path: string): string {
+  return owner + "\n" + gen + "\n" + path;
+}
+
 function copyValue<T>(value: T): T {
   return typeof structuredClone === "function" ? structuredClone(value) : value;
+}
+
+/** A stale owner snapshot — the fetch began under one owner/generation
+ *  and the device is now under another. The private response must not be
+ *  published to the new owner's UI, cached, or queued (audit 5 OFF-02). */
+export class StaleOwnerError extends Error {
+  constructor() {
+    super("the account changed during the operation");
+  }
+}
+
+function assertOwner(owner: string, gen: number): void {
+  // No prepared offline namespace (fresh page before auth, or a test
+  // environment): there is no owner identity to fence on.
+  if (!owner) return;
+  if (offlineOwner() !== owner || !generationCurrent(gen)) {
+    throw new StaleOwnerError();
+  }
 }
 
 async function request<T>(path: string, opts: Opts = {}, setupToken = "", protectedRoute = true): Promise<T> {
@@ -84,9 +110,12 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
   const queueable = protectedRoute && canQueue(path, opts.method || (opts.body !== undefined ? "POST" : "GET"));
   const idempotencyKey = queueable ? newMutationKey() : undefined;
   if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
-  // The generation fences this async read against an owner switch: if the
-  // owner changes while the request is in flight, the result is discarded
-  // — never cached, never published (audit WEB-07/R08).
+  // The owner snapshot fences this whole operation against an owner
+  // switch: if the owner or generation changes while the request is in
+  // flight, the result is discarded — never cached, never queued, never
+  // returned to the caller as the new owner's data (audit WEB-07/R08,
+  // 5 OFF-02).
+  const owner = offlineOwner();
   const gen = offlineGeneration();
   let body: string | undefined;
   if (opts.body !== undefined) {
@@ -95,9 +124,9 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
   }
   const method = opts.method || (body ? "POST" : "GET");
   if (protectedRoute && method === "GET" && !opts.fresh) {
-    const cached = memoryResponses.get(path);
+    const cached = memoryResponses.get(memoryKey(owner, gen, path));
     if (cached && Date.now() - cached.savedAt < MEMORY_TTL) return copyValue(cached.value as T);
-    if (cached) memoryResponses.delete(path);
+    if (cached) memoryResponses.delete(memoryKey(owner, gen, path));
   }
   let res: Response;
   try {
@@ -109,6 +138,10 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
       if (cached !== undefined) return cached;
     }
     if (queueable) {
+      // The failed mutation is queued under the owner that INTENDED it:
+      // an owner switch during the flight used to queue it under the new
+      // owner (audit 5 OFF-02).
+      assertOwner(owner, gen);
       await queueMutation(path, method, opts.body, idempotencyKey);
       throw new QueuedOffline();
     }
@@ -130,10 +163,14 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
     throw new ApiError(detail, res.status);
   }
   const value = (await res.json()) as T;
-  if (protectedRoute && method === "GET" && generationCurrent(gen)) {
-    memoryResponses.set(path, { savedAt: Date.now(), value: copyValue(value) });
+  // A late private response is rejected before publication, not merely
+  // before caching: returning it handed the previous owner's data to
+  // whoever is on screen now (audit 5 OFF-02).
+  if (protectedRoute) assertOwner(owner, gen);
+  if (protectedRoute && method === "GET") {
+    memoryResponses.set(memoryKey(owner, gen, path), { savedAt: Date.now(), value: copyValue(value) });
     cacheResponse(path, value, gen).catch(() => {});
-  } else if (protectedRoute && res.ok) {
+  } else {
     // A mutation invalidates the in-memory cache only. The persisted
     // offline snapshots are the ONLY offline copy of the mailbox —
     // deleting them on every note or read-state change made the next
@@ -160,6 +197,7 @@ export async function refreshAuth(): Promise<AuthStatus> {
     authed.value = status.authenticated;
     if (!status.authenticated) memoryResponses.clear();
     if (status.authenticated && status.email) {
+      const previousOwner = offlineOwner();
       try {
         await prepareOfflineOwner(status);
       } catch (storageError) {
@@ -172,6 +210,9 @@ export async function refreshAuth(): Promise<AuthStatus> {
         suspendOfflineStorage();
         console.warn("Offline storage unavailable; offline mailbox disabled", storageError);
       }
+      // An owner switch starts a fresh memory namespace; the old owner's
+      // entries must not linger behind their TTL (audit 5 OFF-02).
+      if (offlineOwner() !== previousOwner) memoryResponses.clear();
     }
     return status;
   } catch (error) {
@@ -189,6 +230,9 @@ export async function refreshAuth(): Promise<AuthStatus> {
     throw error;
   } finally {
     authReady.value = true;
+    // The offline replay driver waits for this confirmation before its
+    // first pass (audit 5 OFF-02).
+    try { window.dispatchEvent(new Event("lullmail-auth-refreshed")); } catch { /* non-browser */ }
   }
 }
 

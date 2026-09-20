@@ -83,3 +83,46 @@ describe("single-record drafts (audit F05)", () => {
     expect(drafts[0].attachments).toEqual([{ filename: "a.txt", contentType: "text/plain", dataBase64: "QQ==" }]);
   });
 });
+
+describe("v1 migration failure keeps the only copies (audit 5 OFF-01)", () => {
+  it("leaves legacy localStorage drafts and no completion marker when the copy fails", async () => {
+    // Legacy v1 state: ring metadata + field slots under the old owner.
+    localStorage.setItem("es-offline-owner", "a@example.com");
+    localStorage.setItem("es-drafts", JSON.stringify([{ id: "d1" }]));
+    localStorage.setItem("es-draft-d1", JSON.stringify({ to: "x@example.com", subject: "s", body: "private text" }));
+
+    // A storage failure at copy time: every readwrite transaction on the
+    // offline DB throws synchronously (a quota-style hard failure).
+    const realIDB = indexedDB;
+    const failingDB = {
+      transaction() { throw new DOMException("simulated quota failure", "AbortError"); },
+      close() { /* nothing to close */ },
+    };
+    const failingOpen = ((_name: string, _version?: number) => {
+      const req: {
+        onsuccess: ((ev: Event) => void) | null;
+        onerror: ((ev: Event) => void) | null;
+        onblocked: ((ev: Event) => void) | null;
+        onupgradeneeded: ((ev: Event) => void) | null;
+        result: unknown;
+        error: DOMException | null;
+      } = { onsuccess: null, onerror: null, onblocked: null, onupgradeneeded: null, result: failingDB, error: null };
+      setTimeout(() => req.onsuccess?.({ target: req } as unknown as Event), 0);
+      return req;
+    }) as typeof indexedDB.open;
+    (globalThis as { indexedDB: typeof indexedDB }).indexedDB = failingOpen as unknown as typeof indexedDB;
+
+    try {
+      await prepareOfflineOwner({ installation_id: "inst1", user_id: "u1", email: "a@example.com" });
+    } finally {
+      (globalThis as { indexedDB: typeof indexedDB }).indexedDB = realIDB;
+    }
+
+    // The migration failed: the completion marker is UNSET, and every
+    // legacy source key survives — the next boot can retry the copy.
+    expect(localStorage.getItem("lull-offline-v2")).toBeNull();
+    expect(localStorage.getItem("es-drafts")).not.toBeNull();
+    expect(localStorage.getItem("es-draft-d1")).not.toBeNull();
+    expect(localStorage.getItem("es-offline-owner")).not.toBeNull();
+  });
+});

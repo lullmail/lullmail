@@ -82,7 +82,7 @@ function openDB(): Promise<IDBDatabase> {
     // A held connection in another tab must surface as an actionable
     // storage error, not a silent hang (audit 3 WEB-08).
     request.onblocked = () => reject(new OfflineStorageError("Close other Lullmail tabs to update offline storage"));
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event: IDBVersionChangeEvent) => {
       const db = request.result;
       if (!db.objectStoreNames.contains(CACHE)) db.createObjectStore(CACHE, { keyPath: "key" });
       if (!db.objectStoreNames.contains(QUEUE)) db.createObjectStore(QUEUE, { keyPath: "id" });
@@ -92,8 +92,9 @@ function openDB(): Promise<IDBDatabase> {
       // never be read again, so the upgrade drops them. The mutations
       // queue and attachment rows survive for the one-time v2 migration
       // (pending offline work and parked drafts are real user data).
-      const upgrade = request as IDBOpenDBRequest & { oldVersion?: number };
-      if (request.transaction && (upgrade.oldVersion ?? 0) > 0) {
+      // The PREVIOUS version comes from the version-change event, not
+      // the request object (audit 5 OFF-01).
+      if (request.transaction && event.oldVersion > 0) {
         request.transaction.objectStore(CACHE).clear();
       }
     };
@@ -220,7 +221,6 @@ export async function prepareOfflineOwner(identity: OfflineOwnerIdentity): Promi
 
 async function migrateV1Storage(ns: string, email: string): Promise<void> {
   if (localStorage.getItem(V2_KEY) || typeof indexedDB === "undefined") return;
-  localStorage.setItem(V2_KEY, "1");
   const v1Owner = localStorage.getItem(OWNER);
   const sameOwner = v1Owner !== null && v1Owner === email;
   try {
@@ -232,7 +232,9 @@ async function migrateV1Storage(ns: string, email: string): Promise<void> {
           tx.oncomplete = () => resolve();
           tx.onabort = () => reject(tx.error ?? new OfflineStorageError("v2 migration aborted"));
           // Pending offline mutations keep their ids (idempotency keys)
-          // and their order; only the namespace field is rewritten.
+          // and their order; only the namespace field is rewritten. The
+          // puts are idempotent, so an interruption during cleanup is
+          // safe to retry.
           const queue = tx.objectStore(QUEUE);
           const queueRows = queue.getAll();
           queueRows.onsuccess = () => {
@@ -257,15 +259,22 @@ async function migrateV1Storage(ns: string, email: string): Promise<void> {
     } else {
       await clearOfflineData();
     }
+    // The migration's commit boundary (audit 5 OFF-01): the completion
+    // marker is written ONLY after the copy committed, and the legacy
+    // keys are removed only after that. A quota error or aborted
+    // transaction used to leave the marker set and the source drafts
+    // deleted — the only copies gone. On any failure the originals stay
+    // and the next boot retries the idempotent copy.
+    localStorage.setItem(V2_KEY, "1");
+    for (const key of Object.keys(localStorage)) {
+      if (key === "es-drafts" || key.startsWith("es-draft-")) localStorage.removeItem(key);
+    }
+    localStorage.removeItem(OWNER);
   } catch (error) {
-    // The migration is best-effort by design: failing it must not log the
-    // owner out or suspend storage over data that was already local-only.
-    console.warn("offline v2 storage migration did not complete", error);
+    // Nothing was destroyed: legacy data stays exactly as it was, the
+    // marker stays unset, and the next boot retries.
+    console.warn("offline v2 storage migration did not complete; legacy data left intact", error);
   }
-  for (const key of Object.keys(localStorage)) {
-    if (key === "es-drafts" || key.startsWith("es-draft-")) localStorage.removeItem(key);
-  }
-  localStorage.removeItem(OWNER);
 }
 
 /** The v1 ring lived in localStorage ("es-drafts" metadata plus one
@@ -409,25 +418,33 @@ export function replayRequestInit(item: Pick<Queued, "method" | "body" | "key">)
 }
 
 /** Web Locks coordinate replay across tabs (audit WEB-04): the lock is
- *  held for one whole replay pass, and a tab that cannot take it skips —
- *  the holder refreshes shared state when it finishes. Without the
- *  server contract this would only have narrowed the duplicate window;
- *  with api_mutations recorded server-side it is now safe coordination
- *  rather than an implied guarantee. */
+ * held for one whole replay pass, and a tab that cannot take it SKIPS —
+ * the holder refreshes shared state when it finishes. Without the
+ * server contract this would only have narrowed the duplicate window;
+ * with api_mutations recorded server-side it is now safe coordination
+ * rather than an implied guarantee.
+ *
+ * The callback's argument is load-bearing (audit 5 OFF-03): with
+ * ifAvailable, a CONTENDED lock invokes it with null — passing `run`
+ * through directly executed a second replay pass next to the holder's.
+ * A lock-manager failure still falls back to an uncoordinated pass (safe
+ * under the server contract), but a failure INSIDE the worker now
+ * propagates instead of re-running the worker outside the lock. */
 const REPLAY_LOCK = "lullmail-offline-replay";
 
 export async function withReplayLock<T>(run: () => Promise<T>): Promise<T | undefined> {
   const locks = (navigator as Navigator & {
-    locks?: { request(name: string, options: { ifAvailable: true }, callback: () => Promise<T>): Promise<T | undefined> };
+    locks?: { request(name: string, options: { ifAvailable: true }, callback: (lock: unknown) => Promise<T>): Promise<T | undefined> };
   }).locks;
-  if (!locks) return run();
-  try {
-    return await locks.request(REPLAY_LOCK, { ifAvailable: true }, run);
-  } catch {
-    // A lock-manager failure must not strand the queue: an uncoordinated
-    // pass can still only commit each item once (server-side keying).
+  if (!locks) {
+    // No lock manager: the server's idempotency contract is the whole
+    // coordination story; the pass runs uncoordinated.
     return run();
   }
+  return locks.request(REPLAY_LOCK, { ifAvailable: true }, async (lock) => {
+    if (lock === null) return undefined; // another tab holds the pass
+    return run();
+  });
 }
 
 export type ReplayDecision = "committed" | "reauth" | "retry" | "failed";
@@ -499,7 +516,10 @@ export function replayPlan<T extends { owner: string; queuedAt: number; nextAtte
 
 /** One ordered replay pass over this owner's queue (oldest first, a
  *  backed-off head stops the pass — audit 4 F09). Runs under the
- *  cross-tab replay lock when the browser offers one. */
+ *  cross-tab replay lock when the browser offers one. The generation is
+ *  re-checked before EVERY send and every queue write: an owner switch
+ *  mid-pass must stop the pass, never replay the previous owner's
+ *  mutations under the new session (audit 5 OFF-02). */
 async function replayDueMutations(): Promise<ReplaySummary> {
   const gen = offlineGeneration();
   const all = await transaction<Queued[]>(QUEUE, "readonly", (store) => store.getAll());
@@ -507,12 +527,18 @@ async function replayDueMutations(): Promise<ReplaySummary> {
   const now = Date.now();
   let committed = 0;
   let rejected = 0;
-  let retryAt: number | undefined;
-  for (const item of replayPlan(all, offlineOwner(), now).due) {
+  const plan = replayPlan(all, offlineOwner(), now);
+  // A persisted backoff from an earlier attempt must reach the driver's
+  // scheduler, or a reload with nothing due schedules no retry until some
+  // unrelated event fires (audit 5 OFF-04).
+  let retryAt = plan.retryAt;
+  for (const item of plan.due) {
+    if (!generationCurrent(gen)) break; // owner changed: stop the pass
     let response: Response;
     try {
       response = await fetch("/api" + item.path, replayRequestInit(item));
     } catch {
+      if (!generationCurrent(gen)) break; // owner changed: no writeback
       // A network-level failure while navigator.onLine can still be true:
       // give the queue head a backoff slot and schedule the retry, or the
       // work strands until some later navigation or connectivity event
@@ -526,6 +552,7 @@ async function replayDueMutations(): Promise<ReplaySummary> {
     const decision = replayDecision(response.status);
     if (decision === "reauth") break;
     if (decision === "retry") {
+      if (!generationCurrent(gen)) break;
       const attempts = (item.attempts ?? 0) + 1;
       const delay = retryDelay(attempts, response.headers.get("Retry-After"));
       retryAt = retryAt === undefined ? now + delay : Math.min(retryAt, now + delay);
@@ -533,6 +560,7 @@ async function replayDueMutations(): Promise<ReplaySummary> {
       break; // keep the rest queued behind this one, in order
     }
     if (decision === "failed") {
+      if (!generationCurrent(gen)) break;
       // Permanently invalid: keep a marked record for visibility instead
       // of counting it as replayed, and let detail show what rejected it.
       let detail = String(response.status);
@@ -545,6 +573,7 @@ async function replayDueMutations(): Promise<ReplaySummary> {
       rejected++;
       continue;
     }
+    if (!generationCurrent(gen)) break;
     await transaction(QUEUE, "readwrite", (store) => store.delete(item.id));
     committed++;
   }
@@ -641,11 +670,16 @@ export async function deleteDraft(id: string): Promise<void> {
   await transaction(DRAFTS, "readwrite", (store) => store.delete(id));
 }
 
-export function startOfflineData(): () => void {
+export function startOfflineData(authenticated: () => boolean = () => true): () => void {
   // Replayed state refreshes whatever is on screen; the persisted offline
   // snapshots STAY — a mutation is invalidation, not a reason to delete
   // the only offline copy of the mailbox (audit 3 WEB-06). Fresh GETs
   // overwrite the snapshots they replace.
+  //
+  // Replay waits for a CONFIRMED authenticated session (audit 5 OFF-02):
+  // the pass used to start before refreshAuth resolved, so a previous
+  // owner's queued mutations could replay under whatever session cookie
+  // the browser holds before the server confirmed the namespace matches.
   let timer: number | undefined;
   // An in-flight replay must not schedule a new timer after the cleanup
   // function has run: unmount would leave an orphaned retry loop (audit
@@ -653,6 +687,11 @@ export function startOfflineData(): () => void {
   let stopped = false;
   const replay = () => {
     if (stopped) return;
+    if (!authenticated()) {
+      // Not yet confirmed: the auth refresh re-triggers replay via its
+      // own refresh path once the session is known.
+      return;
+    }
     replayMutations().then(async (summary) => {
       if (stopped) return;
       if (summary.committed > 0) {
@@ -672,7 +711,7 @@ export function startOfflineData(): () => void {
   const scheduleRetry = (at: number) => {
     if (stopped) return;
     if (timer !== undefined) window.clearTimeout(timer);
-    const delay = Math.max(0, at - Date.now());
+    const delay = Math.max(0, Math.min(at - Date.now(), 2_147_000_000)); // timer-range cap
     // A transient failure while still online must schedule its own next
     // attempt instead of waiting for a navigation or network transition
     // (audit 3 WEB-05).
@@ -682,9 +721,14 @@ export function startOfflineData(): () => void {
     }, delay);
   };
   window.addEventListener("online", replay); replay();
+  const retryWhenAuthenticated = () => {
+    if (!stopped && authenticated()) replay();
+  };
+  window.addEventListener("lullmail-auth-refreshed", retryWhenAuthenticated);
   return () => {
     stopped = true;
     window.removeEventListener("online", replay);
+    window.removeEventListener("lullmail-auth-refreshed", retryWhenAuthenticated);
     if (timer !== undefined) window.clearTimeout(timer);
   };
 }

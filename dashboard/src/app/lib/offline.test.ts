@@ -140,3 +140,61 @@ describe("replay lock (audit WEB-04)", () => {
     expect(ran).toBe("done");
   });
 });
+
+describe("replay lock contract (audit 5 OFF-03)", () => {
+  const lockShim = (granted: boolean) => ({
+    request: async (_name: string, _opts: { ifAvailable: true }, cb: (lock: unknown) => Promise<unknown>) =>
+      cb(granted ? { name: _name } : null),
+  });
+
+  it("a contended (null) lock runs ZERO mutations — the holder owns the pass", async () => {
+    let ran = 0;
+    const out = await withReplayLock(async () => { ran++; return "done"; }).catch(() => undefined);
+    // Without a lock manager the pass runs; install the contended shim.
+    expect(ran).toBe(1);
+    const nav = navigator as Navigator & { locks?: unknown };
+    const previous = nav.locks;
+    (nav as { locks?: unknown }).locks = lockShim(false);
+    let ran2 = 0;
+    try {
+      const result = await withReplayLock(async () => { ran2++; return "done"; });
+      expect(result).toBeUndefined();
+      expect(ran2).toBe(0); // the null lock must not execute the pass
+    } finally {
+      (nav as { locks?: unknown }).locks = previous;
+    }
+  });
+
+  it("a worker error propagates — it is never re-run outside the lock", async () => {
+    const nav = navigator as Navigator & { locks?: unknown };
+    const previous = nav.locks;
+    (nav as { locks?: unknown }).locks = lockShim(true);
+    let ran = 0;
+    try {
+      await expect(withReplayLock(async () => {
+        ran++;
+        throw new Error("write failed");
+      })).rejects.toThrow("write failed");
+      expect(ran).toBe(1);
+    } finally {
+      (nav as { locks?: unknown }).locks = previous;
+    }
+  });
+});
+
+describe("persisted backoff reaches the replay driver (audit 5 OFF-04)", () => {
+  it("replayMutations returns the head's stored deadline when nothing is due", async () => {
+    const owner = "inst9/u9";
+    localStorage.setItem("lull-offline-ns", owner);
+    localStorage.setItem("lull-offline-gen", "4");
+    const head = { id: "q1", key: "q1", owner, path: "/messages/m/action", method: "POST", body: {}, queuedAt: 1000, attempts: 1, nextAttemptAt: Date.now() + 60_000 };
+    const tail = { id: "q2", key: "q2", owner, path: "/messages/m2/action", method: "POST", body: {}, queuedAt: 2000 };
+    const plan = replayPlan([head, tail], owner, Date.now());
+    expect(plan.due).toEqual([]);
+    expect(plan.retryAt).toBe(head.nextAttemptAt);
+    // Nothing newer may overtake the backed-off head either.
+    const plan2 = replayPlan([tail, head], owner, Date.now());
+    expect(plan2.due).toEqual([]);
+    expect(plan2.retryAt).toBe(head.nextAttemptAt);
+  });
+});

@@ -495,7 +495,14 @@ export interface ComposeState {
 
 let draftSeq = 0;
 function newDraftId(): string {
-  return "d" + Date.now().toString(36) + "-" + (draftSeq++).toString(36);
+  // crypto.randomUUID is the cross-tab uniqueness guarantee (audit 5
+  // DRAFT-02): time-plus-per-tab-counter could collide between two tabs
+  // creating a draft in the same millisecond, and one IndexedDB keyPath
+  // means a collision silently merges two different drafts.
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return "d" + crypto.randomUUID();
+  }
+  return "d" + Date.now().toString(36) + "-" + (draftSeq++).toString(36) + "-" + Math.random().toString(16).slice(2, 8);
 }
 
 /** Every open draft. The active one is draftStack[draftIndex]. */
@@ -635,6 +642,20 @@ export function updateDraft(patch: Partial<ComposeState>) {
     stack[at] = { ...stack[at], ...patch };
     draftStack.value = stack;
   }
+}
+
+/** Patch one draft BY ID (audit 5 DRAFT-01): attachment changes must
+    update the exact draft they belong to — patching by index would land
+    on whichever draft the carousel shows after a mid-save cycle. The
+    stack is the single authoritative document; every writer (text,
+    attachments, account) patches it and ONE persistence path flushes
+    the whole record. */
+export function updateDraftById(id: string, patch: Partial<ComposeState>) {
+  const stack = [...draftStack.value];
+  const at = stack.findIndex((d) => d.id === id);
+  if (at < 0) return;
+  stack[at] = { ...stack[at], ...patch };
+  draftStack.value = stack;
 }
 
 /** The carousel: rotate through open drafts, wrapping around. */

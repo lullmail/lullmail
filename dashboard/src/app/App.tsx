@@ -261,7 +261,8 @@ export default function App() {
     startRouter();
     const offKeys = installKeys();
     const offPWA = startPWA();
-    const offData = startOfflineData();
+    // Replay waits for a confirmed authenticated session (audit 5 OFF-02).
+    const offData = startOfflineData(() => authReady.value && authed.value);
     refreshAuth().catch(() => {});
     const refreshVisible = () => {
       if (!authed.value || document.visibilityState === "hidden") return;
