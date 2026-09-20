@@ -126,3 +126,41 @@ func TestClientRejectsTruncatedResponse(t *testing.T) {
 		t.Fatal("oversized response accepted")
 	}
 }
+
+// A remote LULL_URL over plain HTTP is refused — it would carry the agent
+// bearer token in cleartext; loopback HTTP stays usable for local
+// development; redirects may not leave the configured origin (audit 5
+// MCP-01).
+func TestOriginPolicyRejectsRemoteHTTP(t *testing.T) {
+	for _, raw := range []string{"https://lullmail.example", "http://localhost:8080", "http://127.0.0.1:9090"} {
+		if _, err := validateOrigin(raw); err != nil {
+			t.Errorf("%s rejected: %v", raw, err)
+		}
+	}
+	for _, raw := range []string{
+		"http://lullmail.example",
+		"https://user:pw@lullmail.example",
+		"https://lullmail.example?x=1",
+		"https://lullmail.example#f",
+		"not an origin",
+	} {
+		if _, err := validateOrigin(raw); err == nil {
+			t.Errorf("%s accepted", raw)
+		}
+	}
+	if _, err := newClient("http://lullmail.example", "tok"); err == nil {
+		t.Error("newClient accepted a remote HTTP origin")
+	}
+
+	base, _ := validateOrigin("https://lullmail.example")
+	policy := sameOriginRedirect(base)
+	if err := policy(&http.Request{URL: &url.URL{Scheme: "https", Host: "lullmail.example"}}, nil); err != nil {
+		t.Errorf("same-origin redirect rejected: %v", err)
+	}
+	if err := policy(&http.Request{URL: &url.URL{Scheme: "https", Host: "evil.example"}}, nil); err == nil {
+		t.Error("cross-origin redirect accepted")
+	}
+	if err := policy(&http.Request{URL: &url.URL{Scheme: "http", Host: "lullmail.example"}}, nil); err == nil {
+		t.Error("scheme-downgrade redirect accepted")
+	}
+}

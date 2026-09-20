@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -24,14 +26,56 @@ type client struct {
 const maxResponseBytes = 8 << 20
 
 func newClient(baseURL, token string) (*client, error) {
-	base, err := url.Parse(strings.TrimRight(baseURL, "/"))
-	if err != nil || base.Scheme == "" || base.Host == "" {
-		return nil, fmt.Errorf("LULL_URL must be an absolute origin like https://lullmail.com")
+	base, err := validateOrigin(baseURL)
+	if err != nil {
+		return nil, err
 	}
 	if token == "" {
 		return nil, fmt.Errorf("LULL_AGENT_TOKEN is required (create one in Lull Mail under Settings -> Security -> Agent tokens)")
 	}
-	return &client{base: base, token: token, http: &http.Client{Timeout: 60 * time.Second}}, nil
+	httpClient := &http.Client{Timeout: 60 * time.Second}
+	// Every request carries the agent bearer token; redirects stay inside
+	// the configured origin — a proxy redirect to some other host or a
+	// scheme downgrade must not silently forward it (audit 5 MCP-01).
+	httpClient.CheckRedirect = sameOriginRedirect(base)
+	return &client{base: base, token: token, http: httpClient}, nil
+}
+
+// validateOrigin enforces the credential-transport policy for the
+// configured LULL_URL (audit 5 MCP-01): a remote origin must be HTTPS —
+// a mistaken http:// configuration would send the agent token in
+// cleartext — with no userinfo, query, or fragment. Plain HTTP is
+// allowed only on literal loopback, where local development servers and
+// test fakes live.
+func validateOrigin(raw string) (*url.URL, error) {
+	base, err := url.Parse(strings.TrimRight(raw, "/"))
+	if err != nil || base.Scheme == "" || base.Host == "" || base.User != nil ||
+		base.RawQuery != "" || base.Fragment != "" {
+		return nil, fmt.Errorf("LULL_URL must be a clean absolute origin like https://lullmail.com")
+	}
+	if base.Scheme != "https" {
+		host := base.Hostname()
+		ip := net.ParseIP(host)
+		loopback := strings.EqualFold(host, "localhost") || (ip != nil && ip.IsLoopback())
+		if !(base.Scheme == "http" && loopback) {
+			return nil, fmt.Errorf("remote LULL_URL must use HTTPS (plain HTTP is allowed only on loopback)")
+		}
+	}
+	return base, nil
+}
+
+// sameOriginRedirect rejects cross-origin or downgrading redirects before
+// any credential-bearing request reaches the new destination.
+func sameOriginRedirect(base *url.URL) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("too many API redirects")
+		}
+		if !strings.EqualFold(req.URL.Scheme, base.Scheme) || !strings.EqualFold(req.URL.Host, base.Host) {
+			return errors.New("cross-origin API redirect rejected")
+		}
+		return nil
+	}
 }
 
 // apiError carries the server's problem+json detail, so tool failures read
