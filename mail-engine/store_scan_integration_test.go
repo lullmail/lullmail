@@ -455,3 +455,61 @@ func osGetenvTestURL(t *testing.T) string {
 	}
 	return url
 }
+
+// Scan generations on real PostgreSQL (audit 5 SYNC-05/SYNC-04):
+// BeginScanGeneration tags the rows, ApplyScanPage applies destroyed
+// evidence in the same transaction as the page, FinishScan records the
+// generation's completion marker, and PruneScanDone bounds the markers
+// to the live generation.
+func TestIntegrationScanGenerationsAndDestroyedEvidence(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	acct := seedScanMailbox(t, s)
+
+	scan, err := s.BeginScanGeneration(ctx, acct, "INBOX", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.Generation != 7 {
+		t.Fatalf("scan generation = %d, want 7", scan.Generation)
+	}
+
+	// Page one stages the whole mailbox as seen...
+	seen := []MessageID{HeaderMessageID("<k1@example.com>"), HeaderMessageID("<k2@example.com>")}
+	if err := s.ApplyScanPage(ctx, scan.ID, nil, seen, nil, "page-1"); err != nil {
+		t.Fatal(err)
+	}
+	// ...then the provider destroys k1 before completion: the destroyed ID
+	// leaves BOTH the staged seen set and the live membership.
+	destroyed := []MessageID{HeaderMessageID("<k1@example.com>")}
+	if err := s.ApplyScanPage(ctx, scan.ID, nil, nil, destroyed, "terminal"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.FinishScan(ctx, acct, "INBOX", scan.ID, "terminal"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Envelope(ctx, acct, HeaderMessageID("<k1@example.com>")); !errors.Is(err, ErrNoStore) {
+		t.Error("the destroyed message survived the scan's negative evidence")
+	}
+	if _, err := s.Envelope(ctx, acct, HeaderMessageID("<k2@example.com>")); err != nil {
+		t.Errorf("the live message did not survive: %v", err)
+	}
+
+	done, err := s.ScanDone(ctx, acct, "INBOX", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !done {
+		t.Fatal("the generation's completion marker was not recorded")
+	}
+	if err := s.PruneScanDone(ctx, acct, 8); err != nil {
+		t.Fatal(err)
+	}
+	done, err = s.ScanDone(ctx, acct, "INBOX", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done {
+		t.Error("PruneScanDone kept another generation's markers")
+	}
+}
