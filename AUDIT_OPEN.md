@@ -66,8 +66,18 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   re-authentication ceremony and AUTH-06 (pass 7) as the durable per-user
   TOTP budget (`b9c1027` server, `b889d95` dashboard) — all three leave
   this register.
+- Round 5 / audit 5 (2026-09-19, `AUDIT-CHATGPT-5.md`, 42 findings — 20
+  High, 19 Medium, 3 Low — pinned at `39e2518`, the first audit of the
+  offline-v2/lifecycle/re-auth/IMAP-threading surface): 34 findings fixed
+  across commits `806ace7`..`f4c44b8` (each message tagged `audit 5-<ID>`);
+  8 deferred below against standing or newly recorded architectural
+  decisions. No finding was assessed as a false positive — every
+  spot-checked finding reproduced against the pinned source; the TOTP
+  non-atomicity, the Graph multi-page completion loss, the offset-shift
+  JMAP enumeration hole, the destructive rescan retry, and the owner-delete
+  busy-connection failure all reproduced exactly as reported.
 
-Open items: 12 (all deferrals; 4 of them are remainders of partial fixes)
+Open items: 19 (all deferrals; 2 are remainders of partial fixes, 1 is the API-01/API-02 architectural pair)
 
 Standing decision: **SEND-01 = SEND-03 (pass 6) = lullmail-10 below.** The
 durable-outbox finding appears in both later reports; it is the same item
@@ -278,3 +288,67 @@ as this register's one recorded product deferral, and the deferral stands.
 
 - Evidence: Hardening per the report: SECRET_KEY accepts arbitrary text, agent tokens are broad and unexpiry'd, no key rotation/versioning.
 - Deferral: Key IDs + AEAD additional data with re-encryption migration, agent-token scopes/expiry with per-token migration, and documented retention semantics are each their own security-feature tasks; the secure defaults that exist today (generated 32-byte keys, agent route denylist, auth-surface fencing) hold the line meanwhile.
+
+## SEND-01 (audit 5) - High - DEFERRED (standing lullmail-10 product decision)
+
+**Accepted sends and their only recoverable draft can disappear**
+
+- Evidence: Confirmed per the report — the queue is in-process, worker errors are logged, the composer retires the draft on the queued response, and a restart or provider failure inside the window loses both. This is the same finding as SEND-01/SEND-03 (pass 7)/lullmail-10 above, restated with the full durable-outbox design; the recorded product deferral stands.
+- Contained hardening this round (audit 5 SEND-02/LIFE-03): send acceptance is idempotent within the acknowledged entry's lifetime (same Idempotency-Key + same body re-receives the same queued id; a different body under the key is 409), and a shutdown-refused worker now unrolls its budget/slot reservations and answers 503 instead of acknowledging a send that never ran. The beyond-restart contract remains the durable outbox the deferral describes.
+
+## SYNC-02 (audit 5) - High - DEFERRED (standing GRAPH-02/PROVIDER-01 decision)
+
+**Graph message identities are not made stable across folder moves**
+
+- Evidence: Confirmed; identical to GRAPH-02/PROVIDER-01 (pass 7) above — the `Prefer: IdType="ImmutableId"` header cannot roll out without translating every stored default-format ID across envelopes, bodies, memberships, product filing, and push receipts. The standing deferral and its provider-integration prerequisite are unchanged.
+
+## API-01 (audit 5) - High - DEFERRED (architectural); API-02 (audit 5) - Medium - DEFERRED with it
+
+**The mutation ledger is not atomic with the mutation it claims to make idempotent**
+
+- Evidence: Confirmed per the report — `withIdempotency` holds the ledger transaction open while the wrapped handler commits its own writes independently, so a crash between them rolls the ledger back but not the mutation. The register has never claimed otherwise: the wrapper's own comment records the exposure, and the round-4 fixes (WEB-04/R07) were scoped as the lost-acknowledgment contract, which the design does deliver.
+- Deferral: closing it for real means refactoring every mutable handler into transaction-aware domain functions (`localMutation func(ctx, *sql.Tx)`) across classify/board/notes/screener/accounts — the same handler-surface redesign API-02's transient-replay and metadata changes depend on (recording only 2xx answers is only safe once rollback actually rolls back the mutation; today replaying a recorded 5xx is the conservative contract, and a pass-6 regression pins it). One coordinated pass when that surface is next opened; the pool hold-and-wait shape the report also flags is bounded by the product pool's 16-connection cap.
+
+## OFF-02 (audit 5) - High - PARTIALLY FIXED (publication + queue + replay fences), transactional meta-store DEFERRED
+
+**Owner changes do not fence all asynchronous reads, writes, replay, and UI publication**
+
+- Evidence: Confirmed per the report — `request()` returned the private response to its caller even when the generation had gone stale, the memory cache was keyed by route only, a failed mutation could be queued under the NEW current owner, replay validated the generation once per pass instead of per send, and startup began replay before authentication settled.
+- Fixed (contained): the memory cache is namespaced owner+generation and cleared on an owner switch; a late private response is rejected before publication (StaleOwnerError), before caching, and before queueing; replay re-checks the generation before every send and every queue write; the replay driver waits for a confirmed authenticated session (startOfflineData gate + the auth-refreshed event); queue writes for a wiped generation can no longer land.
+- Deferral (remainder): the report's authoritative `meta` store — namespace/generation metadata INSIDE IndexedDB checked in the same readwrite transaction as every cache/draft/queue write, plus cross-tab broadcast — is the cross-cutting storage-engine change that makes the fence atomic rather than advisory. localStorage-based generation counters remain racy across tabs by construction; the server's idempotency keys and the per-item checks bound the damage, but the transactional gate is the real fix and lands as its own storage pass.
+
+## DRAFT-02 (audit 5) - Medium - PARTIALLY FIXED (send fence + unique IDs), revision/tombstone gate DEFERRED
+
+**Async attachment reads and delayed saves can outlive the draft they belong to**
+
+- Evidence: Confirmed per the report — a file read completing after send or a draft switch could write into a retired draft or miss the message; draft ids were time-plus-per-tab-counter.
+- Fixed: pending reads are counted per draft and send is blocked (and the button shows "Reading files…") until they finish; read completions check the retirement fence before touching state; new draft ids are `crypto.randomUUID()`.
+- Deferral (remainder): the report's monotonic per-draft REVISION with tombstone checks inside every IndexedDB draft transaction is the same transactional-meta-store machinery as OFF-02's remainder — one storage pass covers both. The aggregate attachment-byte budget reservation before reads is deferred with it (per-file caps and the server's 25 MiB total bound the exposure).
+
+## DATA-04 (audit 5) - Medium - DEFERRED (API pagination redesign)
+
+**Thread reads return unbounded cached message bodies despite a bounded eager-fetch count**
+
+- Evidence: Confirmed — the thread endpoint selects and serializes every message and cached body in a thread with no envelope-page bound; the eight-message eager-fetch limit bounds only NEW provider fetches.
+- Deferral: the fix is a response-contract change (paginated envelopes + per-message body endpoint + has_more semantics) across the server route, the dashboard reader, and the MCP read_thread tool — a redesign of the thread surface, not a repair. Single-operator installs hold bounded bodies per the mirror's retention; the reader already renders lazily per message. Deferred as its own API pass.
+
+## WEB-01 (audit 5) - Medium - DEFERRED (deployment lifecycle)
+
+**The service worker has no automatic deployment-versioned cache lifecycle**
+
+- Evidence: Confirmed — the cache name is a hand-maintained constant `lull-shell-v1`, so a dashboard build with unchanged worker source neither triggers a new install nor retires the previous cache, and fingerprinted assets accumulate.
+- Deferral: the fix is a build-pipeline change (content-derived BUILD_ID + complete asset manifest injected into the worker during `neutron-ts build`, coordinated activation) — deployment infrastructure, not an application repair; the shell is small and storage growth is slow, but the fix belongs to the next build-tooling pass.
+
+## WEB-02 (audit 5) - Medium - DEFERRED (conditional; verified sanitization pipeline needed)
+
+**Raw email HTML is parsed before remote-content removal can be guaranteed**
+
+- Evidence: Conditional per the report itself — the reader sanitizes by parsing with DOMParser and stripping/removing remote sources afterward, and MDN documents that a parsed inert document can still request resources; the report explicitly did not browser-verify any actual tracking request, and neither can this pass.
+- Deferral: the fail-safe fix (render stored plain text only, never parsing raw HTML, until consent) visibly degrades the default reading experience for every HTML message — a product decision about the privacy/UX trade, and the permanent fix (network-free server-side sanitizer before any browser parse) is its own pipeline. The iframe CSP keeps scripts and (pre-consent) images fenced; what is NOT proven is zero network requests during preprocessing.
+
+## WEB-03 (audit 5) - Medium - DEFERRED (cross-layer feature)
+
+**Inline cid images have no complete metadata-to-rendering path**
+
+- Evidence: Confirmed — the engine records Content-ID values and the sanitizer preserves `cid:` references, but the thread response exposes no inline-part mapping and the renderer has no path from a cid to authenticated bytes, so embedded images render broken.
+- Deferral: a cross-layer feature (engine inline-parts array + authenticated part endpoint + Blob-URL renderer with revoke discipline + CSP allowances), explicitly scoped in the report as new functionality rather than a defect repair; tracked as reader work.
