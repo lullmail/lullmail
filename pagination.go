@@ -21,13 +21,24 @@ const (
 
 // listCursor is the sort key of the last delivered row. ReceivedAt nil
 // means the tail of NULLS LAST has been reached (rows ordered by id
-// alone).
+// alone). Account disambiguates identical message ids across connected
+// accounts — provider ids are account-scoped, and two copies of the same
+// message can share id AND timestamp; without the account in the key,
+// the strict continuation comparison skipped the second copy at a page
+// boundary (audit 5 DATA-02).
 type listCursor struct {
+	V          int        `json:"v"`
 	ReceivedAt *time.Time `json:"r,omitempty"`
 	ID         string     `json:"i"`
+	Account    string     `json:"a"`
 }
 
+// cursorVersion is the account-scoped key shape. A cursor without it (or
+// with an unknown version) is rejected rather than silently reinterpreted.
+const cursorVersion = 2
+
 func encodeListCursor(c listCursor) string {
+	c.V = cursorVersion
 	raw, _ := json.Marshal(c)
 	return base64.RawURLEncoding.EncodeToString(raw)
 }
@@ -39,7 +50,7 @@ func decodeListCursor(s string) (listCursor, error) {
 		return c, err
 	}
 	err = json.Unmarshal(raw, &c)
-	if err == nil && c.ID == "" {
+	if err == nil && (c.V != cursorVersion || c.ID == "" || c.Account == "") {
 		err = errInvalidCursor
 	}
 	return c, err
@@ -85,24 +96,25 @@ func pageParams(r *http.Request, defaultLimit int) (limit int, cursor listCursor
 }
 
 // cursorPredicate is the keyset condition for ordering
-// (received_at DESC NULLS LAST, id DESC). ts is the cursor's timestamp
-// (nil = inside the NULL tail); tsArg/idArg are the numbered
-// placeholders as strings ("$3"/"$4"), so callers embed the positions
-// their query already reached.
+// (received_at DESC NULLS LAST, id DESC, account_id DESC). tsArg,
+// idArg, acctArg are the numbered placeholders as strings ("$3"/"$4"/"$5"),
+// so callers embed the positions their query already reached.
 //
 // The mirror's received_at is a naive TIMESTAMP holding UTC digits
 // (engine convention: nullTime writes t.UTC()); AT TIME ZONE 'UTC'
 // reinterprets those digits as UTC instants so the comparison cannot
 // skew with the session timezone.
-func cursorPredicate(tsArg, idArg string) string {
-	return ` AND ((` + tsArg + `::timestamptz IS NULL AND m.received_at IS NULL AND m.id < ` + idArg + `)
+func cursorPredicate(tsArg, idArg, acctArg string) string {
+	return ` AND ((` + tsArg + `::timestamptz IS NULL AND m.received_at IS NULL
+	            AND (m.id < ` + idArg + ` OR (m.id = ` + idArg + ` AND m.account_id < ` + acctArg + `)))
 		  OR (` + tsArg + `::timestamptz IS NOT NULL AND (m.received_at IS NULL
 		      OR (m.received_at AT TIME ZONE 'UTC') < ` + tsArg + `
-		      OR ((m.received_at AT TIME ZONE 'UTC') = ` + tsArg + ` AND m.id < ` + idArg + `))))`
+		      OR ((m.received_at AT TIME ZONE 'UTC') = ` + tsArg + `
+		          AND (m.id < ` + idArg + ` OR (m.id = ` + idArg + ` AND m.account_id < ` + acctArg + `))))))`
 }
 
 func cursorArgs(c listCursor) []any {
-	return []any{c.ReceivedAt, c.ID}
+	return []any{c.ReceivedAt, c.ID, c.Account}
 }
 
 // writeRowsPage answers the versioned envelope: the rows, whether more

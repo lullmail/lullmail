@@ -383,10 +383,10 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 		accountClause(r)
 	args := []any{uid, like}
 	if cursor.ID != "" {
-		query += cursorPredicate("$3", "$4")
+		query += cursorPredicate("$3", "$4", "$5")
 		args = append(args, cursorArgs(cursor)...)
 	}
-	query += ` ORDER BY m.received_at DESC NULLS LAST, m.id DESC
+	query += ` ORDER BY m.received_at DESC NULLS LAST, m.id DESC, m.account_id DESC
 		LIMIT $` + strconv.Itoa(len(args)+1)
 	args = append(args, limit+1)
 	rows, err := a.db.QueryContext(r.Context(), query, args...)
@@ -434,6 +434,7 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 			next.ReceivedAt = nil
 		}
 		next.ID = row.MessageID
+		next.Account = row.Account
 		out = append(out, row)
 	}
 	if err := rows.Err(); err != nil {
@@ -729,11 +730,11 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 	    ORDER BY m2.received_at DESC NULLS LAST, m2.id DESC LIMIT 1)`
 	nextArg := len(args) + 1
 	if cursor.ID != "" {
-		query += cursorPredicate("$"+strconv.Itoa(nextArg), "$"+strconv.Itoa(nextArg+1))
+		query += cursorPredicate("$"+strconv.Itoa(nextArg), "$"+strconv.Itoa(nextArg+1), "$"+strconv.Itoa(nextArg+2))
 		args = append(args, cursorArgs(cursor)...)
 	}
 	query += `
-		ORDER BY m.received_at DESC NULLS LAST, m.id DESC
+		ORDER BY m.received_at DESC NULLS LAST, m.id DESC, m.account_id DESC
 		LIMIT $` + strconv.Itoa(len(args)+1)
 	args = append(args, limit+1)
 	rows, err := a.db.QueryContext(r.Context(), query, args...)
@@ -786,6 +787,7 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 			next.ReceivedAt = nil
 		}
 		next.ID = row.MessageID
+		next.Account = row.Account
 		if snoozeUntil.Valid {
 			row.SnoozeUntil = snoozeUntil.Time.Format(time.RFC3339)
 		}
@@ -1290,7 +1292,12 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 		if req.UntilDays < 0 {
 			return nil, false, "until_days must be 1 through 3650"
 		}
-		return nil, false, "" // legacy default (3 days) applies
+		// Omitted fields mean the DOCUMENTED three-day default — returned
+		// as the relative form so the integer branch below applies it. The
+		// old path returned a nil until here, the integer branch never
+		// ran, and the final query stored set_aside with a NULL deadline
+		// that no wake-up schedule ever reaches (audit 5 DATA-03).
+		return 0, false, ""
 	}
 
 	var q string

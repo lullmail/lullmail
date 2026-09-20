@@ -204,13 +204,14 @@ func registerTools(s *mcp.Server, c *client) {
 		Name: "message_action",
 		Description: "Act on a whole thread: mark read/unread, move it to a bucket (imbox, paper_trail, feed, " +
 			"later, screener), or set_aside to snooze. Snoozes take `until` — an absolute UTC RFC3339 instant " +
-			"(e.g. 2026-09-25T09:00:00Z) that is stored verbatim, or null for someday. " +
+			"(e.g. 2026-09-25T09:00:00Z) that is stored verbatim; the literal null means someday (no date); " +
+			"empty or omitted means the documented three-day default. " +
 			"Every action is reversible with another call.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
 		AccountID string `json:"account_id" jsonschema:"account id from list_accounts"`
 		MessageID string `json:"message_id" jsonschema:"message id from list_bucket, search_mail, or read_thread"`
 		Action    string `json:"action" jsonschema:"read|unread|imbox|paper_trail|feed|later|screener|set_aside"`
-		Until     string `json:"until,omitempty" jsonschema:"set_aside return instant, absolute UTC RFC3339 (2026-09-25T09:00:00Z); or the literal null / empty for someday"`
+		Until     string `json:"until,omitempty" jsonschema:"set_aside return instant, absolute UTC RFC3339 (2026-09-25T09:00:00Z); the literal null means someday (no date); empty/omitted means the default three days"`
 		UntilDays int    `json:"until_days,omitempty" jsonschema:"DEPRECATED relative days from now; prefer until"`
 	}) (*mcp.CallToolResult, any, error) {
 		if args.AccountID == "" || args.MessageID == "" {
