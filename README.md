@@ -196,6 +196,8 @@ mailbox.
 
 ## License
 
-AGPL-3.0 — see [LICENSE](./LICENSE). The copyright is held by a single
-author, so a commercial/hosted license remains possible alongside the AGPL;
+FSL-1.1-MIT (Functional Source License) — see [LICENSE](./LICENSE). Any use is
+permitted except offering a competing product, and each version automatically
+becomes MIT two years after its release. The copyright is held by a single
+author, so a commercial/hosted license remains possible alongside the FSL;
 the vendored `mail-engine/` module is covered by the same license.
