@@ -134,7 +134,9 @@ While any of them is `pending` or `submitting` the deletion is refused (409,
 naming the count) and nothing is cancelled; wait for those sends to settle.
 Otherwise the retained outcomes and saved compositions of that account are
 deleted, the response reports how many (`outbox_deleted`), and the dashboard
-asks for the personal export first.
+asks for the personal export first. Admission joins the account's gate, so a
+send submitted while the deletion is in progress is refused (409, not queued)
+rather than queued and then lost with the account.
 
 ## Encryption
 
