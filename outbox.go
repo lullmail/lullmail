@@ -755,6 +755,11 @@ func (a *App) handleOutbox(w http.ResponseWriter, r *http.Request) {
 		writeLookupProblem(w, err, "owner")
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
+	if r.URL.Query().Has("key") {
+		a.outboxByKey(w, r, uid, r.URL.Query().Get("key"))
+		return
+	}
 	// Bounded metadata only. Payloads are available individually, never cached.
 	rows, err := a.db.QueryContext(r.Context(), `SELECT j.id::text,ea.id::text,j.state,j.filing_state,j.error_code,j.created_at,j.undo_until,j.payload_ciphertext<>'',j.sent_ciphertext<>''
  FROM outbox_jobs j JOIN email_accounts ea ON ea.mirror_account_id=j.account_id AND ea.user_id=j.user_id
@@ -777,8 +782,31 @@ func (a *App) handleOutbox(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 503, "Outbox Unavailable", "saved sends could not be loaded")
 		return
 	}
-	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, list)
+}
+
+// outboxByKey answers GET /outbox?key=<submission key>: the outcome of the
+// owner's submission under that key, in the same shape as a list entry, or
+// 404 when this server holds no such submission. It is how a client resolves
+// a send whose acknowledgment never arrived. Like the list it carries
+// outcomes only, never the composition, so it is safe on the agent surface.
+func (a *App) outboxByKey(w http.ResponseWriter, r *http.Request, uid, key string) {
+	var rec outboxRecord
+	err := sql.ErrNoRows
+	if key != "" {
+		err = a.db.QueryRowContext(r.Context(), `SELECT j.id::text,ea.id::text,j.state,j.filing_state,j.error_code,j.created_at,j.undo_until,j.payload_ciphertext<>'',j.sent_ciphertext<>''
+ FROM outbox_jobs j JOIN email_accounts ea ON ea.mirror_account_id=j.account_id AND ea.user_id=j.user_id
+ WHERE j.user_id=$1 AND j.submission_key=$2`, uid, key).Scan(&rec.ID, &rec.AccountID, &rec.State, &rec.Filing, &rec.Error, &rec.Created, &rec.UndoUntil, &rec.Recoverable, &rec.SavedCopy)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		writeProblem(w, 404, "Not Found", "no submission with this key is held by this server")
+		return
+	}
+	if err != nil {
+		writeProblem(w, 503, "Outbox Unavailable", "the submission could not be looked up; try again")
+		return
+	}
+	writeJSON(w, rec)
 }
 
 func (a *App) handleOutboxDetail(w http.ResponseWriter, r *http.Request) {

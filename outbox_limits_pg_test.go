@@ -1,7 +1,7 @@
 package main
 
-// The concurrent outbox worker and its graceful drain, against real
-// PostgreSQL and the loopback provider fakes.
+// The concurrent outbox worker, its graceful drain and the submission-key
+// lookup, against real PostgreSQL and the loopback provider fakes.
 
 import (
 	"bytes"
@@ -278,4 +278,59 @@ func TestOutboxWorkerDrainsInFlightOnStop(t *testing.T) {
 			t.Fatalf("%s", fmtState(v))
 		}
 	})
+}
+
+func TestOutboxLookupBySubmissionKey(t *testing.T) {
+	e := newOutboxEnv(t)
+	pr := e.newProc()
+	m := marker("lookup")
+	id := mustSend(t, pr, m, "Secret subject for lookup")
+	other, _ := secondOwner(t, e.p, "lookup-other@example.test")
+	lookup := func(uid, key string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, "/api/outbox?key="+key, nil)
+		r = r.WithContext(contextWithOwner(r.Context(), uid))
+		w := httptest.NewRecorder()
+		pr.app.handleOutbox(w, r)
+		return w
+	}
+	w := lookup(e.p.uid, m)
+	if w.Code != 200 || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("lookup=%d %s", w.Code, w.Body.String())
+	}
+	var rec map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec["id"] != id || rec["status"] != "pending" || rec["account_id"] != e.publicID || rec["recoverable"] != true {
+		t.Fatalf("lookup record: %v", rec)
+	}
+	for _, field := range []string{"request", "payload", "submission_key", "subject"} {
+		if _, ok := rec[field]; ok {
+			t.Fatalf("lookup exposed %q", field)
+		}
+	}
+	if strings.Contains(w.Body.String(), "Secret subject") || strings.Contains(w.Body.String(), "friend@example.test") {
+		t.Fatal("lookup leaked the composition")
+	}
+	if w := lookup(other, m); w.Code != 404 {
+		t.Fatalf("another owner's key resolved: %d", w.Code)
+	}
+	if w := lookup(e.p.uid, "never-used"); w.Code != 404 {
+		t.Fatalf("unknown key=%d", w.Code)
+	}
+	if w := lookup(e.p.uid, ""); w.Code != 404 {
+		t.Fatalf("empty key=%d", w.Code)
+	}
+	// The list form is unchanged.
+	r := httptest.NewRequest(http.MethodGet, "/api/outbox", nil)
+	r = r.WithContext(contextWithOwner(r.Context(), e.p.uid))
+	lw := httptest.NewRecorder()
+	pr.app.handleOutbox(lw, r)
+	if lw.Code != 200 || !strings.HasPrefix(strings.TrimSpace(lw.Body.String()), "[") {
+		t.Fatalf("list=%d %s", lw.Code, lw.Body.String())
+	}
+	// Agents reach it only as the outcome list's query form.
+	if !agentAllowedPath("/outbox") || agentAllowedPath("/outbox/"+id) {
+		t.Fatal("agent scope of the outbox changed")
+	}
 }
