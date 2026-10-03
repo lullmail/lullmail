@@ -22,7 +22,7 @@ const GOTO: Record<string, string> = {
   p: "/people",
 };
 
-function isTyping(target: EventTarget | null): boolean {
+export function isTyping(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
   if (!el || !el.closest) return false;
   return !!el.closest("input, textarea, select, [contenteditable]:not([contenteditable='false']), [role='textbox']");
@@ -216,7 +216,7 @@ export const SHORTCUTS: [string, string][] = [
   ["Ctrl/⌘ + Shift + click", "Add a range to the selection"],
   ["Home / End", "Focus first / last loaded message (Shift selects range)"],
   ["Ctrl/⌘ + A", "Select all loaded messages in this list"],
-  ["Enter", "Open the focused thread and clear selection"],
+  ["Enter / o", "Open the focused thread and clear selection"],
   ["u", "Back to the list"],
   ["x / Space", "Toggle selection — then any verb applies to all selected messages"],
   ["e", "Done"],
@@ -226,6 +226,9 @@ export const SHORTCUTS: [string, string][] = [
   ["r", "Reply"],
   ["c", "Compose"],
   ["1 2 3 0", "Screener: Inbox, Reading, Receipts, Block"],
+  ["y / m / w", "Calendar: year / month / week view"],
+  ["t", "Calendar: jump to today"],
+  ["← / →", "Calendar: previous / next period"],
   ["g then t b d n i r z s c p", "Go to Today, Board, Calendar, Notes, Inbox, Reading, Snoozed, Screener, Receipts, People"],
   ["/ or Ctrl/⌘K", "Search, browse, jump — one palette"],
   ["Esc", "Dismiss"],

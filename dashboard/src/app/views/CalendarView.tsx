@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { api } from "../lib/api";
 import { useLoad, type Page } from "../lib/useLoad";
-import { accountFilter, accountQS, resetSelection, setList } from "../lib/store";
+import { accountFilter, accountQS, overlayOpen, resetSelection, setList } from "../lib/store";
+import { isTyping } from "../lib/keys";
 import { openThread } from "../lib/actions";
 import type { Row } from "../lib/types";
 import { ListSkeleton, LoadError, PageHead } from "../ui/bits";
@@ -65,7 +66,8 @@ export function CalendarView() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement)?.closest?.("input, textarea")) return;
+      // Browser shortcuts (Cmd+Left is Back), IME, fields, and overlays keep their keys.
+      if (e.defaultPrevented || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || overlayOpen.value || isTyping(e.target)) return;
       const k = e.key.toLowerCase();
       if (e.key === "ArrowLeft") { e.preventDefault(); setAnchor((a) => shiftDate(a, zoom, -1)); }
       else if (e.key === "ArrowRight") { e.preventDefault(); setAnchor((a) => shiftDate(a, zoom, 1)); }

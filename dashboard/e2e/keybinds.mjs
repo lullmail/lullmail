@@ -20,7 +20,7 @@ const ACCOUNT = "test-account";
 
 /* ---- synthetic API ---- */
 
-function makeApi() {
+function makeApi({ twoAccounts = false } = {}) {
   const now = Date.now();
   const iso = (minutesAgo) => new Date(now - minutesAgo * 60000).toISOString();
   const msg = (n, bucket, read, from, subject) => ({
@@ -66,7 +66,7 @@ function makeApi() {
       if (path === "/auth/status") return ok({ configured: true, authenticated: true, email: "owner@example.test", bootstrap_available: false, passkey_supported: false, installation_id: "inst-1", user_id: "user-1" });
       if (path === "/counts") return ok({ imbox: inBucket("imbox").filter((r) => !r.read).length, screener: senders.length });
       if (path === "/prefs") return ok({ screening_enabled: true });
-      if (path === "/accounts") return ok([{ id: ACCOUNT, address: "owner@example.test" }]);
+      if (path === "/accounts") return ok([{ id: ACCOUNT, address: "owner@example.test" }, ...(twoAccounts ? [{ id: "second-account", address: "second@example.test" }] : [])]);
       if (path === "/mailboxes") return ok([{ name: "inbox" }, { name: "sent" }]);
       if (path === "/recent") return ok(inBucket("imbox").slice(0, 3).map(row));
       if (path === "/screener") return ok(senders.map((s) => ({ ...s })));
@@ -150,11 +150,11 @@ const covered = new Set();
 let helpLabels = [];
 
 const only = process.env.KEYBINDS_ONLY;
-async function scenario(name, covers, fn, { layout = "document", width = 1280, path = "/" } = {}) {
+async function scenario(name, covers, fn, { layout = "document", width = 1280, path = "/", twoAccounts = false } = {}) {
   if (only && !name.includes(only)) return;
   const context = await browser.newContext({ viewport: { width, height: 900 }, serviceWorkers: "block" });
   const page = await context.newPage();
-  const api = makeApi();
+  const api = makeApi({ twoAccounts });
   const errors = [];
   const external = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -254,7 +254,7 @@ const LABEL = {
   addRange: "Ctrl/⌘ + Shift + click",
   edges: "Home / End",
   all: "Ctrl/⌘ + A",
-  enter: "Enter",
+  enter: "Enter / o",
   back: "u",
   select: "x / Space",
   done: "e",
@@ -266,6 +266,9 @@ const LABEL = {
   screener: "1 2 3 0",
   goto: "g then t b d n i r z s c p",
   palette: "/ or Ctrl/⌘K",
+  calView: "y / m / w",
+  calToday: "t",
+  calMove: "← / →",
   esc: "Esc",
   help: "?",
 };
@@ -994,6 +997,96 @@ try {
     await expect(t.page.getByRole("menu")).toHaveCount(0);
     await expect(t.page.locator(".thread-title")).toBeVisible();
   });
+
+  await scenario("escape: the mailbox picker closes before the selection and the reader", [LABEL.esc], async (t) => {
+    await t.ready();
+    const picker = t.page.getByRole("button", { name: "Choose mailbox" });
+    await t.press("j");
+    await t.press("x");
+    await t.expectPicked([0]);
+    await picker.click();
+    // Like the settings menu, it takes focus into itself and arrows move within it.
+    const items = t.page.getByRole("menu").getByRole("menuitem");
+    await expect(items.first()).toBeFocused();
+    await t.press("ArrowDown");
+    await expect(items.nth(1)).toBeFocused();
+    await t.press("Escape");
+    await expect(t.page.getByRole("menu")).toHaveCount(0);
+    await expect(picker).toBeFocused();
+    await t.expectPicked([0]);
+    await t.press("Escape");
+    await t.expectPicked([]);
+    await t.press("j");
+    await t.press("Enter");
+    await expect(t.page.locator(".thread-title")).toBeVisible();
+    await picker.click();
+    await expect(t.page.getByRole("menu").getByRole("menuitem").first()).toBeFocused();
+    await t.press("Escape");
+    await expect(t.page.getByRole("menu")).toHaveCount(0);
+    await expect(t.page.locator(".thread-title")).toBeVisible();
+  }, { twoAccounts: true });
+
+  await scenario("calendar: y m w t and arrows drive the view and are guarded", [LABEL.calView, LABEL.calToday, LABEL.calMove], async (t) => {
+    const title = t.page.locator(".page-head h1");
+    const zoom = (name) => t.page.locator(".cal-zoom-btn.active", { hasText: name });
+    const now = new Date();
+    const month = (offset) => {
+      const d = new Date(now.getFullYear(), now.getMonth() + offset, 1);
+      return d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+    };
+    await expect(title).toHaveText(month(0));
+    await expect(zoom("Month")).toBeVisible();
+    // The view's key listener is attached in a mount effect; retry the first key until it is.
+    await expect(async () => {
+      await t.press("y");
+      await expect(zoom("Year")).toBeVisible({ timeout: 500 });
+    }).toPass();
+    await expect(title).toHaveText(String(now.getFullYear()));
+    await t.press("w");
+    await expect(zoom("Week")).toBeVisible();
+    await t.press("m");
+    await expect(zoom("Month")).toBeVisible();
+    // The listener is re-attached in an effect after each zoom change; let it land.
+    await t.settle(150);
+    await t.press("ArrowRight");
+    await expect(title).toHaveText(month(1));
+    await t.press("ArrowRight");
+    await expect(title).toHaveText(month(2));
+    await t.press("ArrowLeft");
+    await expect(title).toHaveText(month(1));
+    await t.press("t");
+    await expect(title).toHaveText(month(0));
+    // Guards: held modifiers, fields outside the app, and overlays leave the view alone.
+    await t.press("ArrowRight");
+    await expect(title).toHaveText(month(1));
+    for (const held of ["Control", "Meta", "Alt"]) {
+      for (const key of ["y", "w", "t", "ArrowRight", "ArrowLeft"]) await t.press(`${held}+${key}`);
+    }
+    await t.settle();
+    await expect(title).toHaveText(month(1));
+    await expect(zoom("Month")).toBeVisible();
+    for (const kind of ["input", "textarea", "select", "contenteditable", "textbox"]) {
+      await t.field(kind);
+      await t.press("y");
+      await t.press("ArrowLeft");
+      await t.press("t");
+    }
+    await t.settle();
+    await expect(title).toHaveText(month(1));
+    await expect(zoom("Month")).toBeVisible();
+    await t.page.evaluate(() => document.getElementById("probe").remove());
+    await t.press("?");
+    await expect(t.dialog("Keyboard shortcuts")).toBeVisible();
+    for (const key of ["y", "w", "t", "ArrowLeft"]) await t.press(key);
+    await t.settle();
+    await t.press("Escape");
+    await expect(title).toHaveText(month(1));
+    await expect(zoom("Month")).toBeVisible();
+    // The g-jump's own t goes to Today and does not also move the calendar.
+    await t.press("g");
+    await t.press("t");
+    await expect.poll(t.path).toBe("/today");
+  }, { path: "/calendar" });
 
   await scenario("classic layout: list stays live beside the reader; selection clears before the reader", [LABEL.esc, LABEL.enter, LABEL.back, LABEL.nav], async (t) => {
     await t.ready();
