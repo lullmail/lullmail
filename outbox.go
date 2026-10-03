@@ -74,6 +74,7 @@ const outboxSettled = `state IN ('submitted','failed','ambiguous','cancelled') A
 
 var errOutboxCapacity = errors.New("outbox capacity exhausted")
 var errOutboxOwnerCapacity = errors.New("owner's share of active sends exhausted")
+var errOutboxAccountGone = errors.New("sending account is not connected")
 var errOutboxReceiptLimit = errors.New("outbox retained-receipt limit reached")
 
 // errOutboxFenced: a newer build has migrated this database. This build must
@@ -158,6 +159,10 @@ func (a *App) acceptOutbox(w http.ResponseWriter, r *http.Request, uid, account,
 	if errors.Is(err, errOutboxOwnerCapacity) {
 		w.Header().Set("Retry-After", "10")
 		writeProblem(w, 429, "Too Many Sends In Progress", fmt.Sprintf("you already have %d sends waiting or being submitted; the message was not queued, send it again once one of them finishes", outboxOwnerMaxJobs))
+		return
+	}
+	if errors.Is(err, errOutboxAccountGone) {
+		writeProblem(w, 404, "Account Not Found", "the sending account is not connected (it may have just been removed); the message was not queued, choose a connected account and send again")
 		return
 	}
 	if errors.Is(err, errOutboxFenced) {
@@ -258,7 +263,9 @@ func (a *App) saveOutbox(ctx context.Context, uid, account, key, hash, id, ciphe
 		return result, false, err
 	}
 	if n != 1 {
-		return result, false, sql.ErrNoRows
+		// Not this owner's connected account (or deleted since validation):
+		// retrying the same request can never succeed.
+		return result, false, errOutboxAccountGone
 	}
 	if err = a.outboxPoint("accept:before-commit"); err != nil {
 		return result, false, err
