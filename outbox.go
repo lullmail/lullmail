@@ -37,14 +37,38 @@ var outboxStatements = []string{
   UNIQUE (user_id,submission_key)
  )`,
 	`CREATE INDEX outbox_pending ON outbox_jobs(undo_until) WHERE state = 'pending'`,
+	`CREATE INDEX outbox_live ON outbox_jobs(state) WHERE state IN ('pending','submitting')`,
+	`CREATE INDEX outbox_settled ON outbox_jobs(updated_at) WHERE state IN ('submitted','failed','ambiguous','cancelled')`,
+	`CREATE INDEX outbox_payload ON outbox_jobs(user_id,updated_at) WHERE payload_bytes > 0`,
 }
 
-const outboxRetention = 30 * 24 * time.Hour
+// Retention is two separate clocks, both measured from the row's last state
+// change once it has settled (no submission or filing in flight):
+//   - private bytes (recoverable composition, saved Sent copy) are cleared
+//     after outboxPayloadRetention: that is the window in which a person can
+//     still be expected to recover or download them;
+//   - the idempotency receipt (key, request hash, outcome; no content) lives
+//     for outboxReceiptRetention, deliberately longer, because it is the only
+//     thing that turns a late client retry of a lost acknowledgment into a
+//     replay instead of a second send.
+//
+// Receipts are bounded per owner, never globally: one owner reaching the cap
+// must not be able to stop anyone else from sending.
+const outboxPayloadRetention = 30 * 24 * time.Hour
+const outboxReceiptRetention = 90 * 24 * time.Hour
+const outboxOwnerReceiptLimit = 50000
+const outboxPruneBatch = 500
 const outboxClaimTimeout = 2 * time.Minute
 const outboxMaxBytes int64 = 512 << 20
+const outboxOwnerMaxBytes int64 = 256 << 20
 const outboxLockKey int64 = 7812634095511117
 
+// outboxSettled selects rows with no submission or filing in flight. Only
+// these are ever expired; pending work is never silently dropped.
+const outboxSettled = `state IN ('submitted','failed','ambiguous','cancelled') AND filing_state NOT IN ('pending','submitting')`
+
 var errOutboxCapacity = errors.New("outbox capacity exhausted")
+var errOutboxReceiptLimit = errors.New("outbox retained-receipt limit reached")
 var errOutboxKeyConflict = errors.New("submission key reused")
 
 type outboxPayload struct {
@@ -97,6 +121,11 @@ func (a *App) acceptOutbox(w http.ResponseWriter, r *http.Request, uid, account,
 		writeProblem(w, 429, "Outbox Full", "wait for pending sends to finish or remove saved recoverable compositions before adding more")
 		return
 	}
+	if errors.Is(err, errOutboxReceiptLimit) {
+		w.Header().Set("Retry-After", "3600")
+		writeProblem(w, 429, "Send Limit Reached", "too many sends are retained for this account; retained records expire 90 days after each send settles")
+		return
+	}
 	if err != nil {
 		a.log.Error("outbox acceptance failed", "err", err)
 		writeProblem(w, 503, "Queue Unavailable", "acceptance could not be confirmed; keep this draft and retry with the same submission key")
@@ -144,12 +173,24 @@ func (a *App) saveOutbox(ctx context.Context, uid, account, key, hash, ciphertex
 	if !errors.Is(err, sql.ErrNoRows) {
 		return result, false, err
 	}
-	var live, receipts int
-	var bytes int64
-	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FILTER (WHERE state IN ('pending','submitting')),COALESCE(SUM(payload_bytes),0),COUNT(*) FROM outbox_jobs`).Scan(&live, &bytes, &receipts); err != nil {
+	live, bytes, ownerBytes, receipts, err := readOutboxUsage(ctx, tx, uid)
+	if err != nil {
 		return result, false, err
 	}
-	if live >= sendMaxJobs || size < 0 || size > outboxMaxBytes || bytes > outboxMaxBytes-size || receipts >= sendReceiptLimit {
+	if receipts >= outboxOwnerReceiptLimit {
+		// Expired receipts are removed lazily here so a healthy owner is
+		// never refused for rows the retention policy has already retired.
+		if _, err = tx.ExecContext(ctx, outboxPruneOwnerSQL, uid, int(outboxReceiptRetention.Seconds()), outboxPruneBatch); err != nil {
+			return result, false, err
+		}
+		if live, bytes, ownerBytes, receipts, err = readOutboxUsage(ctx, tx, uid); err != nil {
+			return result, false, err
+		}
+		if receipts >= outboxOwnerReceiptLimit {
+			return result, false, errOutboxReceiptLimit
+		}
+	}
+	if live >= sendMaxJobs || size < 0 || size > outboxMaxBytes || bytes > outboxMaxBytes-size || ownerBytes > outboxOwnerMaxBytes-size {
 		return result, false, errOutboxCapacity
 	}
 	result = outboxRecord{ID: uuid.NewString(), AccountID: account, State: "pending", UndoUntil: time.Now().UTC().Add(undoWindow)}
@@ -168,6 +209,31 @@ func (a *App) saveOutbox(ctx context.Context, uid, account, key, hash, ciphertex
 	err = tx.Commit()
 	return result, false, err
 }
+
+type outboxQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// readOutboxUsage reads the admission counters. Live work and private bytes are
+// global (they bound the process); retained receipts and the per-owner byte
+// share are scoped to the submitting owner.
+func readOutboxUsage(ctx context.Context, q outboxQuerier, uid string) (live int, bytes, ownerBytes int64, receipts int, err error) {
+	err = q.QueryRowContext(ctx, `SELECT
+ (SELECT COUNT(*) FROM outbox_jobs WHERE state IN ('pending','submitting')),
+ (SELECT COALESCE(SUM(payload_bytes),0) FROM outbox_jobs WHERE payload_bytes > 0),
+ (SELECT COALESCE(SUM(payload_bytes),0) FROM outbox_jobs WHERE user_id=$1 AND payload_bytes > 0),
+ (SELECT COUNT(*) FROM outbox_jobs WHERE user_id=$1)`, uid).Scan(&live, &bytes, &ownerBytes, &receipts)
+	return
+}
+
+// Both prune statements are bounded batches ordered by age, so a large backlog
+// is retired over several passes without long locks.
+const outboxPruneOwnerSQL = `DELETE FROM outbox_jobs WHERE id IN (
+ SELECT id FROM outbox_jobs WHERE user_id=$1 AND ` + outboxSettled + ` AND updated_at < now()-make_interval(secs=>$2) ORDER BY updated_at LIMIT $3)`
+const outboxPruneSQL = `DELETE FROM outbox_jobs WHERE id IN (
+ SELECT id FROM outbox_jobs WHERE ` + outboxSettled + ` AND updated_at < now()-make_interval(secs=>$1) ORDER BY updated_at LIMIT $2)`
+const outboxPrunePayloadSQL = `UPDATE outbox_jobs SET payload_ciphertext='',sent_ciphertext='',payload_bytes=0 WHERE id IN (
+ SELECT id FROM outbox_jobs WHERE payload_bytes > 0 AND ` + outboxSettled + ` AND updated_at < now()-make_interval(secs=>$1) ORDER BY updated_at LIMIT $2)`
 
 func (a *App) startOutboxWorker() {
 	a.launch("durable-outbox", func(ctx context.Context) {
@@ -199,9 +265,13 @@ func (a *App) processOutbox(ctx context.Context) error {
  WHERE filing_state='submitting' AND updated_at < now()-make_interval(secs=>$1)`, int(outboxClaimTimeout.Seconds())); err != nil {
 		return err
 	}
-	// Pending jobs are never expired. Terminal payloads and receipts have a
-	// documented 30-day lifetime; account/owner deletion cascades immediately.
-	if _, err := a.db.ExecContext(ctx, `DELETE FROM outbox_jobs WHERE state IN ('submitted','failed','ambiguous','cancelled') AND filing_state NOT IN ('pending','submitting') AND updated_at < now()-make_interval(secs=>$1)`, int(outboxRetention.Seconds())); err != nil {
+	// Pending jobs are never expired. Private bytes and receipts retire on
+	// their own clocks (see outboxPayloadRetention); account/owner deletion
+	// cascades immediately. Payloads go first so receipts outlive them.
+	if _, err := a.db.ExecContext(ctx, outboxPrunePayloadSQL, int(outboxPayloadRetention.Seconds()), outboxPruneBatch); err != nil {
+		return err
+	}
+	if _, err := a.db.ExecContext(ctx, outboxPruneSQL, int(outboxReceiptRetention.Seconds()), outboxPruneBatch); err != nil {
 		return err
 	}
 	job, account, ciphertext, err := a.claimOutbox(ctx)
@@ -236,7 +306,7 @@ func (a *App) deliverOutbox(ctx context.Context, job outboxAttempt, account, cip
 		// A SMTP acceptance already recorded before filing wins this fallback.
 		_, err := a.db.ExecContext(c, `UPDATE outbox_jobs SET state=$3,error_code=$4,updated_at=now(),
    payload_ciphertext=CASE WHEN $3='submitted' THEN '' ELSE payload_ciphertext END,
-   payload_bytes=CASE WHEN $3='submitted' THEN 0 ELSE payload_bytes END,
+   payload_bytes=CASE WHEN $3='submitted' THEN 0 WHEN $3='failed' THEN octet_length(payload_ciphertext) ELSE payload_bytes END,
    filing_state=CASE WHEN $3='submitted' THEN 'provider' ELSE filing_state END
    WHERE id=$1 AND attempt_id=$2 AND state IN ('submitting','ambiguous')`, job.ID, job.Token, state, code)
 		if err != nil {
@@ -362,7 +432,7 @@ func (a *App) cancelOutbox(w http.ResponseWriter, r *http.Request) {
 		writeLookupProblem(w, err, "owner")
 		return
 	}
-	res, err := a.db.ExecContext(r.Context(), `UPDATE outbox_jobs SET state='cancelled',updated_at=now(),error_code='' WHERE id::text=$1 AND user_id=$2 AND state='pending' AND undo_until>now()`, r.PathValue("id"), uid)
+	res, err := a.db.ExecContext(r.Context(), `UPDATE outbox_jobs SET state='cancelled',updated_at=now(),error_code='',payload_bytes=octet_length(payload_ciphertext) WHERE id::text=$1 AND user_id=$2 AND state='pending' AND undo_until>now()`, r.PathValue("id"), uid)
 	if err != nil {
 		writeProblem(w, 503, "Cancellation Unconfirmed", "retry cancellation or check Outbox before sending again")
 		return

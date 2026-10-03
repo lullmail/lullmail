@@ -49,7 +49,10 @@ func outboxEmpty() dbStep {
 	return dbStep{kind: "query", rows: &testRows{columns: []string{"id", "account_id", "state", "undo_until", "request_hash"}}}
 }
 func outboxUsage(jobs, bytes, receipts int64) dbStep {
-	return dbStep{kind: "query", rows: &testRows{columns: []string{"jobs", "bytes", "receipts"}, values: [][]driver.Value{{jobs, bytes, receipts}}}}
+	return outboxUsageFor(jobs, bytes, 0, receipts)
+}
+func outboxUsageFor(jobs, bytes, ownerBytes, receipts int64) dbStep {
+	return dbStep{kind: "query", rows: &testRows{columns: []string{"jobs", "bytes", "owner_bytes", "receipts"}, values: [][]driver.Value{{jobs, bytes, ownerBytes, receipts}}}}
 }
 func outboxStored(id, state, hash string) dbStep {
 	return dbStep{kind: "query", rows: &testRows{columns: []string{"id", "account_id", "state", "undo_until", "request_hash"}, values: [][]driver.Value{{id, "mirror-1", state, time.Now().Add(time.Second), hash}}}}
@@ -71,7 +74,9 @@ func TestOutboxDurableAdmissionAndKeyReplay(t *testing.T) {
 		{"conflict", []dbStep{{kind: "exec"}, outboxStored("job", "pending", "different")}, nil, errOutboxKeyConflict, true},
 		{"full", []dbStep{{kind: "exec"}, outboxEmpty(), outboxUsage(sendMaxJobs, 0, 0)}, nil, errOutboxCapacity, false},
 		{"bytes", []dbStep{{kind: "exec"}, outboxEmpty(), outboxUsage(0, outboxMaxBytes, 0)}, nil, errOutboxCapacity, false},
-		{"receipts", []dbStep{{kind: "exec"}, outboxEmpty(), outboxUsage(0, 0, sendReceiptLimit)}, nil, errOutboxCapacity, false},
+		{"owner bytes", []dbStep{{kind: "exec"}, outboxEmpty(), outboxUsageFor(0, 0, outboxOwnerMaxBytes, 0)}, nil, errOutboxCapacity, false},
+		{"receipts", []dbStep{{kind: "exec"}, outboxEmpty(), outboxUsage(0, 0, outboxOwnerReceiptLimit), {kind: "exec"}, outboxUsage(0, 0, outboxOwnerReceiptLimit)}, nil, errOutboxReceiptLimit, false},
+		{"receipts pruned", []dbStep{{kind: "exec"}, outboxEmpty(), outboxUsage(0, 0, outboxOwnerReceiptLimit), {kind: "exec"}, outboxUsage(0, 0, outboxOwnerReceiptLimit-10), {kind: "exec"}}, nil, nil, false},
 		{"commit uncertain", outboxAdmissionSteps(), errors.New("commit lost"), errors.New("commit lost"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
