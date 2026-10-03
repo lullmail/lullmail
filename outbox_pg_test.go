@@ -187,11 +187,22 @@ func TestIntegrationOutboxSMTPAcceptanceSeparatesFiling(t *testing.T) {
 func TestIntegrationOutboxQuotaAndReplayAtCapacity(t *testing.T) {
 	p := newProductPG(t)
 	seedOutboxAccount(t, p)
-	for i := 0; i < sendMaxJobs; i++ {
+	for i := 0; i < outboxOwnerMaxJobs; i++ {
 		seedOutbox(t, p, fmt.Sprint(i))
 	}
-	if _, _, err := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "overflow", "hash", uuid.NewString(), "x", 1); !errors.Is(err, errOutboxCapacity) {
-		t.Fatal("quota ignored", err)
+	// One owner fills only its share; the refusal is the per-owner one.
+	if _, _, err := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "overflow", "hash", uuid.NewString(), "x", 1); !errors.Is(err, errOutboxOwnerCapacity) {
+		t.Fatal("owner share ignored", err)
+	}
+	other, otherAcct := secondOwner(t, p, "other-sender@example.test")
+	for i := 0; i < sendMaxJobs-outboxOwnerMaxJobs; i++ {
+		if _, _, err := p.app.saveOutbox(context.Background(), other, otherAcct, fmt.Sprint("other-", i), "hash", uuid.NewString(), "x", 1); err != nil {
+			t.Fatalf("an owner was refused while another held only its share: %v", err)
+		}
+	}
+	third, thirdAcct := secondOwner(t, p, "third-sender@example.test")
+	if _, _, err := p.app.saveOutbox(context.Background(), third, thirdAcct, "overflow", "hash", uuid.NewString(), "x", 1); !errors.Is(err, errOutboxCapacity) {
+		t.Fatal("global quota ignored", err)
 	}
 	if _, replay, err := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "0", "hash", uuid.NewString(), "x", 1); err != nil || !replay {
 		t.Fatal("full queue blocked receipt replay", err)
