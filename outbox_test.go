@@ -49,6 +49,12 @@ func openOutboxSteps(t *testing.T, commitErr error, steps ...dbStep) (*sql.DB, *
 func outboxEmpty() dbStep {
 	return dbStep{kind: "query", rows: &testRows{columns: []string{"id", "account_id", "state", "undo_until", "request_hash"}}}
 }
+
+// outboxSchema scripts the ledger read behind the single-writer fence;
+// ahead raises the recorded version above what this build understands.
+func outboxSchema(ahead int64) dbStep {
+	return dbStep{kind: "query", rows: &testRows{columns: []string{"newest"}, values: [][]driver.Value{{outboxSupportedSchema() + ahead}}}}
+}
 func outboxUsage(jobs, bytes, receipts int64) dbStep {
 	return outboxUsageFor(jobs, bytes, 0, receipts)
 }
@@ -59,7 +65,7 @@ func outboxStored(id, state, hash string) dbStep {
 	return dbStep{kind: "query", rows: &testRows{columns: []string{"id", "account_id", "state", "undo_until", "request_hash"}, values: [][]driver.Value{{id, "mirror-1", state, time.Now().Add(time.Second), hash}}}}
 }
 func outboxAdmissionSteps() []dbStep {
-	return []dbStep{{kind: "exec"}, outboxEmpty(), outboxUsage(0, 0, 0), {kind: "exec"}}
+	return []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsage(0, 0, 0), {kind: "exec"}}
 }
 
 func TestOutboxDurableAdmissionAndKeyReplay(t *testing.T) {
@@ -73,11 +79,12 @@ func TestOutboxDurableAdmissionAndKeyReplay(t *testing.T) {
 		{"new", outboxAdmissionSteps(), nil, nil, false},
 		{"replay", []dbStep{{kind: "exec"}, outboxStored("job", "submitted", "hash")}, nil, nil, true},
 		{"conflict", []dbStep{{kind: "exec"}, outboxStored("job", "pending", "different")}, nil, errOutboxKeyConflict, true},
-		{"full", []dbStep{{kind: "exec"}, outboxEmpty(), outboxUsage(sendMaxJobs, 0, 0)}, nil, errOutboxCapacity, false},
-		{"bytes", []dbStep{{kind: "exec"}, outboxEmpty(), outboxUsage(0, outboxMaxBytes, 0)}, nil, errOutboxCapacity, false},
-		{"owner bytes", []dbStep{{kind: "exec"}, outboxEmpty(), outboxUsageFor(0, 0, outboxOwnerMaxBytes, 0)}, nil, errOutboxCapacity, false},
-		{"receipts", []dbStep{{kind: "exec"}, outboxEmpty(), outboxUsage(0, 0, outboxOwnerReceiptLimit), {kind: "exec"}, outboxUsage(0, 0, outboxOwnerReceiptLimit)}, nil, errOutboxReceiptLimit, false},
-		{"receipts pruned", []dbStep{{kind: "exec"}, outboxEmpty(), outboxUsage(0, 0, outboxOwnerReceiptLimit), {kind: "exec"}, outboxUsage(0, 0, outboxOwnerReceiptLimit-10), {kind: "exec"}}, nil, nil, false},
+		{"full", []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsage(sendMaxJobs, 0, 0)}, nil, errOutboxCapacity, false},
+		{"bytes", []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsage(0, outboxMaxBytes, 0)}, nil, errOutboxCapacity, false},
+		{"owner bytes", []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsageFor(0, 0, outboxOwnerMaxBytes, 0)}, nil, errOutboxCapacity, false},
+		{"receipts", []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsage(0, 0, outboxOwnerReceiptLimit), {kind: "exec"}, outboxUsage(0, 0, outboxOwnerReceiptLimit)}, nil, errOutboxReceiptLimit, false},
+		{"receipts pruned", []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsage(0, 0, outboxOwnerReceiptLimit), {kind: "exec"}, outboxUsage(0, 0, outboxOwnerReceiptLimit-10), {kind: "exec"}}, nil, nil, false},
+		{"fenced by a newer build", []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(1)}, nil, errOutboxFenced, false},
 		{"commit uncertain", outboxAdmissionSteps(), errors.New("commit lost"), errors.New("commit lost"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

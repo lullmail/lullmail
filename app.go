@@ -48,6 +48,16 @@ type App struct {
 	// nil (the production resolver is constructed per invocation); tests
 	// substitute their own to drive sync paths deterministically.
 	dial mail.Resolver
+
+	// Durable outbox. outboxFenceLog rate-limits the passive-build warning.
+	outboxFenceLog    sync.Mutex
+	outboxFenceLogged time.Time
+	// outboxFault is nil in production. Tests set it to abort the process at
+	// a named persistence or provider boundary (see outboxPoint).
+	outboxFault func(point string) error
+	// smtpPlaintext lets tests submit to a loopback SMTP server. The engine
+	// still refuses plaintext to any non-loopback peer.
+	smtpPlaintext bool
 }
 
 // accountLifecycle is one account's admission gate (audit OPS-05): an
@@ -539,9 +549,10 @@ func (a *App) SMTPFor(ctx context.Context, acct mail.AccountID) (*mail.Sender, m
 	// anything the server handed out.
 	from := mail.Address{Email: address, Name: displayName}
 	return mail.NewSender(mail.SMTPConfig{
-		Host:     smtpHost,
-		Port:     smtpPort,
-		Username: username,
-		Password: password,
+		Host:      smtpHost,
+		Port:      smtpPort,
+		Username:  username,
+		Password:  password,
+		Plaintext: a.smtpPlaintext,
 	}), from, true
 }

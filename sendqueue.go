@@ -580,7 +580,7 @@ func (a *App) deliveryFor(ctx context.Context, account mail.AccountID, replyPare
 	deliver := func(ctx context.Context, outgoing *mail.Outgoing) error {
 		sender, _, ok := a.SMTPFor(ctx, account)
 		if !ok {
-			return fmt.Errorf("account %s is no longer connected or has no send credential", account)
+			return &mail.NotSubmittedError{Err: fmt.Errorf("account %s is no longer connected or has no send credential", account)}
 		}
 		_, raw, err := sender.Send(ctx, outgoing)
 		if err != nil {
@@ -588,7 +588,12 @@ func (a *App) deliveryFor(ctx context.Context, account mail.AccountID, replyPare
 		}
 		if job, ok := ctx.Value(outboxContextKey{}).(outboxAttempt); ok {
 			// Persist transport acceptance before attempting a separate Sent append.
-			return a.recordOutboxAccepted(job, raw)
+			_ = a.outboxPoint("deliver:after-acceptance")
+			if err := a.recordOutboxAccepted(job, raw); err != nil {
+				return err
+			}
+			_ = a.outboxPoint("deliver:after-record")
+			return nil
 		}
 		a.fileSent(ctx, account, raw)
 		return nil
@@ -606,11 +611,11 @@ func (a *App) guardDelivery(account mail.AccountID, next deliverFunc) deliverFun
 	return func(ctx context.Context, outgoing *mail.Outgoing) error {
 		ctx, release, ok := a.beginAccountWorkCtx(ctx, account)
 		if !ok {
-			return fmt.Errorf("account %s is being deleted", account)
+			return &mail.NotSubmittedError{Err: fmt.Errorf("account %s is being deleted", account)}
 		}
 		defer release()
 		if err := ctx.Err(); err != nil {
-			return err
+			return &mail.NotSubmittedError{Err: err}
 		}
 		return next(ctx, outgoing)
 	}
