@@ -10,6 +10,7 @@ vi.mock("./api", () => ({
     }
   },
   QueuedOffline: class QueuedOffline extends Error {},
+  StaleOwnerError: class StaleOwnerError extends Error {},
   clearMemoryCache: vi.fn(),
   api: vi.fn(),
 }));

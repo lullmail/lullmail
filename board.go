@@ -70,16 +70,19 @@ func (a *App) sweepSnoozed(ctx context.Context, uid, account string) error {
 }
 
 type boardCard struct {
-	CardID     string `json:"card_id,omitempty"`
-	Account    string `json:"account,omitempty"`
-	ThreadID   string `json:"thread_id,omitempty"`
-	MessageID  string `json:"message_id,omitempty"`
-	Subject    string `json:"subject"`
-	From       string `json:"from,omitempty"`
-	ReceivedAt string `json:"received_at,omitempty"`
-	Preview    string `json:"preview,omitempty"`
-	Note       string `json:"note,omitempty"`
-	Manual     bool   `json:"manual,omitempty"`
+	CardID      string `json:"card_id,omitempty"`
+	Account     string `json:"account,omitempty"`
+	ThreadID    string `json:"thread_id,omitempty"`
+	MessageID   string `json:"message_id,omitempty"`
+	Subject     string `json:"subject"`
+	From        string `json:"from,omitempty"`
+	ReceivedAt  string `json:"received_at,omitempty"`
+	Preview     string `json:"preview,omitempty"`
+	Note        string `json:"note,omitempty"`
+	Manual      bool   `json:"manual,omitempty"`
+	Read        *bool  `json:"read,omitempty"`
+	Bucket      string `json:"bucket,omitempty"`
+	SnoozeUntil string `json:"snooze_until,omitempty"`
 	// Created is true only when this call inserted the card. A pin that
 	// found an existing card leaves it untouched — not its done state, not
 	// its note — and reports created=false so the client's undo cannot
@@ -126,7 +129,10 @@ func (a *App) handleBoard(w http.ResponseWriter, r *http.Request) {
 	derived := map[string]bool{}
 	for _, t := range needsYou {
 		derived[t.Account+"\x00"+t.ThreadID] = true
-		cards = append(cards, cardFromThread(t))
+		card := cardFromThread(t)
+		unread := false
+		card.Read, card.Bucket = &unread, "imbox"
+		cards = append(cards, card)
 	}
 
 	// Live data for pinned threads: subject and date follow the thread's
@@ -166,36 +172,47 @@ func (a *App) handleBoard(w http.ResponseWriter, r *http.Request) {
 	}
 	rows.Close()
 	if len(open) > 0 {
-		live := map[string]briefThread{}
+		live := map[string]boardCard{}
 		liveQuery := `
 			SELECT DISTINCT ON (b.id)
-			       m.account_id, m.thread_id, m.id, m.subject, m.from_addrs, m.received_at, m.preview
+			       m.account_id, m.thread_id, m.id, m.subject, m.from_addrs, m.received_at, m.preview,
+			       CASE WHEN h.message_id IS NULL THEN NULL ELSE h.read_at IS NOT NULL END,
+			       COALESCE(h.bucket,''), h.set_aside_until
 			FROM board_cards b
 			JOIN mail_messages m ON m.account_id = b.account_id AND m.thread_id = b.thread_key
 			JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+			LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
 			WHERE b.user_id = $1 AND b.done_at IS NULL AND b.thread_key IS NOT NULL`
 		liveArgs := []any{uid}
 		if account != "" {
 			liveQuery += ` AND ea.id = $2`
 			liveArgs = append(liveArgs, account)
 		}
-		liveQuery += ` ORDER BY b.id, m.received_at DESC NULLS LAST`
+		liveQuery += ` ORDER BY b.id, m.received_at DESC NULLS LAST, m.id DESC`
 		r2, err := a.db.QueryContext(r.Context(), liveQuery, liveArgs...)
 		if err != nil {
 			writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 			return
 		}
 		for r2.Next() {
-			var t briefThread
+			var t boardCard
 			var fromJSON string
 			var received *time.Time
-			if err := r2.Scan(&t.Account, &t.ThreadID, &t.MessageID, &t.Subject, &fromJSON, &received, &t.Preview); err != nil {
+			var read sql.NullBool
+			var until sql.NullTime
+			if err := r2.Scan(&t.Account, &t.ThreadID, &t.MessageID, &t.Subject, &fromJSON, &received, &t.Preview, &read, &t.Bucket, &until); err != nil {
 				r2.Close()
 				writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
 				return
 			}
 			if received != nil {
 				t.ReceivedAt = received.Format(time.RFC3339)
+			}
+			if read.Valid {
+				t.Read = &read.Bool
+			}
+			if until.Valid && t.Bucket == "set_aside" {
+				t.SnoozeUntil = until.Time.UTC().Format(time.RFC3339Nano)
 			}
 			t.From = firstSenderName(fromJSON)
 			live[t.Account+"\x00"+t.ThreadID] = t
@@ -210,8 +227,7 @@ func (a *App) handleBoard(w http.ResponseWriter, r *http.Request) {
 			if derived[c.account+"\x00"+c.thread] {
 				continue // already on the board on its own
 			}
-			if t, ok := live[c.account+"\x00"+c.thread]; ok {
-				card := cardFromThread(t)
+			if card, ok := live[c.account+"\x00"+c.thread]; ok {
 				card.CardID, card.Note = c.id, c.note
 				cards = append(cards, card)
 			} else {
@@ -315,7 +331,7 @@ func (a *App) handleBoardPin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var mirror, subject string
-	if err := a.db.QueryRowContext(r.Context(), `
+	if err := a.mutationDB(r.Context()).QueryRowContext(r.Context(), `
 		SELECT m.account_id, m.subject FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		WHERE (m.account_id = $2 OR ea.id::text = $2) AND m.thread_id = $3
@@ -328,7 +344,7 @@ func (a *App) handleBoardPin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var id string
-	err = a.db.QueryRowContext(r.Context(), `
+	err = a.mutationDB(r.Context()).QueryRowContext(r.Context(), `
 		INSERT INTO board_cards (user_id, account_id, thread_key, title) VALUES ($1, $2, $3, $4)
 		ON CONFLICT (user_id, account_id, thread_key) WHERE thread_key IS NOT NULL
 		DO NOTHING
@@ -338,7 +354,7 @@ func (a *App) handleBoardPin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, boardCard{CardID: id, Account: mirror, ThreadID: req.ThreadID, Subject: subject, Created: true})
 	case errors.Is(err, sql.ErrNoRows):
 		// Already pinned: report the existing card unchanged.
-		if err := a.db.QueryRowContext(r.Context(), `
+		if err := a.mutationDB(r.Context()).QueryRowContext(r.Context(), `
 			SELECT id::text FROM board_cards
 			WHERE user_id = $1 AND account_id = $2 AND thread_key = $3`,
 			uid, mirror, req.ThreadID).Scan(&id); err != nil {
@@ -375,7 +391,7 @@ func (a *App) handleBoardCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var id string
-	err = a.db.QueryRowContext(r.Context(), `
+	err = a.mutationDB(r.Context()).QueryRowContext(r.Context(), `
 		INSERT INTO board_cards (user_id, thread_key, title, note)
 		VALUES ($1, NULL, $2, $3) RETURNING id::text`, uid, req.Title, req.Note).Scan(&id)
 	if err != nil {
@@ -400,7 +416,7 @@ func (a *App) handleBoardCardDone(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
 		return
 	}
-	res, err := a.db.ExecContext(r.Context(), `
+	res, err := a.mutationDB(r.Context()).ExecContext(r.Context(), `
 		UPDATE board_cards SET done_at = CASE WHEN $3 THEN now() ELSE NULL END
 		WHERE user_id = $1 AND id = $2`, uid, r.PathValue("id"), req.Done)
 	if err != nil {
@@ -429,7 +445,7 @@ func (a *App) handleBoardUnpin(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
 		return
 	}
-	res, err := a.db.ExecContext(r.Context(),
+	res, err := a.mutationDB(r.Context()).ExecContext(r.Context(),
 		`DELETE FROM board_cards WHERE user_id = $1 AND id = $2`, uid, req.CardID)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Delete Failed", err.Error())

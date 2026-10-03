@@ -125,6 +125,9 @@ var productMigrations = []productMigration{
 	{Version: 4, Name: "mutation idempotency ledger", Statements: idempotencyStatements},
 	{Version: 5, Name: "reauthentication and factor budgets", Statements: reauthStatements},
 	{Version: 6, Name: "reconcile job claim stamps", Statements: reconcileClaimStatements},
+	{Version: 7, Name: "mutation response metadata", Statements: []string{
+		`ALTER TABLE api_mutations ADD COLUMN IF NOT EXISTS response_headers text NOT NULL DEFAULT '{}'`,
+	}},
 }
 
 // reconcileClaimStatements stamps account_reconcile_jobs with the claim

@@ -1,41 +1,56 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
+import { generationCurrent, newMutationKey, offlineGeneration, offlineOwner, offlineStorageSuspended } from "../lib/offline";
 import { api } from "../lib/api";
 import { useLoad } from "../lib/useLoad";
-import { accountFilter, accountQS, cursor, resetSelection, setList } from "../lib/store";
+import { accountFilter, accountQS, checked, cursor, resetSelection, rowIdentity, setList } from "../lib/store";
 import { markDone, openThread, sendMail } from "../lib/actions";
 import type { Briefing, BriefThread, Row, ScreenerSender } from "../lib/types";
 import { countOf, daysSince, fmtDate, relativeAge, splitFrom } from "../lib/fmt";
 import { Empty, ListSkeleton, LoadError, PageHead, SectionHead } from "../ui/bits";
 import { ScreenerCard } from "../ui/ScreenerCard";
 import { Icon } from "../ui/Icon";
+import { BulkBar } from "../ui/BulkBar";
 
 /** Briefing threads are always unread Inbox mail, so they act like rows. */
 function asRow(t: BriefThread): Row {
   return { ...t, read: false, bucket: "imbox" };
 }
 
-function InlineReply({ thread, onDone }: { thread: BriefThread; onDone: () => void }) {
+export function InlineReply({ thread, onDone }: { thread: BriefThread; onDone: () => void }) {
   const who = splitFrom(thread.from);
   const [text, setText] = useState("");
+  const textNow = useRef("");
   const [sending, setSending] = useState(false);
+  const sendingNow = useRef(false);
+  const retry = useRef<{ body: string; key: string }>();
+  const gen = useRef(offlineGeneration()).current;
+  const owner = useRef(offlineOwner()).current;
+  const current = () => !offlineStorageSuspended() && generationCurrent(gen) && offlineOwner() === owner;
 
   const send = async () => {
-    if (!text.trim() || sending) return;
+    const text = textNow.current;
+    if (!text.trim() || sendingNow.current || !current()) return;
+    sendingNow.current = true; // button + keyboard can activate before a render
     setSending(true);
-    const ok = await sendMail({
-      to: who.email, subject: thread.subject || "", text, replyToId: thread.message_id, accountId: thread.account,
-    });
-    setSending(false);
-    if (ok) onDone();
+    const input = { to: who.email, subject: thread.subject || "", text, replyToId: thread.message_id, accountId: thread.account };
+    const body = JSON.stringify(input);
+    if (retry.current?.body !== body) retry.current = { body, key: newMutationKey() };
+    try {
+      const ok = await sendMail(input, retry.current.key);
+      if (ok && current()) onDone();
+    } finally {
+      sendingNow.current = false;
+      setSending(false);
+    }
   };
 
   return (
     <div class="inline-reply">
       <textarea
-        class="inline-ta" rows={3} autofocus
+        class="inline-ta" rows={3} autofocus disabled={sending}
         placeholder={"Reply to " + (who.name || who.email) + "…"}
         value={text}
-        onInput={(ev) => setText((ev.target as HTMLTextAreaElement).value)}
+        onInput={(ev) => { retry.current = undefined; textNow.current = (ev.target as HTMLTextAreaElement).value; setText(textNow.current); }}
         onKeyDown={(ev) => {
           if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") { ev.preventDefault(); send(); }
           if (ev.key === "Escape") onDone();
@@ -55,14 +70,16 @@ function InlineReply({ thread, onDone }: { thread: BriefThread; onDone: () => vo
 function NeedsRow({ thread, index }: { thread: BriefThread; index: number }) {
   const who = splitFrom(thread.from);
   const [replying, setReplying] = useState(false);
+  const selected = checked.value.has(rowIdentity(thread));
 
   return (
     <div
-      class={"digest" + (cursor.value === index ? " cursor" : "")}
+      class={"digest" + (cursor.value === index ? " cursor" : "") + (selected ? " picked" : "")}
       data-cursor-index={index}
       onClick={() => { cursor.value = index; }}
     >
       <div class="digest-top">
+        {selected && <span class="chip">Selected</span>}
         <span class="digest-sender">{who.name || who.email}</span>
         <span class="digest-date">{fmtDate(thread.received_at)}</span>
       </div>
@@ -137,6 +154,7 @@ export function TodayView() {
 
   return (
     <>
+      <BulkBar />
       <PageHead kicker="Today" title={today} sub={sub} />
 
       {/* The day surfaces live here, not in the topline — Today is their
@@ -154,7 +172,7 @@ export function TodayView() {
       {needs.length > 0 && (
         <>
           <SectionHead title="Needs you" count={needs.length} />
-          {needs.map((t, i) => <NeedsRow thread={t} index={i} key={t.thread_id} />)}
+          {needs.map((t, i) => <NeedsRow thread={t} index={i} key={t.account + ":" + t.thread_id} />)}
         </>
       )}
 
@@ -179,7 +197,7 @@ export function TodayView() {
       {waiting.length > 0 && (
         <>
           <SectionHead title="You're waiting" count={waiting.length} />
-          {waiting.map((t) => <WaitingRow thread={t} key={t.thread_id} />)}
+          {waiting.map((t) => <WaitingRow thread={t} key={t.account + ":" + t.thread_id} />)}
         </>
       )}
 

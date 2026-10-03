@@ -513,3 +513,117 @@ func TestIntegrationScanGenerationsAndDestroyedEvidence(t *testing.T) {
 		t.Error("PruneScanDone kept another generation's markers")
 	}
 }
+
+// Failure after final-page staging, pruning, and cursor publication must
+// roll back all of them. After a successful retry, reopening the pool must
+// see a completed generation and must never enumerate the mailbox again.
+func TestIntegrationFinalScanPageAtomicRollbackAndRestart(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	acct := seedScanMailbox(t, s)
+	one := HeaderMessageID("<k1@example.com>")
+	two := HeaderMessageID("<k2@example.com>")
+	three := HeaderMessageID("<k3@example.com>")
+	scan, err := s.BeginScanGeneration(ctx, acct, "INBOX", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApplyScanPage(ctx, scan.ID, nil, []MessageID{one}, nil, "last-page"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The completion marker is written after staging and pruning. Failing
+	// there proves that even those earlier statements share its transaction.
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE mail_scan_done ADD CONSTRAINT reject_test_generation CHECK (generation <> 7)`); err != nil {
+		t.Fatal(err)
+	}
+	finalEnvs := []Envelope{{ID: three, MailboxIDs: []MailboxID{"INBOX"}, Subject: "three"}}
+	if _, err := s.ApplyFinalScanPage(ctx, scan.ID, finalEnvs, []MessageID{three}, []MessageID{one}, "incremental-terminal"); err == nil {
+		t.Fatal("terminal transaction unexpectedly ignored the failing completion marker")
+	}
+	running, err := s.RunningScan(ctx, acct, "INBOX")
+	if err != nil || running.ID != scan.ID || running.Generation != 7 || running.Continuation != "last-page" {
+		t.Fatalf("rollback changed the scan: %+v, err %v", running, err)
+	}
+	if cursor, err := s.Cursor(ctx, acct, "INBOX"); err != nil || cursor != "stale-cursor" {
+		t.Fatalf("rollback published cursor %q, err %v", cursor, err)
+	}
+	for _, id := range []MessageID{one, two} {
+		if _, err := s.Envelope(ctx, acct, id); err != nil {
+			t.Fatalf("rollback lost original message %s: %v", id, err)
+		}
+	}
+	if _, err := s.Envelope(ctx, acct, three); !errors.Is(err, ErrNoStore) {
+		t.Fatalf("rollback retained terminal-page envelope: %v", err)
+	}
+	var seen int
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM mirror_scan_seen WHERE scan_id=$1 AND message_id=$2`, string(scan.ID), string(one)).Scan(&seen); err != nil || seen != 1 {
+		t.Fatalf("rollback lost prior positive evidence: count %d, err %v", seen, err)
+	}
+	if done, err := s.ScanDone(ctx, acct, "INBOX", 7); err != nil || done {
+		t.Fatalf("rollback recorded completion: %v, err %v", done, err)
+	}
+
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE mail_scan_done DROP CONSTRAINT reject_test_generation`); err != nil {
+		t.Fatal(err)
+	}
+	pruned, err := s.ApplyFinalScanPage(ctx, scan.ID, finalEnvs, []MessageID{three}, []MessageID{one}, "incremental-terminal")
+	if err != nil || pruned != 1 {
+		t.Fatalf("final-page retry pruned %d, err %v, want message two pruned", pruned, err)
+	}
+	s.Close()
+	reopened, err := Open(ctx, osGetenvTestURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	assertCompletedScan(t, reopened, acct, 7, "incremental-terminal")
+	if n := countMessages(t, reopened, acct); n != 1 {
+		t.Fatalf("completed scan holds %d messages, want only message three", n)
+	}
+	if _, err := reopened.Envelope(ctx, acct, three); err != nil {
+		t.Fatalf("final envelope did not survive reopening: %v", err)
+	}
+	var stagedRows int
+	if err := reopened.pool.QueryRow(ctx, `SELECT COUNT(*) FROM mirror_scan_seen WHERE scan_id=$1`, string(scan.ID)).Scan(&stagedRows); err != nil || stagedRows != 0 {
+		t.Fatalf("completed scan left %d staged rows, err %v", stagedRows, err)
+	}
+
+	eng := NewEngine(reopened, discardLogger())
+	ad := &scriptedAdapter{boxes: []Mailbox{{ID: "INBOX"}}}
+	if err := eng.RequestRescanVersion(ctx, acct, ad, 7); err != nil {
+		t.Fatal(err)
+	}
+	assertCompletedScan(t, reopened, acct, 7, "incremental-terminal")
+	if _, err := eng.SyncMailbox(ctx, acct, "INBOX", ad); err != nil {
+		t.Fatal(err)
+	}
+	if len(ad.seenCursors) != 1 || ad.seenCursors[0] != "incremental-terminal" {
+		t.Fatalf("completed scan re-enumerated after restart: %v", ad.seenCursors)
+	}
+}
+
+func TestIntegrationFinalScanPageRejectsReplacedScan(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	acct := seedScanMailbox(t, s)
+	old, err := s.BeginScanGeneration(ctx, acct, "INBOX", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := s.BeginScanGeneration(ctx, acct, "INBOX", 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := HeaderMessageID("<stale-page@example.com>")
+	if _, err := s.ApplyFinalScanPage(ctx, old.ID, []Envelope{{ID: id, MailboxIDs: []MailboxID{"INBOX"}}}, []MessageID{id}, nil, "obsolete-terminal"); !errors.Is(err, ErrNoStore) {
+		t.Fatalf("stale final-page error = %v, want ErrNoStore", err)
+	}
+	running, err := s.RunningScan(ctx, acct, "INBOX")
+	if err != nil || running.ID != current.ID || running.Generation != 8 || running.Continuation != "" {
+		t.Fatalf("stale page changed replacement scan: %+v, err %v", running, err)
+	}
+	if n := countMessages(t, s, acct); n != 2 {
+		t.Fatalf("stale final page changed live messages: count %d, want 2", n)
+	}
+}

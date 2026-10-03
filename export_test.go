@@ -3,8 +3,10 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"database/sql/driver"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -164,5 +166,27 @@ func TestUniqueMboxNameNeverDuplicates(t *testing.T) {
 		if !strings.EqualFold(got[i], want[i]) {
 			t.Fatalf("allocation %d = %q, want %q (all: %v)", i, got[i], want[i], got)
 		}
+	}
+}
+
+func TestExportProviderTimeoutFallsBackButRequestCancellationStops(t *testing.T) {
+	for _, sourceErr := range []error{context.DeadlineExceeded, context.Canceled, fmt.Errorf("provider: %w", context.DeadlineExceeded)} {
+		if outcome := exportSourceOutcome(context.Background(), sourceErr); outcome != "fallback" {
+			t.Fatalf("healthy request with %v became %s", sourceErr, outcome)
+		}
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, stop := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer stop()
+	for _, ctx := range []context.Context{cancelled, expired} {
+		for _, sourceErr := range []error{nil, context.DeadlineExceeded} {
+			if outcome := exportSourceOutcome(ctx, sourceErr); outcome != "cancelled" {
+				t.Fatalf("ended request continued as %s", outcome)
+			}
+		}
+	}
+	if outcome := exportSourceOutcome(context.Background(), nil); outcome != "original" {
+		t.Fatal("healthy original misclassified", outcome)
 	}
 }

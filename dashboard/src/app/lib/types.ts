@@ -37,6 +37,9 @@ export interface BoardCard {
   preview?: string;
   note?: string;
   manual?: boolean;
+  read?: boolean;
+  bucket?: Bucket;
+  snooze_until?: string;
   /** True only when the pin call created this card; an undo may only
       remove cards the operation itself created (audit 4 F20). */
   created?: boolean;
@@ -122,6 +125,8 @@ export interface Person {
 
 export interface Account {
   id: string;
+  /** Present on current servers; optional during rolling upgrades. */
+  mirror_account_id?: string;
   provider: string;
   address: string;
   label: string;

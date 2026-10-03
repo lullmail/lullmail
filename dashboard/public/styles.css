@@ -731,10 +731,11 @@ button { font: inherit; cursor: pointer; border: none; background: none; color: 
   display: none; align-items: center; justify-content: center; color: transparent;
 }
 .msg-row:hover .row-check,
+.msg-row:focus-within .row-check,
 .msg-row.picked .row-check,
 .has-selection .row-check { display: flex; }
 .msg-row.picked .row-check { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
-.msg-row:hover.unread::before, .has-selection .msg-row.unread::before { opacity: 0; }
+.msg-row:hover.unread::before, .msg-row:focus-within.unread::before, .has-selection .msg-row.unread::before { opacity: 0; }
 
 .row-top { display: flex; align-items: baseline; gap: var(--sp-2); }
 .row-sender {
@@ -806,6 +807,7 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 }
 .digest:first-of-type { border-top: none; }
 .digest.cursor { background: var(--hover); box-shadow: inset 2px 0 0 var(--accent); }
+.digest.picked { background: var(--accent-soft); }
 .digest-top { display: flex; align-items: baseline; gap: var(--sp-2); }
 .digest-sender { font-size: var(--t-base); font-weight: 680; color: var(--ink-2); }
 .digest-date { margin-left: auto; font-size: var(--t-sm); color: var(--ink-3); flex: none; }
@@ -1648,6 +1650,7 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 }
 .board-card:first-of-type { border-top: none; }
 .board-card.cursor { background: var(--hover); box-shadow: inset 2px 0 0 var(--accent); }
+.board-card.picked { background: var(--accent-soft); }
 .board-card-top { display: flex; align-items: baseline; gap: var(--sp-2); }
 .board-card-who { font-size: var(--t-base); font-weight: 680; color: var(--ink-2); }
 .board-card-date { margin-left: auto; font-size: var(--t-sm); color: var(--ink-3); flex: none; }

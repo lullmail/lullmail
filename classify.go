@@ -530,7 +530,7 @@ func (a *App) handleDecide(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
 		return
 	}
-	tx, err := a.db.BeginTx(r.Context(), nil)
+	tx, err := a.beginMutation(r.Context())
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Begin Failed", err.Error())
 		return
@@ -539,7 +539,7 @@ func (a *App) handleDecide(w http.ResponseWriter, r *http.Request) {
 	// The owner-row lock serializes the decision with classification's
 	// batch insert, closing the window where both commit and neither sees
 	// the other (audit DATA-02).
-	if _, err := lockAuthUser(r.Context(), tx, uid); err != nil {
+	if _, err := lockAuthUser(r.Context(), tx.Tx, uid); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Decide Failed", err.Error())
 		return
 	}
@@ -602,13 +602,13 @@ func (a *App) handleUndecide(w http.ResponseWriter, r *http.Request) {
 	// competing decision commit in between, so undecide could delete the
 	// NEW rule while recalling mail bucketed by the OLD one (audit 3
 	// DATA-02).
-	tx, err := a.db.BeginTx(r.Context(), nil)
+	tx, err := a.beginMutation(r.Context())
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Begin Failed", err.Error())
 		return
 	}
 	defer tx.Rollback()
-	if _, err := lockAuthUser(r.Context(), tx, uid); err != nil {
+	if _, err := lockAuthUser(r.Context(), tx.Tx, uid); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Undecide Failed", err.Error())
 		return
 	}
@@ -1257,7 +1257,7 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 		WHERE m.id = $2 AND (m.account_id = $3 OR ea.id::text = $3)`
 	lookupArgs := []any{uid, msg, account}
 	lookup += ` ORDER BY m.received_at DESC NULLS LAST LIMIT 1`
-	if err := a.db.QueryRowContext(r.Context(), lookup, lookupArgs...).Scan(&acct, &thread); err != nil {
+	if err := a.mutationDB(r.Context()).QueryRowContext(r.Context(), lookup, lookupArgs...).Scan(&acct, &thread); err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			a.log.Error("message action lookup failed", "err", err)
 		}
@@ -1354,7 +1354,7 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusUnprocessableEntity, "Unknown Action", req.Action)
 		return
 	}
-	res, err := a.db.ExecContext(r.Context(), q, args...)
+	res, err := a.mutationDB(r.Context()).ExecContext(r.Context(), q, args...)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Update Failed", err.Error())
 		return
@@ -1367,7 +1367,7 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 	// can see what landed (audit DATA-07).
 	var bucket string
 	var appliedUntil sql.NullTime
-	if err := a.db.QueryRowContext(r.Context(),
+	if err := a.mutationDB(r.Context()).QueryRowContext(r.Context(),
 		`SELECT bucket, set_aside_until FROM hey_messages h
 		 WHERE h.user_id=$1 AND h.account_id=$2 AND h.message_id=$3`, uid, acct, msg).
 		Scan(&bucket, &appliedUntil); err != nil {

@@ -865,6 +865,7 @@ var _ Store = (*PgStore)(nil)
 // ---------------------------------------------------------------------------
 
 var _ ScanStore = (*PgStore)(nil)
+var _ FinalScanPageStore = (*PgStore)(nil)
 
 // BeginScan starts a staged scan, discarding any previous staged progress
 // for the mailbox. Nothing live is touched.
@@ -989,29 +990,53 @@ func (s *PgStore) RunningScans(ctx context.Context, acct AccountID) ([]Scan, err
 // mailbox's live membership, continuation advanced — one transaction
 // under the account maintenance lock. A failure stages nothing.
 func (s *PgStore) ApplyScanPage(ctx context.Context, scan ScanID, envs []Envelope, seen, destroyed []MessageID, next Cursor) error {
+	_, err := s.applyScanPage(ctx, scan, envs, seen, destroyed, next, false)
+	return err
+}
+
+// ApplyFinalScanPage stages the final page and finalizes the scan in the
+// SAME transaction. There is no durable state containing a terminal cursor
+// without its completion marker, and any failure rolls back the whole page.
+func (s *PgStore) ApplyFinalScanPage(ctx context.Context, scan ScanID, envs []Envelope, seen, destroyed []MessageID, terminal Cursor) (int, error) {
+	return s.applyScanPage(ctx, scan, envs, seen, destroyed, terminal, true)
+}
+
+func (s *PgStore) applyScanPage(ctx context.Context, scan ScanID, envs []Envelope, seen, destroyed []MessageID, next Cursor, final bool) (int, error) {
 	var acct AccountID
 	var box MailboxID
-	var generation int64
 	if err := s.pool.QueryRow(ctx,
-		`SELECT account_id, mailbox_id, generation FROM mirror_scans WHERE id = $1`,
-		string(scan)).Scan(&acct, &box, &generation); err != nil {
+		`SELECT account_id, mailbox_id FROM mirror_scans WHERE id = $1`,
+		string(scan)).Scan(&acct, &box); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrNoStore
+			return 0, ErrNoStore
 		}
-		return fmt.Errorf("mail: scan page lookup: %w", err)
+		return 0, fmt.Errorf("mail: scan page lookup: %w", err)
 	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("mail: apply scan page: %w", err)
+		return 0, fmt.Errorf("mail: apply scan page: %w", err)
 	}
 	defer tx.Rollback(ctx)
 	if err := s.lockAccountTx(ctx, tx, acct); err != nil {
-		return err
+		return 0, err
+	}
+
+	// The scope lookup precedes the account lock. A replacement scan may
+	// have won that lock first; reject this stale page before writing any
+	// envelopes or seen rows for a scan that no longer exists.
+	var exists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM mirror_scans WHERE id = $1 AND account_id = $2 AND mailbox_id = $3)`,
+		string(scan), string(acct), string(box)).Scan(&exists); err != nil {
+		return 0, fmt.Errorf("mail: recheck scan page: %w", err)
+	}
+	if !exists {
+		return 0, ErrNoStore
 	}
 
 	if err := putEnvelopesTx(ctx, tx, acct, envs); err != nil {
-		return err
+		return 0, err
 	}
 
 	batch := &pgx.Batch{}
@@ -1032,9 +1057,19 @@ func (s *PgStore) ApplyScanPage(ctx context.Context, scan ScanID, envs []Envelop
 	}
 	batch.Queue(`UPDATE mirror_scans SET continuation = $2 WHERE id = $1`, string(scan), string(next))
 	if err := tx.SendBatch(ctx, batch).Close(); err != nil {
-		return fmt.Errorf("mail: stage scan page: %w", err)
+		return 0, fmt.Errorf("mail: stage scan page: %w", err)
 	}
-	return tx.Commit(ctx)
+	var pruned int
+	if final {
+		pruned, err = finishScanTx(ctx, tx, acct, box, scan, next)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return pruned, nil
 }
 
 // FinishScan completes the scan authoritatively in one transaction under
@@ -1054,6 +1089,19 @@ func (s *PgStore) FinishScan(ctx context.Context, acct AccountID, box MailboxID,
 		return 0, err
 	}
 
+	pruned, err := finishScanTx(ctx, tx, acct, box, scan, terminal)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return pruned, nil
+}
+
+// finishScanTx requires the account maintenance lock and commits nothing;
+// both standalone finalization and atomic final-page staging use it.
+func finishScanTx(ctx context.Context, tx pgx.Tx, acct AccountID, box MailboxID, scan ScanID, terminal Cursor) (int, error) {
 	var generation int64
 	var exists bool
 	if err := tx.QueryRow(ctx,
@@ -1132,8 +1180,5 @@ func (s *PgStore) FinishScan(ctx context.Context, acct AccountID, box MailboxID,
 		}
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return 0, err
-	}
 	return pruned, nil
 }

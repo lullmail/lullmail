@@ -74,7 +74,16 @@ func (m *memStore) RunningScans(_ context.Context, acct AccountID) ([]Scan, erro
 	return out, nil
 }
 
-func (m *memStore) ApplyScanPage(_ context.Context, scan ScanID, envs []Envelope, seen, destroyed []MessageID, next Cursor) error {
+func (m *memStore) ApplyScanPage(ctx context.Context, scan ScanID, envs []Envelope, seen, destroyed []MessageID, next Cursor) error {
+	_, err := m.applyScanPage(scan, envs, seen, destroyed, next, false)
+	return err
+}
+
+func (m *memStore) ApplyFinalScanPage(ctx context.Context, scan ScanID, envs []Envelope, seen, destroyed []MessageID, terminal Cursor) (int, error) {
+	return m.applyScanPage(scan, envs, seen, destroyed, terminal, true)
+}
+
+func (m *memStore) applyScanPage(scan ScanID, envs []Envelope, seen, destroyed []MessageID, next Cursor, final bool) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var acct AccountID
@@ -88,13 +97,17 @@ func (m *memStore) ApplyScanPage(_ context.Context, scan ScanID, envs []Envelope
 		}
 	}
 	if !found {
-		return ErrNoStore
+		return 0, ErrNoStore
+	}
+	// Validate the complete write set before touching the test mirror, just
+	// as a PostgreSQL transaction rolls back a later invalid envelope.
+	for _, e := range envs {
+		if err := e.ID.Validate(); err != nil {
+			return 0, err
+		}
 	}
 	for i := range envs {
 		e := envs[i]
-		if err := e.ID.Validate(); err != nil {
-			return err
-		}
 		if e.Fingerprint == "" {
 			e.Fingerprint = ComputeFingerprint(&e)
 		}
@@ -141,12 +154,19 @@ func (m *memStore) ApplyScanPage(_ context.Context, scan ScanID, envs []Envelope
 			}
 		}
 	}
-	return nil
+	if final {
+		return m.finishScanLocked(scanAcct, scanBox, scan, next)
+	}
+	return 0, nil
 }
 
 func (m *memStore) FinishScan(_ context.Context, acct AccountID, box MailboxID, scan ScanID, terminal Cursor) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.finishScanLocked(acct, box, scan, terminal)
+}
+
+func (m *memStore) finishScanLocked(acct AccountID, box MailboxID, scan ScanID, terminal Cursor) (int, error) {
 	s, ok := m.scans[acct][box]
 	if !ok || s.ID != scan {
 		return 0, ErrNoStore
@@ -185,6 +205,7 @@ func (m *memStore) FinishScan(_ context.Context, acct AccountID, box MailboxID, 
 }
 
 var _ ScanStore = (*memStore)(nil)
+var _ FinalScanPageStore = (*memStore)(nil)
 
 // ---------------------------------------------------------------------------
 // Staged reconciliation tests (audit SYNC-03/SYNC-02)

@@ -8,7 +8,7 @@ is the register the audit asked for: route, auth, body bound, notes.
 ## Conventions
 
 - "session" = the HttpOnly session cookie; "agent" = agent Bearer token
-  (`requireAgent`); "public" = no auth or setup-token gated.
+  (the path allowlist in `agent.go`); "public" = no auth or setup-token gated.
 - Body bounds are enforced with `http.MaxBytesReader` ahead of allocation;
   exceeding one answers **413 Request Too Large**, never a malformed-JSON 400.
 - The send route additionally acquires one of 2 global decode slots BEFORE
@@ -23,8 +23,8 @@ is the register the audit asked for: route, auth, body bound, notes.
 | `DELETE /api/outbox/{id}` | session/agent | — | undo window |
 | `GET /api/accounts` `POST /api/accounts` | session/agent | 64 KiB | create: IMAP/JMAP credential form |
 | `GET/POST/DELETE /api/accounts/{id}` | session/agent | 16 KiB, strict single-object, unknown fields rejected | settings (`decodeSettingsJSON`, audit 3 DATA-07) |
-| `GET /api/accounts/{id}/export` | session/agent | — | build disk budget 2 GiB (`budgetedWriter`), per provider message read ≤128 MiB, temp file removed on every return path; stale temps swept at boot |
-| `GET /api/events` | session/agent | — | SSE |
+| `GET /api/accounts/{id}/export` | session | — | build disk budget 2 GiB (`budgetedWriter`), per provider message read ≤128 MiB, temp file removed on every return path; stale temps swept at boot |
+| `GET /api/events` | session | — | SSE |
 | `GET /api/security`, sessions, passkeys, TOTP, password | session | 4–16 KiB per ceremony | bootstrap begin 64 KiB (name/email form); TOTP confirm 4 KiB; TOTP/password/recovery mutations answer 428 without proof ≤10 min old (audit AUTH-02) |
 | `POST /api/security/reauthenticate` | session | 16 KiB | password confirmation; KDF admission + account lockout as sign-in (audit AUTH-02) |
 | `POST/DELETE /api/security/agent-tokens…` | session | 16 KiB | creation gated on ≤10 min proof (audit AUTH-02) |
@@ -32,20 +32,21 @@ is the register the audit asked for: route, auth, body bound, notes.
 | `GET /api/personal/export` | session/agent | — | trust export |
 | `GET/POST/DELETE /api/push` | session | 64 KiB | |
 | `POST /api/oauth/{provider}/start` | session | — | |
-| `GET /api/screener`, `/api/counts`, `/api/prefs` | session/agent | — | |
+| `GET /api/screener`, `/api/counts` | session/agent | — | |
+| `GET /api/prefs` | session | — | |
 | `POST /api/prefs` | session | 64 KiB | |
 | `GET /api/search` | session/agent | — | `limit` 1–200 (default 60), keyset `cursor` |
 | `GET /api/briefing`, `/api/board`, `/api/people`, `/api/recent`, `/api/folder`, `/api/mailboxes` | session/agent | — | |
-| `POST /api/board/pin` `unpin` `cards` `cards/{id}/done` | session | 64 KiB | idempotent (`Idempotency-Key`) |
-| `GET /api/notes` | session | — | |
-| `POST /api/notes`, `POST /api/notes/{id}`, `DELETE /api/notes/{id}` | session | 64 KiB | idempotent |
-| `POST /api/screener/decide`, `undecide` | session | 64 KiB | idempotent |
+| `POST /api/board/pin` `unpin` `cards` `cards/{id}/done` | session/agent | 64 KiB | idempotent (`Idempotency-Key`) |
+| `GET /api/notes` | session/agent | — | |
+| `POST /api/notes`, `POST /api/notes/{id}`, `DELETE /api/notes/{id}` | session/agent | 64 KiB | idempotent |
+| `POST /api/screener/decide`, `undecide` | session/agent | 64 KiB | idempotent |
 | `GET /api/buckets/{bucket}` | session/agent | — | `limit` 1–200 (default 200), keyset `cursor` |
 | `GET /api/threads/{thread}` | session/agent | — | account param required; eager body fetch ≤8 messages / 8 s |
-| `POST /api/messages/{message}/action` | session | 64 KiB | idempotent; snooze `until` absolute RFC3339 or null (audit DATA-07) |
-| `GET /api/messages/{message}/attachment/{part}` | session | — | streams; aborts the connection on a mid-stream error |
-| `GET /api/messages/{message}/eml` | session | — | provider read ≤128 MiB, mirror fallback beyond |
-| `POST /api/classify` | session | — | |
+| `POST /api/messages/{message}/action` | session/agent | 64 KiB | idempotent; snooze `until` absolute RFC3339 or null (audit DATA-07) |
+| `GET /api/messages/{message}/attachment/{part}` | session/agent | — | streams; aborts the connection on a mid-stream error |
+| `GET /api/messages/{message}/eml` | session/agent | — | provider read ≤128 MiB, mirror fallback beyond |
+| `POST /api/classify` | session/agent | — | |
 
 ## Auth surface (public, `/api/auth/...`)
 
@@ -54,7 +55,7 @@ is the register the audit asked for: route, auth, body bound, notes.
 | `GET /api/auth/status` | — | — |
 | `POST /api/auth/bootstrap/begin` | one-time setup token | 64 KiB (name/email form) |
 | `POST /api/auth/bootstrap/finish` `password` | one-time setup token | 16 KiB (WebAuthn/password ceremony) |
-| `POST /api/auth/login/begin` `finish` | public | 16 KiB |
+| `POST /api/auth/login/begin` `finish` | public | 16 KiB; finish is bounded before WebAuthn decoding (including trailing bytes) |
 | `POST /api/auth/logout` | session | — |
 | `POST /api/auth/password` | public (proof-carrying) | 16 KiB |
 | `POST /api/auth/recovery` | public (code-carrying) | 16 KiB |

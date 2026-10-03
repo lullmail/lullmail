@@ -1,8 +1,8 @@
 package main
 
 // Outbound with an undo window (SPEC §6.1): sends sit in-process for a few
-// seconds before SMTP submission; DELETE cancels. Five seconds is the whole
-// feature — no queue table, no worker, just a timer map.
+// seconds before provider submission; DELETE cancels. Timers and bounded
+// completion receipts are process-local; durable recovery needs an outbox.
 
 import (
 	"context"
@@ -12,8 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"html"
-	"log/slog"
 	"io"
+	"log/slog"
 	"net/http"
 	netmail "net/mail"
 	"regexp"
@@ -32,11 +32,11 @@ type pendingSend struct {
 	state  sendState
 	// Idempotent-acceptance bookkeeping (audit 5 SEND-02): the client's
 	// Idempotency-Key and the request hash it was answered for. The key
-	// indexes the entry for the entry's lifetime — the acknowledged
-	// window a lost response can be retried within.
-	key        string
-	reqHash    string
-	enqueuedAt time.Time
+	// is owner-scoped and indexes pending work; a bounded receipt retains the
+	// outcome afterward without retaining message content.
+	key       string
+	reqHash   string
+	undoUntil time.Time
 }
 
 type sendState uint8
@@ -49,15 +49,37 @@ const (
 type sendQueue struct {
 	mu    sync.Mutex
 	sends map[string]*pendingSend
-	// keyed maps Idempotency-Key -> queued send id while that send lives
-	// in the queue (audit 5 SEND-02): a retried acceptance whose first
-	// response was lost re-receives the SAME queued id instead of
-	// submitting a second message. Entries leave with their send.
-	keyed map[string]string
+	// keyed indexes live work; receipts retain completed/ambiguous/cancelled
+	// outcomes after the payload and its budget slot have been released.
+	keyed    map[string]string
+	receipts map[string]sendReceipt
 	// Aggregate admission budget: per-request caps alone do not bound how
 	// many accepted compositions (decoded attachments included) can sit in
 	// the process at once (audit 3 SEND-03).
 	budget sendBudget
+}
+
+// Receipts are deliberately bounded and process-local. They cover ordinary
+// lost-response retries after transport completion, but do not replace the
+// durable outbox: expiry, capacity eviction, or restart can forget a key.
+const (
+	sendReceiptTTL   = 24 * time.Hour
+	sendReceiptLimit = 4096
+)
+
+type sendOutcome string
+
+const (
+	sendSubmitted sendOutcome = "submitted"
+	sendAmbiguous sendOutcome = "ambiguous"
+	sendCancelled sendOutcome = "cancelled"
+)
+
+type sendReceipt struct {
+	id        string
+	reqHash   string
+	outcome   sendOutcome
+	expiresAt time.Time
 }
 
 // sendBudget bounds concurrently accepted sends by job count and estimated
@@ -168,7 +190,7 @@ func withBodyDeadline(limit time.Duration, next http.HandlerFunc) http.HandlerFu
 }
 
 func newSendQueue() *sendQueue {
-	return &sendQueue{sends: map[string]*pendingSend{}, keyed: map[string]string{}}
+	return &sendQueue{sends: map[string]*pendingSend{}, keyed: map[string]string{}, receipts: map[string]sendReceipt{}}
 }
 
 func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
@@ -177,7 +199,7 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 	// the 1 MiB ledger buffer), but a lost acceptance response still needs
 	// the same one-submission contract. The raw body is hashed BEFORE
 	// decoding so the retry comparison is exact; the key is honored for
-	// the acknowledged entry's lifetime.
+	// the active entry and bounded process-local completion receipt.
 	idempotencyKey := r.Header.Get("Idempotency-Key")
 	if len(idempotencyKey) > idempotencyKeyLimit {
 		writeProblem(w, http.StatusRequestEntityTooLarge, "Key Too Long",
@@ -222,28 +244,23 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if idempotencyKey != "" {
-		reqHash := mutationRequestHash(r.Method, r.URL.Path, r.URL.RawQuery, rawBody)
-		a.sendq.mu.Lock()
-		existingID, hit := a.sendq.keyed[idempotencyKey]
-		existing := a.sendq.sends[existingID]
-		a.sendq.mu.Unlock()
-		if hit && existing != nil {
-			if existing.reqHash != reqHash {
-				writeProblem(w, http.StatusConflict, "Key Reused",
-					"this Idempotency-Key was already used for a different send")
-				return
-			}
-			remaining := int(undoWindow.Seconds() - time.Since(existing.enqueuedAt).Seconds())
-			if remaining < 0 {
-				remaining = 0
-			}
-			writeJSON(w, map[string]any{"queued": existingID, "undo_seconds": remaining})
+		// Receipts can outlive a session or owner deletion. Keep retry
+		// identities isolated even if a later owner chooses the same key.
+		uid, err := a.userID(r.Context())
+		if err != nil {
+			writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
 			return
 		}
-		// No live entry under this key: the previous send under it already
-		// completed (or the process restarted). A retry past the entry's
-		// lifetime is a genuinely new submission — the durable-outbox
-		// deferral (SEND-01/lullmail-10) owns the beyond-restart contract.
+		idempotencyKey = uid + "\x00" + idempotencyKey
+		a.sendq.mu.Lock()
+		replay := a.sendq.sendReplay(idempotencyKey, sendRequestHash(r, rawBody))
+		a.sendq.mu.Unlock()
+		if replay != nil {
+			replay(w)
+			return
+		}
+		// This is only a fast path. enqueue checks the key again under
+		// the SAME lock as admission and publication, after validation.
 	}
 	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
@@ -414,8 +431,8 @@ func sendRequestHash(r *http.Request, rawBody []byte) string {
 }
 
 type sendAttachmentRequest struct {
-	Filename    string  `json:"filename"`
-	ContentType string  `json:"content_type"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
 	// DataB64 is a POINTER so a present-but-empty string — the valid
 	// base64 of a zero-byte file — is distinguishable from an omitted
 	// field (audit 5 SEND-03).
@@ -585,17 +602,15 @@ func (a *App) deliveryFor(ctx context.Context, account mail.AccountID, replyPare
 // transport: admission, credential resolution, submission, and Sent-copy
 // filing. Deletion therefore waits for an admitted send, and a send whose
 // account has started deleting fails admission instead of submitting for a
-// disconnected mailbox. The gate key in the context makes nested
-// beginAccountUse calls (fileSent -> accountResolver) no-ops instead of
-// recursively taking the owner read lock while a deletion writer waits.
+// disconnected mailbox. The qualified gate context preserves cancellation
+// through nested resolver calls without taking another account lease.
 func (a *App) guardDelivery(account mail.AccountID, next deliverFunc) deliverFunc {
 	return func(ctx context.Context, outgoing *mail.Outgoing) error {
-		release, ok := a.beginAccountUse(account)
+		ctx, release, ok := a.beginAccountWorkCtx(ctx, account)
 		if !ok {
 			return fmt.Errorf("account %s is being deleted", account)
 		}
 		defer release()
-		ctx = context.WithValue(ctx, accountGateKey{}, account)
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -655,35 +670,49 @@ func (a *App) fileSent(ctx context.Context, account mail.AccountID, raw []byte) 
 }
 
 func (a *App) enqueue(w http.ResponseWriter, deliver deliverFunc, outgoing *mail.Outgoing, idempotencyKey, reqHash string) {
-	// Admission before acceptance: a full budget answers 429 rather than
-	// accepting work the process cannot responsibly hold (audit 3 SEND-03).
+	a.enqueueAfter(w, deliver, outgoing, idempotencyKey, reqHash, undoWindow)
+}
+
+// The delay is explicit so concurrency/outcome tests need no wall-clock wait.
+// Production always enters through enqueue with the standard undo window.
+func (a *App) enqueueAfter(w http.ResponseWriter, deliver deliverFunc, outgoing *mail.Outgoing, idempotencyKey, reqHash string, delay time.Duration) {
+	// Claim/check and publication are one critical section. Checking only
+	// in handleSend lets concurrent requests both pass validation and send.
+	// Replay before budget admission: a full queue must still replay a
+	// previously accepted request without reserving a second job.
+	a.sendq.mu.Lock()
+	if replay := a.sendq.sendReplay(idempotencyKey, reqHash); replay != nil {
+		a.sendq.mu.Unlock()
+		replay(w)
+		return
+	}
 	release, err := a.sendq.budget.acquire(outgoingWeight(outgoing))
 	if err != nil {
+		a.sendq.mu.Unlock()
 		w.Header().Set("Retry-After", "5")
 		writeProblem(w, http.StatusTooManyRequests, "Too Many Sends",
 			"too many sends are already in flight — try again in a few seconds")
 		return
 	}
-	a.sendq.mu.Lock()
 	id := time.Now().Format("150405.000") + "-" + newID()[:6]
-	ctx, cancel := context.WithTimeout(a.bgRoot(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(a.tasksGroup().ctx, 60*time.Second)
 	done := make(chan error, 1)
 	a.sendq.sends[id] = &pendingSend{
-		cancel:     cancel,
-		done:       done,
-		key:        idempotencyKey,
-		reqHash:    reqHash,
-		enqueuedAt: time.Now(),
+		cancel:    cancel,
+		done:      done,
+		key:       idempotencyKey,
+		reqHash:   reqHash,
+		undoUntil: time.Now().Add(delay),
 	}
 	if idempotencyKey != "" {
 		a.sendq.keyed[idempotencyKey] = id
 	}
-	a.sendq.mu.Unlock()
 
 	worker := func(context.Context) {
+		outcome := sendCancelled // no transport call has started
 		defer func() {
 			a.sendq.mu.Lock()
-			a.sendq.forgetSend(id)
+			a.sendq.finishSend(id, outcome)
 			a.sendq.mu.Unlock()
 			cancel()
 			release()
@@ -692,7 +721,7 @@ func (a *App) enqueue(w http.ResponseWriter, deliver deliverFunc, outgoing *mail
 		case <-ctx.Done():
 			done <- ctx.Err()
 			return
-		case <-time.After(undoWindow):
+		case <-time.After(delay):
 		}
 		a.sendq.mu.Lock()
 		p, ok := a.sendq.sends[id]
@@ -703,9 +732,14 @@ func (a *App) enqueue(w http.ResponseWriter, deliver deliverFunc, outgoing *mail
 		if !ok {
 			return
 		}
+		// A transport error (or panic) can follow provider acceptance.
+		// Preserve ambiguity and NEVER turn a replay into another attempt.
+		outcome = sendAmbiguous
 		err := deliver(ctx, outgoing)
 		if err != nil {
 			a.log.Error("send failed", "err", err)
+		} else {
+			outcome = sendSubmitted
 		}
 		done <- err
 	}
@@ -716,7 +750,6 @@ func (a *App) enqueue(w http.ResponseWriter, deliver deliverFunc, outgoing *mail
 	// its reservations and answers 503.
 	if !a.launch("send-delivery", worker) {
 		cancel()
-		a.sendq.mu.Lock()
 		a.sendq.forgetSend(id)
 		a.sendq.mu.Unlock()
 		release()
@@ -724,8 +757,90 @@ func (a *App) enqueue(w http.ResponseWriter, deliver deliverFunc, outgoing *mail
 			"the server is shutting down — the message was NOT queued; try again after it restarts")
 		return
 	}
+	// Do not expose an accepted key until worker admission succeeded.
+	a.sendq.mu.Unlock()
 
-	writeJSON(w, map[string]any{"queued": id, "undo_seconds": int(undoWindow.Seconds())})
+	writeJSON(w, map[string]any{"queued": id, "undo_seconds": int(delay.Seconds())})
+}
+
+// sendReplay snapshots a live acceptance or retained outcome while q.mu is
+// held. Its response writes outside the mutex and reads no mutable state.
+func (q *sendQueue) sendReplay(key, reqHash string) func(http.ResponseWriter) {
+	if key == "" {
+		return nil
+	}
+	q.pruneReceipts(time.Now())
+	if id, hit := q.keyed[key]; hit {
+		if p := q.sends[id]; p != nil {
+			if p.reqHash != reqHash {
+				return sendKeyConflict
+			}
+			remaining := int(time.Until(p.undoUntil).Seconds())
+			if remaining < 0 {
+				remaining = 0
+			}
+			return func(w http.ResponseWriter) {
+				w.Header().Set("X-Idempotent-Replay", "true")
+				writeJSON(w, map[string]any{"queued": id, "undo_seconds": remaining})
+			}
+		}
+	}
+	receipt, ok := q.receipts[key]
+	if !ok {
+		return nil
+	}
+	if receipt.reqHash != reqHash {
+		return sendKeyConflict
+	}
+	return func(w http.ResponseWriter) {
+		w.Header().Set("X-Idempotent-Replay", "true")
+		switch receipt.outcome {
+		case sendSubmitted:
+			writeJSON(w, map[string]any{"queued": receipt.id, "undo_seconds": 0, "status": "submitted"})
+		case sendCancelled:
+			writeProblem(w, http.StatusConflict, "Send Cancelled",
+				"the original send was cancelled before submission; create a new submission if you want to send it")
+		default:
+			writeProblem(w, http.StatusConflict, "Send Outcome Unknown",
+				"the original send may have reached the recipient; check Sent before creating a new submission — retrying this key will not send again")
+		}
+	}
+}
+
+func sendKeyConflict(w http.ResponseWriter) {
+	writeProblem(w, http.StatusConflict, "Key Reused",
+		"this Idempotency-Key was already used for a different send")
+}
+
+// finishSend releases payload ownership into a small receipt. Both worker
+// completion and undo call this under q.mu; the first terminal state wins.
+func (q *sendQueue) finishSend(id string, outcome sendOutcome) {
+	if p := q.sends[id]; p != nil && p.key != "" {
+		q.receipts[p.key] = sendReceipt{id: id, reqHash: p.reqHash, outcome: outcome, expiresAt: time.Now().Add(sendReceiptTTL)}
+		q.pruneReceipts(time.Now())
+	}
+	q.forgetSend(id)
+}
+
+// Expiration is not refreshed by retries, so a hot key cannot live forever.
+// At capacity, evict the oldest outcome. The hard bound includes every
+// failed, ambiguous, and cancelled keyed submission as well as successes.
+func (q *sendQueue) pruneReceipts(now time.Time) {
+	for key, receipt := range q.receipts {
+		if !receipt.expiresAt.After(now) {
+			delete(q.receipts, key)
+		}
+	}
+	for len(q.receipts) > sendReceiptLimit {
+		var oldestKey string
+		var oldest time.Time
+		for key, receipt := range q.receipts {
+			if oldest.IsZero() || receipt.expiresAt.Before(oldest) {
+				oldestKey, oldest = key, receipt.expiresAt
+			}
+		}
+		delete(q.receipts, oldestKey)
+	}
 }
 
 // forgetSend drops a queue entry and its idempotency-key index. Callers
@@ -742,7 +857,7 @@ func (a *App) handleUndoSend(w http.ResponseWriter, r *http.Request) {
 	a.sendq.mu.Lock()
 	p, ok := a.sendq.sends[id]
 	if ok && p.state == sendPending {
-		a.sendq.forgetSend(id)
+		a.sendq.finishSend(id, sendCancelled)
 	} else {
 		ok = false
 	}

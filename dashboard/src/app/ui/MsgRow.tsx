@@ -1,6 +1,6 @@
 import { useState } from "preact/hooks";
 import type { Row } from "../lib/types";
-import { checked, cursor, list, rowIdentity, toggleChecked } from "../lib/store";
+import { checked, clearChecked, cursor, focusRow, list, rowIdentity, selectRange, toggleChecked } from "../lib/store";
 import { markDone, moveTo, openThread, snooze } from "../lib/actions";
 import { dayLabel, fmtDate, splitFrom } from "../lib/fmt";
 import { Highlight } from "./bits";
@@ -52,16 +52,33 @@ export function MsgRow({ row, index, q }: { row: Row; index: number; q?: string 
   return (
     <div
       class={cls}
+      role="listitem"
+      tabIndex={cursor.value === index || (cursor.value < 0 && index === 0) ? 0 : -1}
       data-cursor-index={index}
-      onClick={() => {
-        cursor.value = index;
+      onFocus={(ev) => { if (ev.target === ev.currentTarget) focusRow(index, true); }}
+      onMouseDown={(ev) => { if (ev.shiftKey && !(ev.target as HTMLElement).closest("a, button, input")) ev.preventDefault(); }}
+      onClick={(ev) => {
+        if (ev.defaultPrevented || ev.button !== 0 || ev.altKey) return;
+        if ((ev.target as HTMLElement).closest("a, button, input, select, textarea, [contenteditable]")) return;
+        if (ev.shiftKey) selectRange(index, ev.ctrlKey || ev.metaKey);
+        else if (ev.ctrlKey || ev.metaKey) toggleChecked(row);
+        else {
+          clearChecked();
+          focusRow(index);
+        }
+        (ev.currentTarget as HTMLElement).focus({ preventScroll: true });
+        if (ev.shiftKey || ev.ctrlKey || ev.metaKey) { ev.preventDefault(); return; }
         openThread(row.thread_id, row.account, list.value.origin);
       }}
     >
       <button
         class="row-check" type="button"
         aria-label={isChecked ? "Deselect" : "Select"} aria-pressed={isChecked}
-        onClick={(ev) => { ev.stopPropagation(); toggleChecked(row); }}
+        onClick={(ev) => {
+          ev.stopPropagation();
+          if (ev.shiftKey) selectRange(index, ev.ctrlKey || ev.metaKey);
+          else toggleChecked(row);
+        }}
       >
         <Icon name="check" size={11} />
       </button>
@@ -96,5 +113,5 @@ export function MsgList({ rows, q }: { rows: Row[]; q?: string }) {
     }
     out.push(<MsgRow row={row} index={i} q={q} key={rowIdentity(row)} />);
   });
-  return <div class={"msg-list" + (checked.value.size ? " has-selection" : "")}>{out}</div>;
+  return <div role="list" aria-label="Messages" class={"msg-list" + (checked.value.size ? " has-selection" : "")}>{out}</div>;
 }

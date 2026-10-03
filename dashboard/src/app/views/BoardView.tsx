@@ -1,41 +1,60 @@
 import { useEffect, useState } from "preact/hooks";
 import { api } from "../lib/api";
 import { useLoad, type Page } from "../lib/useLoad";
-import { accountFilter, accountQS, cursor, resetSelection, setList } from "../lib/store";
+import { accountFilter, accountQS, checked, clearChecked, cursor, list, resetSelection, rowIdentity, setList } from "../lib/store";
 import { addCard, markDone, openThread, removeCard, setCardDone } from "../lib/actions";
 import type { Board, BoardCard, Row } from "../lib/types";
 import { daysSince, fmtDate, relativeAge, splitFrom } from "../lib/fmt";
 import { ListSkeleton, LoadError, PageHead } from "../ui/bits";
 import { Icon } from "../ui/Icon";
 
-/** A card the keyboard can act on is one with a message behind it. Manual
-    notes stay button-only; the server keeps them last in needs_you so the
-    column's render order and the keyboard list's indices agree. */
-function asRow(c: BoardCard): Row {
+const MUTABLE_BUCKETS = new Set(["imbox", "screener", "feed", "paper_trail", "set_aside", "later"]);
+const SNOOZE_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/** Mutation rows need a complete undo snapshot. Old cached/disconnected
+    pins remain openable, but must not invent the state an undo will restore. */
+function asRow(c: BoardCard): Row | null {
+  if (c.manual || !c.account || !c.thread_id || !c.message_id) return null;
+  const read = c.read ?? (c.card_id ? undefined : false);
+  const bucket = c.bucket ?? (c.card_id ? undefined : "imbox");
+  if (typeof read !== "boolean" || !bucket || !MUTABLE_BUCKETS.has(bucket)) return null;
+  if (bucket === "set_aside" && (!c.snooze_until || !SNOOZE_INSTANT.test(c.snooze_until) || !Number.isFinite(Date.parse(c.snooze_until)))) return null;
   return {
-    account: c.account || "",
-    thread_id: c.thread_id || "",
-    message_id: c.message_id || "",
+    account: c.account,
+    thread_id: c.thread_id,
+    message_id: c.message_id,
     subject: c.subject,
     from: c.from || "",
     received_at: c.received_at || "",
-    read: false,
+    read,
     preview: c.preview || "",
-    bucket: "imbox",
+    bucket,
+    snooze_until: c.snooze_until,
   };
 }
 
-function NeedsCard({ card, index }: { card: BoardCard; index: number }) {
+function NeedsCard({ card, row, index }: { card: BoardCard; row: Row | null; index: number }) {
   const who = card.from ? splitFrom(card.from) : null;
-  const openable = !!card.thread_id && !card.manual;
+  const openable = !!card.thread_id && !!card.account && !card.manual;
+  const selected = !!row && checked.value.has(rowIdentity(row));
   return (
     <div
-      class={"board-card" + (cursor.value === index ? " cursor" : "")}
-      data-cursor-index={openable ? index : undefined}
+      class={"board-card" + (row && cursor.value === index ? " cursor" : "") + (selected ? " picked" : "")}
+      data-cursor-index={row ? index : undefined}
       tabIndex={openable ? 0 : undefined} role="group" aria-label={card.subject || "Board card"}
-      onClick={() => { if (openable) cursor.value = index; }}
+      onFocus={(ev) => { if (ev.target === ev.currentTarget) cursor.value = row ? index : -1; }}
+      onClick={() => { cursor.value = row ? index : -1; }}
+      onKeyDown={(ev) => {
+        if (ev.defaultPrevented || ev.repeat || ev.isComposing || ev.keyCode === 229) return;
+        if (ev.target !== ev.currentTarget || !openable || ev.key !== "Enter" || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+        ev.preventDefault();
+        clearChecked();
+        openThread(card.thread_id!, card.account!, null);
+      }}
     >
       <div class="board-card-top">
+        {selected && <span class="chip">Selected</span>}
+        {openable && !row && <span class="chip" title="Current read, filing and snooze state is required for safe undo">Mail shortcuts unavailable</span>}
         <span class="board-card-who">
           {card.manual ? "Note" : who?.name || who?.email || "Pinned"}
         </span>
@@ -60,11 +79,11 @@ function NeedsCard({ card, index }: { card: BoardCard; index: number }) {
               {card.manual ? "Delete" : "Unpin"}
             </button>
           </>
-        ) : (
-          <button class="btn btn-ghost btn-sm" type="button" onClick={() => markDone([asRow(card)])}>
+        ) : row ? (
+          <button class="btn btn-ghost btn-sm" type="button" onClick={() => markDone([row])}>
             <Icon name="check" size={13} /> Done
           </button>
-        )}
+        ) : null}
       </div>
     </div>
   );
@@ -195,21 +214,29 @@ export function BoardView() {
   const needs = board?.needs_you || [];
   const waiting = board?.waiting_on || [];
   const done = board?.done || [];
+  const rowCards = needs.map(asRow);
+  const selectedCount = list.value.key === "board" ? list.value.rows.filter((row) => checked.value.has(rowIdentity(row))).length : 0;
 
   useEffect(() => { resetSelection(); }, []);
 
-  // Only openable cards join the keyboard list; the server's order (derived,
-  // pins, notes) keeps indices aligned with the rendered column.
+  // Only cards carrying a safe mutation snapshot join the keyboard list.
   useEffect(() => {
     setList({
       kind: "rows", key: "board", loading, error,
-      rows: needs.filter((c) => c.thread_id && !c.manual).map(asRow),
+      rows: rowCards.filter((row): row is Row => row !== null),
       senders: [], origin: null,
     });
   }, [data, loading, error]);
 
+  let rowIndex = 0;
+
   return (
     <>
+      {selectedCount > 0 && <div class="bulkbar" aria-label="Board selection">
+        <span class="bulkbar-count">{selectedCount} selected</span>
+        <span class="bulkbar-spacer" />
+        <button class="btn btn-ghost btn-sm" type="button" onClick={clearChecked}>Clear <span class="kbd">Esc</span></button>
+      </div>}
       <PageHead
         kicker="Board"
         title="The board your mail writes"
@@ -230,7 +257,7 @@ export function BoardView() {
               {needs.length === 0 && (
                 <div class="board-col-empty">Nothing needs you. Reading a card is finishing it.</div>
               )}
-              {needs.map((c, i) => <NeedsCard card={c} index={i} key={c.card_id || c.thread_id} />)}
+              {needs.map((c, i) => <NeedsCard card={c} row={rowCards[i]} index={rowCards[i] ? rowIndex++ : -1} key={c.card_id || c.account + "\u0000" + c.thread_id} />)}
             </Column>
 
             <Column

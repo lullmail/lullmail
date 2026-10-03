@@ -5,7 +5,7 @@ import { signal } from "@preact/signals";
 import { path, routeFor, startRouter } from "./lib/router";
 import { installKeys } from "./lib/keys";
 import { refreshAccounts, refreshCounts, refreshFolders, refreshPrefs, reload } from "./lib/actions";
-import { accountCount, accountFilter, attentionTotal, compose, composeOpen, isDarkTheme, layout, palette, query, reader, resolveLayout, setSplitWidth, shortcuts, splitWidth, theme } from "./lib/store";
+import { accountCount, accountFilter, attentionTotal, compose, composeOpen, isDarkTheme, layout, palette, privateStateVersion, query, reader, resolveLayout, setSplitWidth, shortcuts, splitWidth, theme } from "./lib/store";
 import { Topline } from "./Topline";
 import { Sidebar } from "./Sidebar";
 import { Thread } from "./reader/Thread";
@@ -23,7 +23,7 @@ import { SearchView } from "./views/SearchView";
 import { Welcome } from "./views/Welcome";
 import { KeyHints } from "./ui/KeyHints";
 import { offline, startPWA } from "./lib/pwa";
-import { startOfflineData } from "./lib/offline";
+import { namespaceFor, startOfflineData } from "./lib/offline";
 import { startLive, stopLive } from "./lib/live";
 
 // The mailbox loop stays in the first bundle. Larger secondary workspaces and
@@ -248,6 +248,7 @@ function PaneSplit() {
 
 export default function App() {
   const openThreadId = reader.value.threadId;
+  const ownerKey = authStatus.value ? namespaceFor(authStatus.value) : "";
   const wide = useWide();
   const classic = layout.value === "classic" && wide;
   // The island is prerendered at build time, where there is no token and no URL.
@@ -258,7 +259,7 @@ export default function App() {
   useEffect(() => {
     setMounted(true);
     resolveLayout();
-    startRouter();
+    const offRouter = startRouter();
     const offKeys = installKeys();
     const offPWA = startPWA();
     // Replay waits for a confirmed authenticated session (audit 5 OFF-02).
@@ -274,7 +275,7 @@ export default function App() {
     window.addEventListener("focus", refreshVisible);
     document.addEventListener("visibilitychange", refreshVisible);
     return () => {
-      offKeys(); offPWA(); offData(); clearInterval(tick);
+      offRouter?.(); offKeys(); offPWA(); offData(); clearInterval(tick);
       window.removeEventListener("focus", refreshVisible);
       document.removeEventListener("visibilitychange", refreshVisible);
     };
@@ -286,7 +287,7 @@ export default function App() {
     refreshAccounts();
     refreshPrefs();
     refreshFolders();
-  }, [mounted, authed.value]);
+  }, [mounted, authed.value, ownerKey]);
 
   // Server-pushed sync hints ride alongside the poll: immediate re-reads
   // while connected, nothing to clean up beyond closing the stream.
@@ -294,7 +295,7 @@ export default function App() {
     if (!mounted || !authed.value) return;
     startLive();
     return stopLive;
-  }, [mounted, authed.value]);
+  }, [mounted, authed.value, ownerKey]);
 
   // The lens is global: every badge follows it, not just the visible list.
   // The mount pass is covered by the auth effect above, so skip it.
@@ -333,7 +334,7 @@ export default function App() {
           <ExposureBanner />
         </div>
         <Sidebar />
-        <div class="list-pane"><div class="column"><Suspense fallback={<RouteSkeleton />}><CurrentView /></Suspense></div></div>
+        <div class="list-pane"><div class="column"><Suspense fallback={<RouteSkeleton />}><CurrentView key={privateStateVersion.value + ":" + ownerKey} /></Suspense></div></div>
         <PaneSplit />
         <div class="reader-pane">
           {openThreadId ? (
@@ -366,7 +367,7 @@ export default function App() {
       {openThreadId ? (
         <Thread backTo={routeFor(path.value).title} />
       ) : (
-        <div class={columnClass()}><Suspense fallback={<RouteSkeleton />}><CurrentView /></Suspense></div>
+        <div class={columnClass()}><Suspense fallback={<RouteSkeleton />}><CurrentView key={privateStateVersion.value + ":" + ownerKey} /></Suspense></div>
       )}
 
       <Overlays />

@@ -80,6 +80,40 @@ jobs:
         working-directory: mcp
         run: go test -race -count=1 ./...
 
+  # Synthetic pointer/keyboard acceptance only: the fixture contains no
+  # account credentials and intercepts every API request in the browser.
+  # Kept separate so a unit-only run cannot be mistaken for native UI QA.
+  dashboard-selection:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - name: Install dashboard test dependencies
+        working-directory: dashboard
+        run: npm ci
+      - name: Install test Chromium
+        working-directory: dashboard
+        run: npx playwright install --with-deps chromium
+      - name: Synthetic selection browser acceptance
+        working-directory: dashboard
+        env:
+          E2E_OUTPUT: ${{ runner.temp }}/lullmail-selection-browser
+        run: |
+          mkdir -p "$E2E_OUTPUT"
+          npm run test:selection 2>&1 | tee "$E2E_OUTPUT/selection.log"
+      - name: Preserve selection evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lullmail-selection-browser
+          path: ${{ runner.temp }}/lullmail-selection-browser
+          if-no-files-found: ignore
+
   publish:
     # Real-database integration and race checks gate publication too: a
     # green unit-only build must not be able to publish an image past a

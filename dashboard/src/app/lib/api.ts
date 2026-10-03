@@ -2,8 +2,8 @@
 // session cookie; JavaScript never sees a long-lived authentication secret.
 import { signal } from "@preact/signals";
 import {
-  cacheResponse, cachedResponse, canQueue, generationCurrent, newMutationKey, offlineEmail,
-  offlineGeneration, offlineOwner, prepareOfflineOwner, queueMutation, suspendOfflineStorage,
+  cacheResponse, cachedResponse, canQueue, captureOfflineContext, generationCurrent, newMutationKey, offlineEmail, OfflineOwnerChangedError,
+  offlineGeneration, offlineOwner, prepareOfflineOwner, queueMutation, snapshotGeneration, suspendOfflineStorage,
 } from "./offline";
 
 export const authed = signal(false);
@@ -61,6 +61,8 @@ interface Opts {
   signal?: AbortSignal;
   /** Skip the short in-memory route cache for counters and explicit refreshes. */
   fresh?: boolean;
+  /** Explicit identity supplied by a retryable submission (e.g. send). */
+  idempotencyKey?: string;
 }
 
 const MEMORY_TTL = 15_000;
@@ -92,9 +94,8 @@ export class StaleOwnerError extends Error {
 }
 
 function assertOwner(owner: string, gen: number): void {
-  // No prepared offline namespace (fresh page before auth, or a test
-  // environment): there is no owner identity to fence on.
-  if (!owner) return;
+  // Empty is also an identity snapshot: a pre-auth request must not be
+  // published after a new owner namespace has been prepared.
   if (offlineOwner() !== owner || !generationCurrent(gen)) {
     throw new StaleOwnerError();
   }
@@ -108,7 +109,7 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
   // applied server-side, and replaying under the SAME key returns the
   // recorded answer instead of applying the change twice.
   const queueable = protectedRoute && canQueue(path, opts.method || (opts.body !== undefined ? "POST" : "GET"));
-  const idempotencyKey = queueable ? newMutationKey() : undefined;
+  const idempotencyKey = opts.idempotencyKey || (queueable ? newMutationKey() : undefined);
   if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
   // The owner snapshot fences this whole operation against an owner
   // switch: if the owner or generation changes while the request is in
@@ -117,16 +118,23 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
   // 5 OFF-02).
   const owner = offlineOwner();
   const gen = offlineGeneration();
+  const snapshots = snapshotGeneration();
+  const assertCurrent = () => {
+    if (!protectedRoute) return;
+    assertOwner(owner, gen);
+    if (method === "GET" && snapshotGeneration() !== snapshots) throw new StaleOwnerError();
+  };
   let body: string | undefined;
   if (opts.body !== undefined) {
     headers["Content-Type"] = "application/json";
     body = JSON.stringify(opts.body);
   }
   const method = opts.method || (body ? "POST" : "GET");
+  assertCurrent();
   if (protectedRoute && method === "GET" && !opts.fresh) {
-    const cached = memoryResponses.get(memoryKey(owner, gen, path));
+    const cached = memoryResponses.get(memoryKey(owner, gen, snapshots + "\n" + path));
     if (cached && Date.now() - cached.savedAt < MEMORY_TTL) return copyValue(cached.value as T);
-    if (cached) memoryResponses.delete(memoryKey(owner, gen, path));
+    if (cached) memoryResponses.delete(memoryKey(owner, gen, snapshots + "\n" + path));
   }
   let res: Response;
   try {
@@ -134,7 +142,8 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
   } catch (error) {
     if (opts.signal?.aborted) throw error;
     if (protectedRoute && method === "GET") {
-      const cached = await cachedResponse<T>(path, gen);
+      const cached = await cachedResponse<T>(path, gen, snapshots);
+      assertCurrent();
       if (cached !== undefined) return cached;
     }
     if (queueable) {
@@ -147,6 +156,7 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
     }
     throw error;
   }
+  assertCurrent();
   if (res.status === 401 && protectedRoute) {
     authed.value = false;
     throw new ApiError("unauthorized", 401);
@@ -160,16 +170,17 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
     } catch {
       /* non-JSON error body: the status is all we have */
     }
+    assertCurrent();
     throw new ApiError(detail, res.status);
   }
   const value = (await res.json()) as T;
   // A late private response is rejected before publication, not merely
   // before caching: returning it handed the previous owner's data to
   // whoever is on screen now (audit 5 OFF-02).
-  if (protectedRoute) assertOwner(owner, gen);
+  assertCurrent();
   if (protectedRoute && method === "GET") {
-    memoryResponses.set(memoryKey(owner, gen, path), { savedAt: Date.now(), value: copyValue(value) });
-    cacheResponse(path, value, gen).catch(() => {});
+    memoryResponses.set(memoryKey(owner, gen, snapshots + "\n" + path), { savedAt: Date.now(), value: copyValue(value) });
+    cacheResponse(path, value, gen, snapshots).catch(() => {});
   } else {
     // A mutation invalidates the in-memory cache only. The persisted
     // offline snapshots are the ONLY offline copy of the mailbox —
@@ -189,18 +200,22 @@ export function authApi<T>(path: string, opts: Opts = {}, setupToken = ""): Prom
   return request<T>(path, opts, setupToken, false);
 }
 
+let authRefreshVersion = 0;
 export async function refreshAuth(): Promise<AuthStatus> {
+  const version = ++authRefreshVersion;
+  const startingOwner = offlineOwner(), startingGeneration = offlineGeneration();
   try {
+    const storageContext = await captureOfflineContext().catch(() => undefined);
     const status = await authApi<AuthStatus>("/auth/status");
+    if (version !== authRefreshVersion || startingOwner !== offlineOwner() || startingGeneration !== offlineGeneration()) throw new StaleOwnerError();
     unreachable.value = false;
-    authStatus.value = status;
-    authed.value = status.authenticated;
     if (!status.authenticated) memoryResponses.clear();
     if (status.authenticated && status.email) {
       const previousOwner = offlineOwner();
       try {
-        await prepareOfflineOwner(status);
+        await prepareOfflineOwner(status, storageContext);
       } catch (storageError) {
+        if (storageError instanceof OfflineOwnerChangedError) throw new StaleOwnerError();
         // A storage failure is not an unreachable server: the session is
         // known-good, only offline persistence is disabled (audit 3 WEB-08).
         // It is also not permission to keep using whatever namespace the
@@ -214,8 +229,14 @@ export async function refreshAuth(): Promise<AuthStatus> {
       // entries must not linger behind their TTL (audit 5 OFF-02).
       if (offlineOwner() !== previousOwner) memoryResponses.clear();
     }
+    // Publish the confirmed owner only once its storage namespace is ready.
+    // Owner-keyed views and global refreshes must not start in the old namespace.
+    if (version !== authRefreshVersion) throw new StaleOwnerError();
+    authStatus.value = status;
+    authed.value = status.authenticated;
     return status;
   } catch (error) {
+    if (version !== authRefreshVersion || error instanceof StaleOwnerError) throw error;
     if (error instanceof ApiError && error.status < 500) throw error;
     // Network failure or proxy 5xx: nothing is known about the session, so
     // nothing changes. A previous owner on this device keeps the offline
@@ -229,11 +250,25 @@ export async function refreshAuth(): Promise<AuthStatus> {
     }
     throw error;
   } finally {
-    authReady.value = true;
+    if (version === authRefreshVersion) authReady.value = true;
     // The offline replay driver waits for this confirmation before its
     // first pass (audit 5 OFF-02).
     try { window.dispatchEvent(new Event("lullmail-auth-refreshed")); } catch { /* non-browser */ }
   }
+}
+
+// Another tab's owner transition invalidates both the visible mailbox and
+// the authentication that admitted it. Only a fresh server response may
+// prepare the replacement owner; a delayed old auth response is fenced above.
+if (typeof window !== "undefined") {
+  window.addEventListener("lullmail-offline-invalidated", () => {
+    authRefreshVersion++;
+    memoryResponses.clear();
+    authStatus.value = null;
+    authed.value = false;
+    authReady.value = false;
+    void refreshAuth().catch(() => { /* the normal auth state reports reachability */ });
+  });
 }
 
 /** Download an authenticated response without putting the bearer token in a

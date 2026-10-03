@@ -1,17 +1,11 @@
-import { useEffect, useRef, useState } from "preact/hooks";
-import { accounts, closeCompose, compose, cycleDraft, draftIndex, draftsUnsaved, draftStack, newDraft, retireDraft, showToast, undoSeconds, updateDraft, updateDraftById, type ComposeState } from "../lib/store";
+import { useRef, useState } from "preact/hooks";
+import { accounts, attachmentBytes, beginDraftAttachmentRead, finishDraftAttachmentRead, reserveDraftAttachment, closeCompose, compose, cycleDraft, draftIndex, draftsUnsaved, draftStack, newDraft, pendingDraftReads, prepareDraftSend, retireDraft, sendingDrafts, showError, showToast, undoSeconds, updateDraft, updateDraftById, type ComposeState } from "../lib/store";
 import { sendMail, type SendAttachment } from "../lib/actions";
-import { deleteDraft, saveDraftFields } from "../lib/offline";
+import { deleteDraft, generationCurrent, offlineGeneration, offlineOwner, offlineStorageSuspended } from "../lib/offline";
 
 const previewPolicy = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data: cid:; style-src \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'">';
 
-const MAX_FILE_BYTES = 15 << 20;
-
-async function fileToAttachment(file: File): Promise<SendAttachment | null> {
-  if (file.size > MAX_FILE_BYTES) {
-    showToast(`"${file.name}" is over 15 MiB and was skipped`);
-    return null;
-  }
+async function fileToAttachment(file: File): Promise<SendAttachment> {
   const buf = await file.arrayBuffer();
   const bytes = new Uint8Array(buf);
   let binary = "";
@@ -57,9 +51,12 @@ function DraftForm({ seed }: { seed: ComposeState }) {
   const [body, setBody] = useState(seed.body ?? "");
   const [htmlMode, setHtmlMode] = useState(seed.htmlMode ?? false);
   const [preview, setPreview] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const busy = sendingDrafts.value.has(seed.id);
+  const generation = useRef(offlineGeneration()).current;
+  const owner = useRef(offlineOwner()).current;
+  const current = () => !offlineStorageSuspended() && generationCurrent(generation) && offlineOwner() === owner;
   const [accountId, setAccountId] = useState(seed.accountId ?? "");
-  const [attachments, setAttachments] = useState<SendAttachment[]>(seed.attachments ? [...seed.attachments] : []);
+  const attachments = seed.attachments || [];
   const bodyRef = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   // Retirement fence: once a draft is sent or discarded, the unmount
@@ -69,102 +66,62 @@ function DraftForm({ seed }: { seed: ComposeState }) {
   // Closes the same-tick double-activation window between the button and
   // the keyboard shortcut, which funnel through one send() (audit 4 F03).
   const sending = useRef(false);
-  // Serializes attachment writes with the final deletion so an in-flight
-  // save cannot land after deleteDraft and resurrect the draft.
-  const saves = useRef<Promise<void>>(Promise.resolve());
-  const queueSave = (run: () => Promise<void>) => {
-    saves.current = saves.current.then(run, run);
-  };
-
-  const fileBytes = attachments.reduce((n, a) => n + Math.round(a.dataBase64.length * 3 / 4), 0);
+  const fileBytes = attachments.reduce((n, a) => n + attachmentBytes(a), 0);
 
   // Pending file reads for THIS draft (audit 5 DRAFT-02): a read that
   // started while the composer was idle used to complete after send or a
   // draft switch — the message left without the file, or the completion
   // wrote into a retired slot. Send eligibility requires zero pending.
-  const [pendingReads, setPendingReads] = useState(0);
-
+  const pendingReads = pendingDraftReads.value.get(seed.id) || 0;
   const addFiles = async (files: FileList | null) => {
-    // No additions while submitting — the send already captured its set
-    // (audit 4 F03).
-    if (!files || busy || sending.current) return;
-    const next: SendAttachment[] = [];
-    setPendingReads((n) => n + files.length);
+    if (!files || !current() || retired.current || busy || sending.current) return;
+    const reserved: Array<{ file: File; token: symbol }> = [];
+    // No awaits until every admitted file has reserved bytes and a slot.
+    for (const file of files) {
+      const token = reserveDraftAttachment(seed.id, file.size);
+      if (typeof token === "string") showToast(`"${file.name}" ${token}`);
+      else reserved.push({ file, token });
+    }
     try {
-      for (const f of files) {
-        const att = await fileToAttachment(f);
-        if (att) { next.push(att); }
+      for (const { file, token } of reserved) {
+        if (retired.current || !current() || !draftStack.value.some((draft) => draft.id === seed.id)) break;
+        if (!beginDraftAttachmentRead(token)) {
+          finishDraftAttachmentRead(token);
+          showError(`"${file.name}" could not be read within the draft memory budget; wait for other files to finish or remove attachments`);
+          continue;
+        }
+        try {
+          const attachment = await fileToAttachment(file);
+          finishDraftAttachmentRead(token, !retired.current && current() ? attachment : undefined);
+        } catch {
+          finishDraftAttachmentRead(token);
+          if (!retired.current && current()) showError(`"${file.name}" could not be read; other valid attachments were kept`);
+        }
       }
     } finally {
-      setPendingReads((n) => Math.max(0, n - files.length));
+      // Also frees files that never started after retirement/session reset.
+      for (const { token } of reserved) finishDraftAttachmentRead(token);
     }
-    if (!next.length) return;
-    if (retired.current) return; // the draft ended mid-read: discard
-    // Functional merge: two selections decoding concurrently must not
-    // overwrite one another (audit WEB-06). The merged set lands in the
-    // draft stack — the single authoritative document — so the carousel
-    // seed, the flush, and this component can never disagree about what
-    // the draft carries (audit 5 DRAFT-01).
-    setAttachments((current) => {
-      const merged = [...current, ...next];
-      updateDraftById(seed.id, { attachments: merged });
-      return merged;
-    });
   };
 
   const removeAttachment = (i: number) => {
     if (busy || sending.current) return;
-    setAttachments((current) => {
-      const next = current.filter((_, idx) => idx !== i);
-      updateDraftById(seed.id, { attachments: next });
-      return next;
-    });
+    const live = draftStack.value.find((d) => d.id === seed.id);
+    if (live) updateDraftById(seed.id, { attachments: (live.attachments || []).filter((_, idx) => idx !== i) });
   };
 
-  // An undo-restored seed carries its attachments in memory; they are
-  // written into the draft's single record here. Every other case
-  // hydrates from that record already (no second engine to wait for).
-  // The stack patch and the record write carry the same payload — the
-  // stack is what later flushes read (audit 5 DRAFT-01).
-  useEffect(() => {
-    const seeded = seed.attachments;
-    if (!seeded) return;
-    const payload = [...seeded];
-    updateDraftById(seed.id, { attachments: payload });
-    queueSave(() => (retired.current ? Promise.resolve() : saveDraftFields(seed.id, { attachments: payload })));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // The stack owns all fields and attachments. Its single autosave path
+  // survives parking and is cancelled synchronously by a session reset;
+  // component unmount must never write private state into another owner.
 
-  // Attachment persistence rides the ONE flush path: attachment changes
-  // patch the draft stack (updateDraftById), the stack subscription
-  // schedules the debounced flush, and flushDrafts writes the whole
-  // record — fields AND attachments together. A separate per-change
-  // attachment writer here is what let a stale whole-draft flush
-  // overwrite the saved attachment list (audit 5 DRAFT-01).
-
-  // Debounced autosave that FLUSHES on unmount: clearing the timer and
-  // dropping a pending write left the per-draft snapshot older than the
-  // draft stack, so switching back resurrected stale text (audit WEB-05).
-  // The write is fenced by retirement so a sent/discarded draft's slot is
-  // not recreated after its deletion (audit 4-F04).
-  const latest = useRef({ to, cc, bcc, subject, body, htmlMode, accountId });
-  latest.current = { to, cc, bcc, subject, body, htmlMode, accountId };
-  useEffect(() => {
-    const write = () => {
-      if (retired.current) return;
-      saveDraftFields(seed.id, latest.current).catch(() => { /* store.ts surfaces ring-wide failures */ });
-    };
-    const timer = setTimeout(write, 250);
-    return () => { clearTimeout(timer); write(); };
-  }, [seed.id, to, cc, bcc, subject, body, htmlMode, accountId]);
-
-  // Send and discard both pass through here: fence first, then remove the
-  // record, and only then retire the ring entry (audit 4-F04). The queued
-  // delete runs after every pending save, so deletion is the last write.
+  // Retirement removes the live row first. Pending autosaves re-check that
+  // row inside their transaction; already-started writes precede deletion.
   const retireLocalDraft = () => {
     retired.current = true;
-    queueSave(() => deleteDraft(seed.id));
     retireDraft(seed.id);
+    void deleteDraft(seed.id, generation).catch(() => {
+      if (current()) showError("The draft could not be removed from this device");
+    });
   };
 
   const send = async () => {
@@ -172,28 +129,40 @@ function DraftForm({ seed }: { seed: ComposeState }) {
     // reaches here directly (audit 4 F03). Pending file reads block the
     // send — a message that leaves without its attachment is silent data
     // loss (audit 5 DRAFT-02).
-    if (!to.trim() || busy || pendingReads > 0 || sending.current) return;
+    if (!current() || retired.current || !to.trim() || sendingDrafts.value.has(seed.id) || (pendingDraftReads.value.get(seed.id) || 0) > 0 || sending.current) return;
     sending.current = true;
-    setBusy(true);
+    sendingDrafts.value = new Set([...sendingDrafts.value, seed.id]);
     let ok = false;
+    let submissionKey: string | null = null;
     try {
+      const live = draftStack.value.find((d) => d.id === seed.id);
+      if (!live) return;
+      const resolvedAccount = live.accountId || (live.replyToId ? undefined : accounts.value[0]?.id);
+      // Pin the default From choice into the draft before minting its key.
+      // A later account-list reorder must not change an ambiguous retry.
+      if (resolvedAccount !== seed.accountId) updateDraftById(seed.id, { accountId: resolvedAccount });
+      const key = await prepareDraftSend(seed.id);
+      if (!key || !current()) return;
+      const submission = draftStack.value.find((d) => d.id === seed.id);
+      if (!submission || submission.sendKey !== key) return;
+      submissionKey = key;
       ok = await sendMail({
-        to: to.trim(), cc: cc.trim(), bcc: bcc.trim(), subject,
-        text: htmlMode ? "" : body,
-        html: htmlMode ? body : undefined,
+        to: submission.to.trim(), cc: submission.cc?.trim(), bcc: submission.bcc?.trim(), subject: submission.subject,
+        text: submission.htmlMode ? "" : submission.body,
+        html: submission.htmlMode ? submission.body : undefined,
         // A new message with no account chosen sends from the account the
         // From menu is showing. Left empty, the server picks its own "first",
         // which is not the menu's first. A reply stays empty: the server
         // answers from the account that received the parent.
-        accountId: accountId || seed.accountId || (seed.replyToId ? undefined : accounts.value[0]?.id),
-        replyToId: seed.replyToId,
-        attachments,
-      });
+        accountId: resolvedAccount,
+        replyToId: submission.replyToId,
+        attachments: submission.attachments,
+      }, key);
     } finally {
       sending.current = false;
-      setBusy(false);
+      const active = new Set(sendingDrafts.value); active.delete(seed.id); sendingDrafts.value = active;
     }
-    if (ok) retireLocalDraft();
+    if (ok && current() && draftStack.value.find((d) => d.id === seed.id)?.sendKey === submissionKey) retireLocalDraft();
   };
 
   const accountList = accounts.value;
@@ -201,7 +170,7 @@ function DraftForm({ seed }: { seed: ComposeState }) {
 
   return (
     <>
-      <div class="compose-form">
+      <fieldset class="compose-form" disabled={busy} style={{ border: 0, margin: 0, minWidth: 0 }}>
         <div class="compose-kicker">{seed.context || "New message"}</div>
         <div class="compose-head-row">
           <select
@@ -276,7 +245,7 @@ function DraftForm({ seed }: { seed: ComposeState }) {
             {attachments.map((a, i) => (
               <span class="compose-file" key={i}>
                 <span class="compose-file-name">{a.filename}</span>
-                <span class="compose-file-size">{formatBytes(Math.round(a.dataBase64.length * 3 / 4))}</span>
+                <span class="compose-file-size">{formatBytes(attachmentBytes(a))}</span>
                 <button class="btn-icon" type="button" aria-label={"Remove " + a.filename} onClick={() => removeAttachment(i)}>×</button>
               </span>
             ))}
@@ -303,10 +272,10 @@ function DraftForm({ seed }: { seed: ComposeState }) {
             }}
           />
         )}
-      </div>
+      </fieldset>
       <div class="compose-btns">
         <span class="hint"><span class="kbd">⌘↵</span> send · <span class="kbd">Esc</span> park · <span class="kbd">c</span> new draft · {undoSeconds}s to undo</span>
-        <button class="btn btn-ghost btn-sm" type="button" onClick={retireLocalDraft}>Discard</button>
+        <button class="btn btn-ghost btn-sm" type="button" disabled={busy} onClick={retireLocalDraft}>Discard</button>
         <button class="btn btn-accent" type="button" disabled={!to.trim() || busy || pendingReads > 0} onClick={send}>
           {busy ? "Sending…" : pendingReads > 0 ? "Reading files…" : "Send"}
         </button>

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,9 +21,9 @@ import (
 
 var oauthRefreshLocks sync.Map
 
-func oauthRefreshLock(account string) *sync.Mutex {
-	lock, _ := oauthRefreshLocks.LoadOrStore(account, &sync.Mutex{})
-	return lock.(*sync.Mutex)
+func oauthRefreshLock(account string) *contextLock {
+	lock, _ := oauthRefreshLocks.LoadOrStore(account, newContextLock())
+	return lock.(*contextLock)
 }
 
 func (a *App) mountOAuthCallbacks(mux *http.ServeMux) {
@@ -240,9 +241,30 @@ func oauthIdentity(ctx context.Context, provider string, client *http.Client) (s
 }
 
 func (a *App) oauthToken(ctx context.Context, provider, account, address, sealed string) (mail.Credential, error) {
-	lock := oauthRefreshLock(account)
-	lock.Lock()
-	defer lock.Unlock()
+	return a.oauthTokenAfterRejection(ctx, provider, account, address, sealed, "")
+}
+
+// refreshGmailToken is only installed for stored-account read adapters. The
+// application keeps refresh tokens and client secrets; the engine receives
+// only a replacement short-lived bearer. A replaced credential is reloaded
+// under the same refresh lock and compare-and-swap as ordinary token refresh.
+func (a *App) refreshGmailToken(ctx context.Context, acct mail.AccountID, rejected mail.Credential) (mail.Credential, error) {
+	var provider, address, sealed string
+	if err := a.db.QueryRowContext(ctx, `SELECT provider, address, cred_ciphertext FROM email_accounts WHERE mirror_account_id=$1`, string(acct)).Scan(&provider, &address, &sealed); err != nil {
+		return mail.Credential{}, err
+	}
+	if provider != "gmail" || rejected.Provider != mail.ProviderGmail {
+		return mail.Credential{}, fmt.Errorf("account provider changed during Gmail read")
+	}
+	return a.oauthTokenAfterRejection(ctx, provider, string(acct), address, sealed, rejected.AccessToken)
+}
+
+func (a *App) oauthTokenAfterRejection(ctx context.Context, provider, account, address, sealed, rejected string) (mail.Credential, error) {
+	unlock, err := oauthRefreshLock(account).Lock(ctx)
+	if err != nil {
+		return mail.Credential{}, err
+	}
+	defer unlock()
 
 	// Token() reads the account before entering this lock. Reload it so a
 	// concurrent refresh cannot continue from the ciphertext it saw earlier.
@@ -261,8 +283,20 @@ func (a *App) oauthToken(ctx context.Context, provider, account, address, sealed
 	if err != nil {
 		return mail.Credential{}, err
 	}
+	if rejected != "" && token.AccessToken == rejected {
+		if token.RefreshToken == "" {
+			return mail.Credential{}, fmt.Errorf("Gmail access token rejected and no refresh token remains: %w", mail.ErrReauthRequired)
+		}
+		// A server can reject a token before its recorded expiry. Only invalidate
+		// the exact rejected bearer; another request may already have replaced it.
+		token.Expiry = time.Unix(1, 0)
+	}
 	fresh, err := config.TokenSource(ctx, &token).Token()
 	if err != nil {
+		var retrieve *oauth2.RetrieveError
+		if errors.As(err, &retrieve) && retrieve.ErrorCode == "invalid_grant" {
+			return mail.Credential{}, fmt.Errorf("OAuth grant rejected: %w", mail.ErrReauthRequired)
+		}
 		return mail.Credential{}, err
 	}
 	if fresh.RefreshToken == "" {

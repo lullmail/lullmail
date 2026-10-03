@@ -9,7 +9,6 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
-	"errors"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -221,9 +220,9 @@ func (a *App) handleAccountExport(w http.ResponseWriter, r *http.Request) {
 			} else {
 				rawErr = resolveErr
 			}
-			if rawErr == nil {
+			if exportSourceOutcome(r.Context(), rawErr) == "original" {
 				report.Raw++
-			} else if errors.Is(rawErr, context.Canceled) || errors.Is(rawErr, context.DeadlineExceeded) {
+			} else if exportSourceOutcome(r.Context(), rawErr) == "cancelled" {
 				// Cancellation is not degradation (audit 5 OPS-03): a
 				// canceled export stops, it does not continue as a
 				// mirror-rendered "success" for a client that left.
@@ -485,6 +484,18 @@ func uniqueMboxName(base string, used map[string]bool) string {
 			return name
 		}
 	}
+}
+
+// A provider's own timeout is source unavailability, not proof that the
+// requesting client left. Only the request/account context aborts an export.
+func exportSourceOutcome(ctx context.Context, sourceErr error) string {
+	if ctx.Err() != nil {
+		return "cancelled"
+	}
+	if sourceErr != nil {
+		return "fallback"
+	}
+	return "original"
 }
 
 func readProviderRaw(ctx context.Context, adapter nmail.Adapter, id nmail.MessageID) ([]byte, error) {

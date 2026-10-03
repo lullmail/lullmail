@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBoardReturns500OnRowsError(t *testing.T) {
@@ -47,12 +49,85 @@ func boardSteps(openPin bool) []dbStep {
 		pinned,
 	}
 	if openPin {
-		steps = append(steps, dbStep{kind: "query", rows: emptyRows("account", "thread", "message", "subject", "from", "received", "preview")})
+		steps = append(steps, dbStep{kind: "query", rows: emptyRows("account", "thread", "message", "subject", "from", "received", "preview", "read", "bucket", "until")})
 	}
 	return append(steps,
 		dbStep{kind: "query", rows: emptyRows("id", "title", "note")},
 		dbStep{kind: "query", rows: emptyRows("id", "account", "thread", "title", "note")},
 	)
+}
+
+func TestBoardPinnedMutationSnapshot(t *testing.T) {
+	until := time.Date(2027, 1, 15, 9, 45, 0, 123456000, time.UTC)
+	for _, tc := range []struct {
+		name   string
+		read   driver.Value
+		bucket string
+		until  driver.Value
+	}{
+		{"read feed", true, "feed", nil},
+		{"unread receipt", false, "paper_trail", nil},
+		{"dated snooze", true, "set_aside", until},
+		{"missing product state", nil, "", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			steps := boardSteps(true)
+			steps[6].rows = &testRows{
+				columns: []string{"account", "thread", "message", "subject", "from", "received", "preview", "read", "bucket", "until"},
+				values:  [][]driver.Value{{"acct-a", "thread-1", "message-1", "Title", `[{"email":"sender@example.test"}]`, until, "Preview", tc.read, tc.bucket, tc.until}},
+			}
+			db, drv := openRecordingDB(t, steps...)
+			a := &App{db: db}
+			w := httptest.NewRecorder()
+			a.handleBoard(w, requestAsOwner(http.MethodGet, "/api/board"))
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d body = %s", w.Code, w.Body.String())
+			}
+			var result struct {
+				Needs []boardCard `json:"needs_you"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Needs) != 1 {
+				t.Fatalf("cards = %d, want 1", len(result.Needs))
+			}
+			card := result.Needs[0]
+			if card.CardID != "card-1" || card.Bucket != tc.bucket {
+				t.Fatalf("card = %+v", card)
+			}
+			if tc.read == nil {
+				if card.Read != nil || strings.Contains(w.Body.String(), `"read":`) {
+					t.Fatalf("missing state became a known read state: %s", w.Body.String())
+				}
+			} else if card.Read == nil || *card.Read != tc.read.(bool) {
+				t.Fatalf("read = %v, want %v", card.Read, tc.read)
+			}
+			if tc.until != nil && card.SnoozeUntil != until.Format(time.RFC3339Nano) {
+				t.Fatalf("deadline = %q, want exact %q", card.SnoozeUntil, until.Format(time.RFC3339Nano))
+			}
+			query := drv.log()[6].query
+			for _, condition := range []string{"h.account_id = m.account_id", "h.message_id = m.id", "h.user_id = $1", "CASE WHEN h.message_id IS NULL THEN NULL", "m.id DESC"} {
+				if !strings.Contains(query, condition) {
+					t.Errorf("live state query missing %q: %s", condition, query)
+				}
+			}
+		})
+	}
+}
+
+func TestBoardDerivedCardCarriesKnownUnreadInboxState(t *testing.T) {
+	steps := boardSteps(false)
+	steps[2].rows = &testRows{
+		columns: []string{"account", "thread", "message", "subject", "from", "received", "preview"},
+		values:  [][]driver.Value{{"acct-a", "thread-1", "message-1", "Title", `[{"email":"sender@example.test"}]`, nil, "Preview"}},
+	}
+	a := &App{db: openStepDB(t, steps...)}
+	w := httptest.NewRecorder()
+	a.handleBoard(w, requestAsOwner(http.MethodGet, "/api/board"))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"read":false`) || !strings.Contains(w.Body.String(), `"bucket":"imbox"`) {
+		t.Fatalf("derived state: status = %d body = %s", w.Code, w.Body.String())
+	}
 }
 
 func TestBoardScopesCardQueriesToTheSelectedAccount(t *testing.T) {

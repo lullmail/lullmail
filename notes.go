@@ -70,7 +70,7 @@ func (a *App) handleNoteCreate(w http.ResponseWriter, r *http.Request) {
 		req.Color = 0
 	}
 	var n stickyNote
-	err = a.db.QueryRowContext(r.Context(), `
+	err = a.mutationDB(r.Context()).QueryRowContext(r.Context(), `
 		INSERT INTO sticky_notes (user_id, x, y, text, color)
 		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id::text, x, y, text, color`,
@@ -112,7 +112,7 @@ func (a *App) handleNoteUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.Y != nil {
 		y = int(math.Round(*req.Y))
 	}
-	res, err := a.db.ExecContext(r.Context(), `
+	res, err := a.mutationDB(r.Context()).ExecContext(r.Context(), `
 		UPDATE sticky_notes SET
 		  x = COALESCE($3, x), y = COALESCE($4, y),
 		  text = COALESCE($5, text), color = COALESCE($6, color),
@@ -136,7 +136,7 @@ func (a *App) handleNoteDelete(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
 		return
 	}
-	res, err := a.db.ExecContext(r.Context(),
+	res, err := a.mutationDB(r.Context()).ExecContext(r.Context(),
 		`DELETE FROM sticky_notes WHERE user_id = $1 AND id = $2`, uid, r.PathValue("id"))
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Delete Failed", err.Error())

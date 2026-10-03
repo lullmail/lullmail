@@ -230,14 +230,20 @@ func accountLeaseHeld(ctx context.Context, id mail.AccountID) bool {
 
 func (a *App) accountWorkLifecycle(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The owner read lock fences full-owner deletion only: it is held
-		// for the request, and single-account deletion never takes the
-		// write side, so one account's stream can not delay another
-		// account's deletion (audit OPS-05).
+		// Hold the owner lock only until the account lease is acquired.
+		// Holding it across provider I/O prevents owner deletion from even
+		// reaching the seal/cancel step that is supposed to stop that I/O.
 		a.accountOwnerMu.RLock()
-		defer a.accountOwnerMu.RUnlock()
-		release, leased, ok := a.holdRequestAccount(r)
+		ctx, release, ok, err := a.holdRequestAccount(r)
+		a.accountOwnerMu.RUnlock()
 		defer release()
+		if err != nil {
+			// A failed admission lookup is not evidence that no gate is
+			// needed. A later handler lookup may recover, so fail closed
+			// rather than allowing provider work outside deletion fencing.
+			writeLookupProblem(w, err, "account")
+			return
+		}
 		if !ok {
 			// The route names an account that is being deleted right now:
 			// proceeding WITHOUT a gate (the old silent no-op) is exactly
@@ -246,60 +252,64 @@ func (a *App) accountWorkLifecycle(next http.Handler) http.Handler {
 				"this account is being deleted — retry once it finishes")
 			return
 		}
-		ctx := r.Context()
-		if leased != "" {
-			ctx = context.WithValue(ctx, accountGateKey{}, leased)
-		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
 // holdRequestAccount takes the request's account gate when the route
 // carries an ?account= parameter that resolves to a connected mailbox, so
-// a deletion of that account waits for the stream. Unresolvable or absent
-// parameters take no gate — the handler's own ownership lookup answers
-// those — and a sealed account fails the request closed instead of
-// pretending the gate is held.
-func (a *App) holdRequestAccount(r *http.Request) (func(), mail.AccountID, bool) {
+// a deletion of that account waits for the stream. Absent parameters and
+// genuinely missing rows take no gate — the handler's own ownership lookup
+// answers those. Lookup failures and sealed accounts fail closed instead
+// of allowing a later recovered lookup to proceed without a lease.
+func (a *App) holdRequestAccount(r *http.Request) (context.Context, func(), bool, error) {
 	uid, err := a.userID(r.Context())
 	if err != nil {
-		return func() {}, "", true
+		return r.Context(), func() {}, false, err
 	}
 	account := r.URL.Query().Get("account")
 	if account == "" {
-		return func() {}, "", true
+		return r.Context(), func() {}, true, nil
 	}
 	var mirror string
 	err = a.db.QueryRowContext(r.Context(),
 		`SELECT mirror_account_id FROM email_accounts WHERE user_id=$1 AND (id::text=$2 OR mirror_account_id=$2)`,
 		uid, account).Scan(&mirror)
+	if errors.Is(err, sql.ErrNoRows) {
+		return r.Context(), func() {}, true, nil
+	}
 	if err != nil {
-		return func() {}, "", true
+		return r.Context(), func() {}, false, err
 	}
-	release, ok := a.beginAccountUse(mail.AccountID(mirror))
-	if !ok {
-		return func() {}, "", false
-	}
-	return release, mail.AccountID(mirror), true
+	ctx, release, ok := a.beginAccountWorkCtx(r.Context(), mail.AccountID(mirror))
+	return ctx, release, ok, nil
 }
 
-// beginAccountUseCtx is beginAccountUse for call chains that may already run
-// inside accountWorkLifecycle. The request-level gate excludes deletion
-// outright for the SAME account, so a nested use for that account needs no
-// second count; a nested use for a DIFFERENT account still takes its own
-// gate — the middleware's lease is account-specific, never owner-wide
-// (audit 5 LIFE-01).
-func (a *App) beginAccountUseCtx(ctx context.Context, acct mail.AccountID) (func(), bool) {
+// beginAccountWorkCtx couples a lease to BOTH the caller's context and
+// account cancellation. A nested use of the same account inherits its
+// already-joined context and does not increment the active count again.
+func (a *App) beginAccountWorkCtx(ctx context.Context, acct mail.AccountID) (context.Context, func(), bool) {
 	if accountLeaseHeld(ctx, acct) {
-		return func() {}, true
+		return ctx, func() {}, true
 	}
-	return a.beginAccountUse(acct)
+	accountCtx, release, ok := a.beginAccountWork(acct)
+	if !ok {
+		return ctx, func() {}, false
+	}
+	joined, releaseJoin := joinAccountContext(ctx, accountCtx)
+	joined = context.WithValue(joined, accountGateKey{}, acct)
+	return joined, func() {
+		releaseJoin()
+		release()
+	}, true
 }
 
 // sealOwnerAccounts seals every account of one owner and waits for their
-// in-flight work while holding the owner write lock: account creation and
-// gated requests cannot start meanwhile. Callers pass the same mirrors to
-// finish when the deletion's outcome is known.
+// in-flight work while holding the owner write lock: account creation,
+// single-account deletion and gated request admission cannot overlap it.
+// Admitted requests release their owner read lock before provider work,
+// allowing this seal to cancel and drain them. Callers finish the seal
+// when the deletion's outcome is known.
 type ownerSeal struct {
 	app    *App
 	states []*accountLifecycle
@@ -411,13 +421,13 @@ func (a *App) accountExportLifecycle(next http.Handler) http.Handler {
 			writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 			return
 		}
-		release, ok := a.beginAccountUse(mail.AccountID(mirror))
+		ctx, release, ok := a.beginAccountWorkCtx(r.Context(), mail.AccountID(mirror))
 		if !ok {
 			writeProblem(w, http.StatusConflict, "Delete In Progress", "this account is being deleted")
 			return
 		}
 		defer release()
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -462,9 +472,9 @@ func (a *App) accountResolver() mail.Resolver {
 	return func(ctx context.Context, acct mail.AccountID, cred mail.Credential) (mail.Adapter, func(), error) {
 		base := a.dial
 		if base == nil {
-			base = newResolver()
+			base = newResolverWithGmailRefresh(a.refreshGmailToken)
 		}
-		releaseUse, ok := a.beginAccountUseCtx(ctx, acct)
+		ctx, releaseUse, ok := a.beginAccountWorkCtx(ctx, acct)
 		if !ok {
 			return nil, nil, fmt.Errorf("account %s is being deleted", acct)
 		}
@@ -491,7 +501,10 @@ func (a *App) accountResolver() mail.Resolver {
 			releaseUse()
 			return nil, nil, err
 		}
-		return adapter, func() {
+		// Resolver clients (the scheduler and raw engine routes) invoke
+		// later adapter methods with their original context. Bind those
+		// operations to the lease too, including returned body streams.
+		return bindAccountAdapter(adapter, ctx), func() {
 			release()
 			releaseUse()
 		}, nil

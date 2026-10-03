@@ -344,10 +344,11 @@ func (e *Engine) beginScanAndRun(ctx context.Context, acct AccountID, box Mailbo
 }
 
 // resumeScan walks a staged scan's remaining pages. Every page is staged
-// in one transaction (envelopes + seen + continuation); the only deletion
-// in the entire recovery path happens inside FinishScan after the final
-// page staged successfully. A failure or page-budget exhaustion between
-// pages leaves the scan durable and resumable and the mirror untouched.
+// in one transaction (envelopes + seen + continuation). With PgStore the
+// terminal page and completion share that transaction, so pruning absent
+// messages, publishing the cursor, and recording the generation cannot be
+// interrupted between commits. A failure or page-budget exhaustion between
+// pages leaves the scan durable and resumable without pruning absences.
 //
 // A provider that rejects the scan's stored continuation (typed
 // ErrCursorInvalid, or an explicit Reset) gets ONE bounded replacement:
@@ -371,7 +372,7 @@ func (e *Engine) resumeScan(ctx context.Context, acct AccountID, box MailboxID, 
 				if errors.Is(err, ErrCursorInvalid) && !restarted {
 					restarted = true
 					rep.Reset = true
-					fresh, berr := scans.BeginScan(ctx, acct, box)
+					fresh, berr := scans.BeginScanGeneration(ctx, acct, box, scan.Generation)
 					if berr != nil {
 						return nil, berr
 					}
@@ -387,7 +388,7 @@ func (e *Engine) resumeScan(ctx context.Context, acct AccountID, box MailboxID, 
 				}
 				restarted = true
 				rep.Reset = true
-				fresh, berr := scans.BeginScan(ctx, acct, box)
+				fresh, berr := scans.BeginScanGeneration(ctx, acct, box, scan.Generation)
 				if berr != nil {
 					return nil, berr
 				}
@@ -416,8 +417,29 @@ func (e *Engine) resumeScan(ctx context.Context, acct AccountID, box MailboxID, 
 		if err != nil {
 			return nil, err
 		}
-		if err := scans.ApplyScanPage(ctx, scan.ID, prepared.upsert, prepared.seen, prepared.destroy, changes.Next); err != nil {
-			return nil, err
+		if finalizer, ok := scans.(FinalScanPageStore); changes.Complete && ok {
+			// Persist completion with the terminal page. Neither a process
+			// interruption nor optional body-prefetch failure may strand a
+			// running scan at an incremental cursor that never says Complete.
+			pruned, err := finalizer.ApplyFinalScanPage(ctx, scan.ID, prepared.upsert, prepared.seen, prepared.destroy, changes.Next)
+			if err != nil {
+				return nil, err
+			}
+			rep.Deleted += pruned
+		} else {
+			if err := scans.ApplyScanPage(ctx, scan.ID, prepared.upsert, prepared.seen, prepared.destroy, changes.Next); err != nil {
+				return nil, err
+			}
+			if changes.Complete {
+				// Compatibility for older ScanStore implementations. Finish
+				// before ancillary work, but only FinalScanPageStore can close
+				// the crash window between these two store transactions.
+				pruned, err := scans.FinishScan(ctx, acct, box, scan.ID, changes.Next)
+				if err != nil {
+					return nil, err
+				}
+				rep.Deleted += pruned
+			}
 		}
 
 		// Old identities retire only after their replacements are staged
@@ -435,11 +457,6 @@ func (e *Engine) resumeScan(ctx context.Context, acct AccountID, box MailboxID, 
 		scan.Continuation = changes.Next
 
 		if changes.Complete {
-			pruned, err := scans.FinishScan(ctx, acct, box, scan.ID, changes.Next)
-			if err != nil {
-				return nil, err
-			}
-			rep.Deleted += pruned
 			return rep, nil
 		}
 	}

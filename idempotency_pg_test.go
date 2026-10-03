@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // idempotentCall issues one wrapped request against a fresh recorder and
@@ -129,20 +131,23 @@ func TestIntegrationIdempotencyKeyConflictRejectsDifferentRequest(t *testing.T) 
 // must not re-run it (the rejection is the outcome, not a retry signal).
 func TestIntegrationIdempotentHandlerErrorIsReplayed(t *testing.T) {
 	p := newProductPG(t)
-	r := jsonBody(t, "POST", "/notes", `{"text":"e"}`)
-	r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, p.uid))
-	r.Header.Set("Idempotency-Key", "note-create-key")
-	r.SetPathValue("id", "")
+	newReq := func() *http.Request {
+		r := jsonBody(t, "POST", "/notes", `{"text":"e"}`)
+		r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, p.uid))
+		r.Header.Set("Idempotency-Key", "note-create-key")
+		r.SetPathValue("id", "")
+		return r
+	}
 	first := httptest.NewRecorder()
 	p.app.withIdempotency(func(w http.ResponseWriter, req *http.Request) {
 		writeProblem(w, http.StatusUnprocessableEntity, "Missing Title", "title is required")
-	})(first, r)
+	})(first, newReq())
 	second := httptest.NewRecorder()
 	p.app.withIdempotency(func(w http.ResponseWriter, req *http.Request) {
 		// Must never run: reaching here means the recorded rejection was
 		// discarded and the mutation re-executed.
 		writeJSON(w, map[string]any{"ok": true})
-	})(second, r)
+	})(second, newReq())
 	if first.Code != http.StatusUnprocessableEntity || second.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("recorded rejection not replayed: %d then %d", first.Code, second.Code)
 	}
@@ -168,4 +173,180 @@ func TestIntegrationIdempotencyKeyLengthAndBodyBound(t *testing.T) {
 	if status != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized body: status %d body %s", status, body)
 	}
+}
+
+// A one-connection pool makes accidental nested acquisition deterministic.
+// Exercise every wrapped route, including existing transaction-owning handlers.
+func TestIntegrationKeyedMutationsUseOneConnection(t *testing.T) {
+	p := newProductPG(t)
+	messageID, account := seedSnoozeTarget(t, p)
+	p.db.SetMaxOpenConns(1)
+	call := func(handler http.HandlerFunc, method, path, body, key, id string) map[string]any {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		r := jsonBody(t, method, path, body).WithContext(context.WithValue(ctx, authContextKey{}, p.uid))
+		r.Header.Set("Idempotency-Key", key)
+		r.SetPathValue("id", id)
+		r.SetPathValue("message", messageID)
+		w := httptest.NewRecorder()
+		p.app.withIdempotency(handler)(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", key, w.Code, w.Body.String())
+		}
+		var out map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	note := call(p.app.handleNoteCreate, "POST", "/notes", `{"text":"one"}`, "create-note", "")
+	id := note["id"].(string)
+	call(p.app.handleNoteUpdate, "POST", "/notes/"+id, `{"text":"two"}`, "update-note", id)
+	call(p.app.handleNoteDelete, "DELETE", "/notes/"+id, "", "delete-note", id)
+	card := call(p.app.handleBoardCard, "POST", "/board/cards", `{"title":"manual"}`, "create-card", "")
+	id = card["card_id"].(string)
+	call(p.app.handleBoardCardDone, "POST", "/board/cards/"+id+"/done", `{"done":true}`, "done-card", id)
+	call(p.app.handleBoardUnpin, "POST", "/board/unpin", `{"card_id":"`+id+`"}`, "unpin-manual", "")
+	call(p.app.handleBoardPin, "POST", "/board/pin", `{"account":"`+account+`","thread_id":"thread-snooze"}`, "pin-thread", "")
+	call(p.app.handleDecide, "POST", "/screener/decide", `{"sender":"someone@example.com","allow":true,"route":"imbox"}`, "decide", "")
+	call(p.app.handleUndecide, "POST", "/screener/undecide", `{"sender":"someone@example.com"}`, "undecide", "")
+	call(p.app.handleMessageAction, "POST", "/messages/"+messageID+"/action?account="+account, `{"action":"read"}`, "read", "")
+}
+
+func TestIntegrationLedgerWriteFailureRollsBackDomainMutation(t *testing.T) {
+	p := newProductPG(t)
+	if _, err := p.db.Exec(`ALTER TABLE api_mutations ADD CONSTRAINT reject_recorded_success CHECK (response_status <> 200)`); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"text":"must roll back"}`
+	status, _, _ := idempotentCall(t, p, "POST", "/notes", body, "failed-ledger")
+	if status != http.StatusInternalServerError {
+		t.Fatalf("ledger failure: %d", status)
+	}
+	if n := noteCount(t, p); n != 0 {
+		t.Fatalf("failed ledger retained %d notes", n)
+	}
+	if _, err := p.db.Exec(`ALTER TABLE api_mutations DROP CONSTRAINT reject_recorded_success`); err != nil {
+		t.Fatal(err)
+	}
+	if status, _, replay := idempotentCall(t, p, "POST", "/notes", body, "failed-ledger"); status != http.StatusOK || replay {
+		t.Fatalf("retry: status=%d replay=%v", status, replay)
+	}
+	if n := noteCount(t, p); n != 1 {
+		t.Fatalf("retried mutation: %d notes", n)
+	}
+}
+
+func TestIntegrationHandlerPanicRollsBackMutationAndClaim(t *testing.T) {
+	p := newProductPG(t)
+	body := `{"text":"panic rollback"}`
+	r := jsonBody(t, "POST", "/notes", body)
+	r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, p.uid))
+	r.Header.Set("Idempotency-Key", "panic-key")
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("handler panic disappeared")
+			}
+		}()
+		p.app.withIdempotency(func(w http.ResponseWriter, r *http.Request) {
+			p.app.handleNoteCreate(w, r)
+			panic("interrupted before ledger update")
+		})(httptest.NewRecorder(), r)
+	}()
+	if n := noteCount(t, p); n != 0 {
+		t.Fatalf("panic retained %d notes", n)
+	}
+	if status, _, replay := idempotentCall(t, p, "POST", "/notes", body, "panic-key"); status != http.StatusOK || replay {
+		t.Fatalf("retry: status=%d replay=%v", status, replay)
+	}
+}
+
+func TestIntegrationTransientMutationFailureIsRetryable(t *testing.T) {
+	for _, status := range []int{http.StatusServiceUnavailable, http.StatusTooManyRequests, http.StatusRequestTimeout} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			p := newProductPG(t)
+			body := `{"text":"retry after rollback"}`
+			r := jsonBody(t, "POST", "/notes", body)
+			r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, p.uid))
+			r.Header.Set("Idempotency-Key", "transient-key")
+			first := httptest.NewRecorder()
+			p.app.withIdempotency(func(w http.ResponseWriter, req *http.Request) {
+				// Apply the real domain mutation without writing its success
+				// response, then simulate failure before acknowledgement.
+				p.app.handleNoteCreate(httptest.NewRecorder(), req)
+				w.Header().Set("Retry-After", "2")
+				writeProblem(w, status, "Temporary", "retry this same key")
+			})(first, r)
+			if first.Code != status || first.Header().Get("Retry-After") != "2" {
+				t.Fatalf("first response: %d %v", first.Code, first.Header())
+			}
+			if n := noteCount(t, p); n != 0 {
+				t.Fatalf("failed handler retained %d notes", n)
+			}
+			if got, _, replay := idempotentCall(t, p, "POST", "/notes", body, "transient-key"); got != http.StatusOK || replay {
+				t.Fatalf("retry: status=%d replay=%v", got, replay)
+			}
+		})
+	}
+}
+
+func TestIntegrationDeterministicRejectionRollsBackAndPreservesMetadata(t *testing.T) {
+	p := newProductPG(t)
+	request := func() *http.Request {
+		r := jsonBody(t, "POST", "/notes", `{"text":"rejected"}`)
+		r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, p.uid))
+		r.Header.Set("Idempotency-Key", "rejected-key")
+		return r
+	}
+	first := httptest.NewRecorder()
+	p.app.withIdempotency(func(w http.ResponseWriter, r *http.Request) {
+		p.app.handleNoteCreate(httptest.NewRecorder(), r)
+		w.Header().Set("Location", "/review")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Set-Cookie", "never-replay-this")
+		writeProblem(w, http.StatusConflict, "Rejected", "a deterministic rejection")
+	})(first, request())
+	if n := noteCount(t, p); n != 0 {
+		t.Fatalf("rejection retained %d notes", n)
+	}
+	second := httptest.NewRecorder()
+	p.app.withIdempotency(func(http.ResponseWriter, *http.Request) { t.Error("rejection was re-executed") })(second, request())
+	if second.Code != http.StatusConflict || second.Body.String() != first.Body.String() {
+		t.Fatalf("replay: %d %s", second.Code, second.Body.String())
+	}
+	if second.Header().Get("Location") != "/review" || second.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("lost metadata: %v", second.Header())
+	}
+	if second.Header().Get("Set-Cookie") != "" {
+		t.Fatal("replayed a cookie")
+	}
+}
+
+func TestIntegrationDistinctKeyDecisionsDoNotDeadlockOnOwnerLock(t *testing.T) {
+	p := newProductPG(t)
+	p.db.SetMaxOpenConns(16)
+	const workers = 16
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			r := jsonBody(t, "POST", "/screener/decide", fmt.Sprintf(`{"sender":"person%d@example.com","allow":true}`, i))
+			r = r.WithContext(context.WithValue(ctx, authContextKey{}, p.uid))
+			r.Header.Set("Idempotency-Key", fmt.Sprintf("decide-%d", i))
+			w := httptest.NewRecorder()
+			p.app.withIdempotency(p.app.handleDecide)(w, r)
+			if w.Code != http.StatusOK {
+				t.Errorf("decision %d: %d %s", i, w.Code, w.Body.String())
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
 }

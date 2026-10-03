@@ -4,7 +4,8 @@
 // final. Previously only "send" had an undo, so a mis-click in a bucket row
 // silently relocated a thread with no way back. Each verb here captures the
 // state it replaced and hands it to the toast.
-import { api, ApiError, clearMemoryCache, QueuedOffline } from "./api";
+import { api, ApiError, clearMemoryCache, QueuedOffline, StaleOwnerError } from "./api";
+import { generationCurrent, offlineGeneration, offlineOwner, offlineStorageSuspended } from "./offline";
 import type { BoardCard, Bucket, Counts, ListBucket, Message, Row, StickyNote } from "./types";
 import {
   accountCount, accountFilter, accountQS, accounts, closeReader, counts, list, type Mailbox, mailboxes, openCompose, reader, rememberListScroll, resetSelection, screeningEnabled, setAccountFilter, showError, showToast, undoSeconds,
@@ -462,9 +463,28 @@ export interface SendInput {
   attachments?: SendAttachment[];
 }
 
-export async function sendMail(input: SendInput): Promise<boolean> {
+const sendFlights = new Map<string, { body: string; result: Promise<boolean> }>();
+
+/** Callers retain the key for one unchanged submission. This is only the
+ * server's bounded in-process retry protection, NOT a durable outbox. */
+export function sendMail(input: SendInput, idempotencyKey: string): Promise<boolean> {
+  const snapshot: SendInput = { ...input, attachments: input.attachments?.map((a) => ({ ...a })) };
+  const scope = offlineOwner() + "\n" + offlineGeneration() + "\n" + idempotencyKey;
+  const body = JSON.stringify(snapshot);
+  const active = sendFlights.get(scope);
+  if (active?.body === body) return active.result;
+  const result = submitMail(snapshot, idempotencyKey);
+  sendFlights.set(scope, { body, result });
+  void result.finally(() => { if (sendFlights.get(scope)?.result === result) sendFlights.delete(scope); });
+  return result;
+}
+
+async function submitMail(input: SendInput, idempotencyKey: string): Promise<boolean> {
+  const owner = offlineOwner(), gen = offlineGeneration();
+  const current = () => !offlineStorageSuspended() && offlineOwner() === owner && generationCurrent(gen);
   try {
-    const res = await api<{ queued: string; undo_seconds: number }>("/send", {
+    const res = await api<{ queued: string; undo_seconds: number; status?: "submitted" }>("/send", {
+      idempotencyKey,
       body: {
         to: input.to,
         cc: input.cc || "",
@@ -481,13 +501,20 @@ export async function sendMail(input: SendInput): Promise<boolean> {
         })),
       },
     });
-    const window = Math.max(1, res.undo_seconds || 5);
+    if (!current()) return false;
+    const window = Math.max(0, res.undo_seconds ?? 5);
+    if (window === 0) {
+      showToast(res.status === "submitted" ? "Message submitted" : "Send already queued — the undo window has ended");
+      return true;
+    }
     undoSeconds.value = window;
     showToast(
       `Sending in ${window}s`,
       async () => {
         try {
+          if (!current()) return;
           await api("/outbox/" + encodeURIComponent(res.queued), { method: "DELETE" });
+          if (!current()) return;
           // The toast promised the draft comes back — so it has to actually
           // come back complete: recipients, Cc/Bcc, body mode, sending
           // account, reply parent, and every attachment (audit SEND-05).
@@ -509,7 +536,7 @@ export async function sendMail(input: SendInput): Promise<boolean> {
     );
     return true;
   } catch (e) {
-    fail(e, "Could not send");
+    if (current()) fail(e, "Could not send");
     return false;
   }
 }
@@ -517,6 +544,7 @@ export async function sendMail(input: SendInput): Promise<boolean> {
 /* ---- errors ---- */
 
 function fail(e: unknown, fallback: string) {
+  if (e instanceof StaleOwnerError) return;
   if (e instanceof ApiError && e.status === 401) return; // the gate takes over
   if (e instanceof QueuedOffline) {
     showToast("Offline — saved for when you're back online");

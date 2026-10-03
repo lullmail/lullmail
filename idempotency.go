@@ -10,17 +10,21 @@ package main
 // second application. A key reused with a different request is a 409.
 //
 // Concurrency design: the row insert and the response record commit in
-// ONE transaction that stays open while the handler runs. Concurrent
+// ONE transaction shared with every wrapped domain write. Concurrent
 // same-key requests find the uncommitted row via SELECT ... FOR UPDATE
 // and block until that transaction finishes, then replay the recorded
 // response. A crash rolls the insert back, so a committed row is always
-// complete and there is no "running" state to expire.
+// complete and there is no "running" state to expire. Wrapped handlers must
+// use mutationDB/beginMutation for ALL their database access; taking another
+// connection here can deadlock a saturated pool and defeats atomicity.
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -41,6 +45,57 @@ const (
 	// means the retried mutation applies again.
 	idempotencyRetentionDays = 30
 )
+
+// productMutationDB is the shared query surface of sql.DB and sql.Tx.
+// All ledger-wrapped handlers use it, including read-after-write lookups.
+type productMutationDB interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+type mutationTxKey struct{}
+
+func (a *App) mutationDB(ctx context.Context) productMutationDB {
+	if tx, ok := ctx.Value(mutationTxKey{}).(*sql.Tx); ok {
+		return tx
+	}
+	return a.db
+}
+
+// localMutationTx borrows the ledger transaction when one exists. The
+// wrapper alone commits or rolls it back; handler errors roll back to its
+// savepoint before their response is recorded. Without a key, the handler
+// keeps its existing standalone transaction semantics.
+type localMutationTx struct {
+	*sql.Tx
+	owned bool
+}
+
+func (a *App) beginMutation(ctx context.Context) (*localMutationTx, error) {
+	if tx, ok := ctx.Value(mutationTxKey{}).(*sql.Tx); ok {
+		return &localMutationTx{Tx: tx}, nil
+	}
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &localMutationTx{Tx: tx, owned: true}, nil
+}
+
+func (tx *localMutationTx) Commit() error {
+	if tx.owned {
+		return tx.Tx.Commit()
+	}
+	return nil
+}
+
+func (tx *localMutationTx) Rollback() error {
+	if tx.owned {
+		return tx.Tx.Rollback()
+	}
+	return nil
+}
 
 // mutationRequestHash binds a key to one request shape: method, path,
 // query, and body. A different shape under the same key is a conflict.
@@ -123,6 +178,15 @@ func (a *App) withIdempotency(next http.HandlerFunc) http.HandlerFunc {
 				writeProblem(w, http.StatusInternalServerError, "Begin Failed", err.Error())
 				return
 			}
+			// Owner first, then ledger, then domain rows. The ledger's FK
+			// otherwise takes a users KEY SHARE lock before the screener
+			// upgrades to FOR UPDATE; two distinct keys can deadlock on
+			// that upgrade. Local owner mutations are deliberately short.
+			if _, err := lockAuthUser(r.Context(), tx, uid); err != nil {
+				tx.Rollback()
+				writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+				return
+			}
 			res, err := tx.ExecContext(r.Context(), `
 				INSERT INTO api_mutations
 					(user_id, mutation_key, request_hash, response_status, response_content_type, response_body)
@@ -139,13 +203,13 @@ func (a *App) withIdempotency(next http.HandlerFunc) http.HandlerFunc {
 				a.recordIdempotentResponse(w, r, tx, next, uid, key, body)
 				return
 			}
-			var storedHash, contentType string
+			var storedHash, contentType, headersJSON string
 			var status int
 			var stored []byte
 			err = tx.QueryRowContext(r.Context(), `
-				SELECT request_hash, response_status, response_content_type, response_body
+				SELECT request_hash, response_status, response_content_type, response_body, response_headers
 				FROM api_mutations WHERE user_id = $1 AND mutation_key = $2
-				FOR UPDATE`, uid, key).Scan(&storedHash, &status, &contentType, &stored)
+				FOR UPDATE`, uid, key).Scan(&storedHash, &status, &contentType, &stored, &headersJSON)
 			tx.Rollback()
 			if errors.Is(err, sql.ErrNoRows) {
 				continue // the previous holder rolled back; take the key
@@ -159,6 +223,12 @@ func (a *App) withIdempotency(next http.HandlerFunc) http.HandlerFunc {
 					"this Idempotency-Key was already used for a different request")
 				return
 			}
+			var headers http.Header
+			if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
+				writeProblem(w, http.StatusInternalServerError, "Idempotency Failed", "invalid recorded response headers")
+				return
+			}
+			copyMutationHeaders(w.Header(), headers)
 			w.Header().Set("Content-Type", contentType)
 			w.Header().Set("X-Idempotent-Replay", "true")
 			w.WriteHeader(status)
@@ -177,33 +247,77 @@ func (a *App) withIdempotency(next http.HandlerFunc) http.HandlerFunc {
 // transaction (the row vanishes) and propagates as it would unwrapped.
 func (a *App) recordIdempotentResponse(w http.ResponseWriter, r *http.Request, tx *sql.Tx, next http.HandlerFunc, uid, key string, body []byte) {
 	defer tx.Rollback()
+	// Preserve the key claim while allowing a rejected handler's partial
+	// writes (including an aborted SQL statement) to be rolled back.
+	if _, err := tx.ExecContext(r.Context(), "SAVEPOINT mutation_handler"); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Idempotency Failed", err.Error())
+		return
+	}
+	ctx := context.WithValue(r.Context(), mutationTxKey{}, tx)
+	ctx = context.WithValue(ctx, authContextKey{}, uid)
+	r = r.WithContext(ctx)
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	rec := newResponseRecorder()
 	next(rec, r)
 	if rec.status == 0 {
 		rec.status = http.StatusOK
 	}
+	if rec.status >= 400 {
+		if _, err := tx.ExecContext(r.Context(), "ROLLBACK TO SAVEPOINT mutation_handler"); err != nil {
+			writeProblem(w, http.StatusInternalServerError, "Idempotency Failed", err.Error())
+			return
+		}
+		// A transient failure is not a durable outcome. Both the claim and
+		// all domain writes roll back, so the SAME key can safely retry.
+		if rec.status >= 500 || rec.status == http.StatusTooManyRequests || rec.status == http.StatusRequestTimeout {
+			tx.Rollback()
+			writeRecordedMutation(w, rec)
+			return
+		}
+	}
+	headers, err := json.Marshal(mutationResponseHeaders(rec.header))
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Idempotency Failed", err.Error())
+		return
+	}
 	if _, err := tx.ExecContext(r.Context(), `
 		UPDATE api_mutations
-		SET response_status = $3, response_content_type = $4, response_body = $5
+		SET response_status = $3, response_content_type = $4, response_body = $5, response_headers = $6
 		WHERE user_id = $1 AND mutation_key = $2`,
-		uid, key, rec.status, rec.header.Get("Content-Type"), rec.body.Bytes()); err != nil {
+		uid, key, rec.status, rec.header.Get("Content-Type"), rec.body.Bytes(), string(headers)); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Idempotency Failed", err.Error())
 		return
 	}
 	if err := tx.Commit(); err != nil {
-		// The handler's own writes may have committed while the ledger
-		// row did not; the retry re-applies. Same exposure as an
-		// unwrapped request — recorded honestly, never silent.
-		a.log.Error("idempotency ledger commit failed", "key", key, "err", err)
+		// The domain writes and ledger now share the outcome. An uncertain
+		// commit can be resolved by retrying this same key.
+		a.log.Error("idempotency transaction commit failed", "key", key, "err", err)
 		writeProblem(w, http.StatusInternalServerError, "Idempotency Failed", err.Error())
 		return
 	}
-	for name, values := range rec.header {
-		for _, v := range values {
-			w.Header().Add(name, v)
+	writeRecordedMutation(w, rec)
+}
+
+// Persist only response metadata meaningful to these local mutation routes;
+// never replay cookies, authentication, or hop-by-hop transport headers.
+func mutationResponseHeaders(header http.Header) http.Header {
+	out := make(http.Header)
+	for _, name := range []string{"Content-Type", "Location", "Retry-After", "Cache-Control"} {
+		if values := header.Values(name); len(values) > 0 {
+			out[name] = append([]string(nil), values...)
 		}
 	}
+	return out
+}
+
+func copyMutationHeaders(dst, src http.Header) {
+	for name, values := range src {
+		dst[name] = append([]string(nil), values...)
+	}
+}
+
+func writeRecordedMutation(w http.ResponseWriter, rec *responseRecorder) {
+	copyMutationHeaders(w.Header(), rec.header)
 	w.WriteHeader(rec.status)
 	w.Write(rec.body.Bytes())
 }

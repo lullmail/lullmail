@@ -15,14 +15,22 @@
 // AND drafts; data belongs to the session owner, no survivorship; an
 // owner or account switch initializes a new generation.
 
-import { showError } from "./store";
+import { resetPrivateState, showError } from "./store";
 
 const DB = "lullmail-offline-v1";
-const VERSION = 3;
+const VERSION = 4;
 const CACHE = "responses";
 const QUEUE = "mutations";
 const ATTACHMENTS = "attachments"; // legacy v1 store; drained by the v2 migration
 const DRAFTS = "drafts";
+const META = "meta";
+const TOMBSTONES = "draft-tombstones";
+const SNAPSHOTS_KEY = "lull-offline-snapshots";
+const PURGE_PREFIX = "lull-offline-purge:";
+interface StorageMeta { key: "session"; owner: string; generation: number; snapshots: number; legacyMigrated?: boolean }
+interface StorageContext { owner: string; generation: number; snapshots?: number }
+let admitted: StorageContext | undefined;
+const draftRevisions = new Map<string, number>();
 const NS_KEY = "lull-offline-ns";
 const GEN_KEY = "lull-offline-gen";
 const EMAIL_KEY = "lull-offline-email";
@@ -59,6 +67,7 @@ export interface DraftRecord {
   ns: string;
   seq: number;
   savedAt: number;
+  revision?: number;
   to: string;
   cc?: string;
   bcc?: string;
@@ -68,6 +77,8 @@ export interface DraftRecord {
   accountId?: string;
   replyToId?: string;
   context?: string;
+  /** Retry identity for this unchanged submission, never a delivery receipt. */
+  sendKey?: string;
   attachments?: Array<{ filename: string; contentType: string; dataBase64: string }>;
 }
 
@@ -75,32 +86,40 @@ export interface DraftRecord {
  *  can report it accurately instead of claiming the server is unreachable
  *  (audit 3 WEB-08). */
 export class OfflineStorageError extends Error {}
+export class OfflineOwnerChangedError extends OfflineStorageError {}
 
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB, VERSION);
     // A held connection in another tab must surface as an actionable
     // storage error, not a silent hang (audit 3 WEB-08).
-    request.onblocked = () => reject(new OfflineStorageError("Close other Lullmail tabs to update offline storage"));
+    let blocked = false;
+    request.onblocked = () => {
+      blocked = true;
+      reject(new OfflineStorageError("Close other Lullmail tabs to update offline storage"));
+    };
     request.onupgradeneeded = (event: IDBVersionChangeEvent) => {
       const db = request.result;
       if (!db.objectStoreNames.contains(CACHE)) db.createObjectStore(CACHE, { keyPath: "key" });
       if (!db.objectStoreNames.contains(QUEUE)) db.createObjectStore(QUEUE, { keyPath: "id" });
       if (!db.objectStoreNames.contains(ATTACHMENTS)) db.createObjectStore(ATTACHMENTS, { keyPath: "id" });
       if (!db.objectStoreNames.contains(DRAFTS)) db.createObjectStore(DRAFTS, { keyPath: "id" });
+      if (!db.objectStoreNames.contains(META)) db.createObjectStore(META, { keyPath: "key" });
+      if (!db.objectStoreNames.contains(TOMBSTONES)) db.createObjectStore(TOMBSTONES, { keyPath: "id" });
       // v1 cache rows are keyed by the dead email namespace; they can
       // never be read again, so the upgrade drops them. The mutations
       // queue and attachment rows survive for the one-time v2 migration
       // (pending offline work and parked drafts are real user data).
       // The PREVIOUS version comes from the version-change event, not
       // the request object (audit 5 OFF-01).
-      if (request.transaction && event.oldVersion > 0) {
+      if (request.transaction && event.oldVersion > 0 && event.oldVersion < 3) {
         request.transaction.objectStore(CACHE).clear();
       }
     };
     request.onerror = () => reject(new OfflineStorageError(request.error?.message ?? "Storage unavailable"));
     request.onsuccess = () => {
       const db = request.result;
+      if (blocked) { db.close(); return; }
       // Another tab wants to upgrade: close so it can, rather than
       // blocking it forever (audit 3 WEB-08).
       db.onversionchange = () => db.close();
@@ -112,26 +131,53 @@ function openDB(): Promise<IDBDatabase> {
 /** One transaction, resolved only when it COMMITS. Resolving on the
  *  request's onsuccess reported saves that a later abort (quota, another
  *  operation's failure) silently rolled back (audit WEB-02). */
-function transaction<T>(store: string, mode: IDBTransactionMode, run: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> {
-  return openDB().then((db) => new Promise<T>((resolve, reject) => {
-    const tx = db.transaction(store, mode);
-    let value!: T;
+function context(gen = offlineGeneration(), snapshots?: number): StorageContext {
+  return { owner: offlineOwner(), generation: gen, snapshots };
+}
+
+function purgeHintPrefix(ctx: StorageContext): string {
+  return PURGE_PREFIX + JSON.stringify([ctx.owner, ctx.generation]) + ":";
+}
+
+function purgeHints(ctx: StorageContext): string[] {
+  const prefix = purgeHintPrefix(ctx);
+  return Object.keys(localStorage).filter((key) => key.startsWith(prefix));
+}
+
+function matches(meta: StorageMeta | undefined, ctx: StorageContext): boolean {
+  return !!meta && meta.owner === ctx.owner && meta.generation === ctx.generation &&
+    (ctx.snapshots === undefined || meta.snapshots === ctx.snapshots);
+}
+
+function currentContext(ctx: StorageContext): boolean {
+  return !storageSuspended && offlineOwner() === ctx.owner && generationCurrent(ctx.generation) &&
+    (ctx.snapshots === undefined || (snapshotGeneration() === ctx.snapshots && purgeHints(ctx).length === 0));
+}
+
+/** Metadata and payload share the transaction scope. A wipe that wins the
+ * open/transaction race cannot be followed by an old-generation write,
+ * even while another tab has not received its storage event yet. */
+function transaction<T>(store: string, mode: IDBTransactionMode, run: (s: IDBObjectStore, tx: IDBTransaction) => IDBRequest<T>,
+  current?: () => boolean, ctx = context()): Promise<T | undefined> {
+  return openDB().then((db) => new Promise<T | undefined>((resolve, reject) => {
+    if (!currentContext(ctx) || (current && !current())) { db.close(); resolve(undefined); return; }
+    let tx: IDBTransaction;
+    try { tx = db.transaction(store === DRAFTS ? [META, DRAFTS, TOMBSTONES] : [META, store], mode); }
+    catch (error) { db.close(); reject(error); return; }
+    let value: T | undefined;
     let requestError: DOMException | null = null;
-    tx.oncomplete = () => { db.close(); resolve(value); };
-    tx.onabort = () => {
-      db.close();
-      reject(tx.error ?? requestError ?? new Error("Storage transaction aborted"));
-    };
+    tx.oncomplete = () => { db.close(); resolve(currentContext(ctx) ? value : undefined); };
+    tx.onabort = () => { db.close(); reject(tx.error ?? requestError ?? new OfflineStorageError("Storage transaction aborted")); };
     tx.onerror = () => { requestError = tx.error; };
-    try {
-      const request = run(tx.objectStore(store));
-      request.onsuccess = () => { value = request.result; };
-      request.onerror = () => { requestError = request.error; };
-    } catch (error) {
-      try { tx.abort(); } catch { /* already inactive */ }
-      db.close();
-      reject(error);
-    }
+    const meta = tx.objectStore(META).get("session");
+    meta.onsuccess = () => {
+      if (!matches(meta.result, ctx) || !currentContext(ctx) || (current && !current())) return;
+      try {
+        const request = run(tx.objectStore(store), tx);
+        request.onsuccess = () => { value = request.result; };
+        request.onerror = () => { requestError = request.error; };
+      } catch (error) { tx.abort(); reject(error); }
+    };
   }));
 }
 
@@ -152,7 +198,8 @@ export function offlineGeneration(): number {
 }
 
 export function generationCurrent(gen: number): boolean {
-  return offlineGeneration() === gen;
+  return offlineGeneration() === gen && (!admitted ||
+    (admitted.owner === offlineOwner() && admitted.generation === gen));
 }
 
 /** Fail-closed suspension (audit 4 F11): when preparing an owner's storage
@@ -162,8 +209,24 @@ export function generationCurrent(gen: number): boolean {
  *  replay no-ops (or fails visibly) until a later successful prepare clears
  *  the flag. */
 let storageSuspended = false;
+// A failed logout may be retried only against the session it was erasing.
+// A boolean would carry that erase intent into a newer tab's session.
+let wipePending: StorageContext | undefined;
+let snapshotPurgePending: StorageContext | undefined;
+let transitionVersion = 0;
 
-export function suspendOfflineStorage(): void { storageSuspended = true; }
+// Separate from the owner generation: a mailbox purge must fence late
+// response publication without invalidating unrelated live drafts.
+let responseGeneration = 0;
+export function snapshotGeneration(): number {
+  return Math.max(responseGeneration, Number(localStorage.getItem(SNAPSHOTS_KEY)) || 0,
+    ...purgeHints(context()).map((key) => Number(localStorage.getItem(key)) || 0));
+}
+
+export function suspendOfflineStorage(): void {
+  transitionVersion++;
+  storageSuspended = true;
+}
 
 export function offlineStorageSuspended(): boolean { return storageSuspended; }
 
@@ -182,99 +245,154 @@ export function namespaceFor(identity: OfflineOwnerIdentity): string {
   return identity.email;
 }
 
-export async function prepareOfflineOwner(identity: OfflineOwnerIdentity): Promise<void> {
+/** localStorage is a synchronous display/invalidation mirror only. The
+ * IndexedDB row is the authority, including on tabs suspended between a
+ * transaction commit and publishing their mirror. */
+function publishMeta(meta: StorageMeta, email?: string): void {
+  if (meta.generation < offlineGeneration()) {
+    throw new OfflineOwnerChangedError("A newer offline owner transition already completed");
+  }
+  admitted = { owner: meta.owner, generation: meta.generation };
+  responseGeneration = Math.max(meta.snapshots, snapshotGeneration());
+  localStorage.setItem(GEN_KEY, String(meta.generation));
+  localStorage.setItem(SNAPSHOTS_KEY, String(responseGeneration));
+  if (meta.owner) localStorage.setItem(NS_KEY, meta.owner);
+  else localStorage.removeItem(NS_KEY);
+  if (email) localStorage.setItem(EMAIL_KEY, email);
+  else if (!meta.owner) localStorage.removeItem(EMAIL_KEY);
+}
+
+/** Capture storage authority before starting authentication. A missing or
+ * stale mirror can then recover to the server-confirmed owner without
+ * authorizing an auth response over a transition that happened mid-flight. */
+export async function captureOfflineContext(): Promise<StorageContext> {
+  const fallback = context();
+  if (typeof indexedDB === "undefined") return fallback;
+  const db = await openDB();
+  try {
+    return await new Promise<StorageContext>((resolve, reject) => {
+      const tx = db.transaction(META, "readonly");
+      const request = tx.objectStore(META).get("session");
+      tx.oncomplete = () => {
+        const meta = request.result as StorageMeta | undefined;
+        resolve(meta ? { owner: meta.owner, generation: meta.generation } : fallback);
+      };
+      tx.onabort = () => reject(tx.error ?? new OfflineStorageError("Owner metadata read aborted"));
+    });
+  } finally { db.close(); }
+}
+
+export async function prepareOfflineOwner(identity: OfflineOwnerIdentity, captured?: StorageContext): Promise<void> {
   const ns = namespaceFor(identity);
   if (!ns || !identity.email) return;
-  const previous = offlineOwner();
-  if (previous && previous !== ns) {
-    // Owner/account switch: caches, queued work, and drafts of the
-    // previous owner all go (ratified semantics — data belongs to the
-    // session owner), and the new generation fences every read still in
-    // flight from the old one.
-    await clearOfflineData();
-    localStorage.setItem(NS_KEY, ns);
-    localStorage.setItem(GEN_KEY, String(offlineGeneration() + 1));
-    localStorage.setItem(EMAIL_KEY, identity.email);
+  const version = ++transitionVersion;
+  const pendingWipe = wipePending;
+  const pendingPurge = snapshotPurgePending;
+  const expected = captured ?? context();
+  const mustWipe = pendingWipe || (!!expected.owner && expected.owner !== ns);
+  if (mustWipe || (admitted && (admitted.owner !== ns || admitted.generation !== expected.generation))) {
+    storageSuspended = true;
+    resetPrivateState();
+  }
+  if (typeof indexedDB === "undefined") {
+    publishMeta({ key: "session", owner: ns, generation: expected.generation + (expected.owner === ns ? 0 : 1), snapshots: snapshotGeneration() }, identity.email);
+    wipePending = undefined;
     storageSuspended = false;
     return;
   }
-  // First owner on this device: the one-time v1 migration may wipe a
-  // different owner's v1 remnants, and that wipe also removes the v2
-  // namespace markers — so it must run BEFORE this owner's markers are
-  // written, or the just-prepared namespace is stripped and every
-  // offline store silently no-ops.
-  await migrateV1Storage(ns, identity.email);
-  if (!previous) {
-    localStorage.setItem(NS_KEY, ns);
-    localStorage.setItem(GEN_KEY, String(offlineGeneration() + 1));
-    localStorage.setItem(EMAIL_KEY, identity.email);
-  }
-  storageSuspended = false;
-}
-
-/* ---- one-time v1 -> v2 storage migration ----
-   The v1 engine kept the draft ring + per-draft fields in localStorage
-   and attachment payloads in the ATTACHMENTS store, all under an
-   email owner marker. When the SAME owner returns, their parked drafts
-   and pending offline queue carry into the namespaced v2 stores; a
-   different owner's remnants are wiped, not inherited. */
-
-async function migrateV1Storage(ns: string, email: string): Promise<void> {
-  if (localStorage.getItem(V2_KEY) || typeof indexedDB === "undefined") return;
-  const v1Owner = localStorage.getItem(OWNER);
-  const sameOwner = v1Owner !== null && v1Owner === email;
+  const db = await openDB().catch((error) => {
+    if (version === transitionVersion) storageSuspended = true;
+    throw error;
+  });
   try {
-    if (sameOwner) {
-      const db = await openDB();
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const tx = db.transaction([QUEUE, ATTACHMENTS, DRAFTS], "readwrite");
-          tx.oncomplete = () => resolve();
-          tx.onabort = () => reject(tx.error ?? new OfflineStorageError("v2 migration aborted"));
-          // Pending offline mutations keep their ids (idempotency keys)
-          // and their order; only the namespace field is rewritten. The
-          // puts are idempotent, so an interruption during cleanup is
-          // safe to retry.
+    const migrate = !localStorage.getItem(V2_KEY);
+    const v1Owner = localStorage.getItem(OWNER);
+    let recoveredPurgeHints: string[] = [];
+    const meta = await new Promise<StorageMeta>((resolve, reject) => {
+      const tx = db.transaction([META, CACHE, QUEUE, ATTACHMENTS, DRAFTS, TOMBSTONES], "readwrite");
+      let result!: StorageMeta;
+      let failure: Error | undefined;
+      tx.oncomplete = () => resolve(result);
+      tx.onabort = () => reject(failure ?? tx.error ?? new OfflineStorageError("Owner preparation aborted"));
+      const request = tx.objectStore(META).get("session");
+      request.onsuccess = () => {
+        if (version !== transitionVersion) {
+          failure = new OfflineOwnerChangedError("A newer offline storage transition already started");
+          tx.abort(); return;
+        }
+        const existing = request.result as StorageMeta | undefined;
+        // Do not let an auth response that began before another tab's
+        // switch erase or reclaim that newer owner's state.
+        if (existing && !matches(existing, expected) && (captured !== undefined || existing.owner !== ns) && !(captured === undefined && pendingWipe && matches(existing, pendingWipe))) {
+          failure = new OfflineOwnerChangedError("The offline owner changed in another tab; refresh authentication");
+          tx.abort(); return;
+        }
+        const previous = existing?.owner ?? expected.owner;
+        const needsMigration = migrate && !existing?.legacyMigrated;
+        const pendingHints = purgeHints(existing ?? expected);
+        const pendingSnapshots = Math.max(0, ...pendingHints.map((key) => Number(localStorage.getItem(key)) || 0));
+        // Logout invalidates the synchronous mirror before opening IDB.
+        // If it failed/crashed there, another freshly authenticated tab
+        // must finish that erase rather than revive the previous session.
+        const interruptedWipe = existing && offlineOwner() === existing.owner && offlineGeneration() > existing.generation;
+        const wipe = (!!pendingWipe && (!existing || matches(existing, pendingWipe))) ||
+          interruptedWipe || (!!previous && previous !== ns) || (needsMigration && v1Owner !== identity.email);
+        const recoverSnapshots = pendingHints.length > 0 || (pendingPurge && matches(existing, pendingPurge)) ||
+          (existing && offlineOwner() === existing.owner && offlineGeneration() === existing.generation &&
+            (Number(localStorage.getItem(SNAPSHOTS_KEY)) || 0) > existing.snapshots);
+        if (wipe) for (const name of [CACHE, QUEUE, ATTACHMENTS, DRAFTS, TOMBSTONES]) tx.objectStore(name).clear();
+        else if (recoverSnapshots) {
+          // Scoped hints survive failure before opening IDB; the shared epoch
+          // is written only under matching transactional authority. Recover
+          // either interruption with a cache-only erase before trusting mail.
+          // Drafts and pending mutations remain in the current session.
+          tx.objectStore(CACHE).clear();
+        }
+        recoveredPurgeHints = pendingHints;
+        const generation = Math.max(existing?.generation ?? 0, expected.generation, interruptedWipe ? offlineGeneration() : 0) + (wipe || previous !== ns ? 1 : 0);
+        result = { key: "session", owner: ns, generation, snapshots: Math.max(existing?.snapshots ?? 0, snapshotGeneration(), pendingSnapshots) + (wipe ? 1 : 0), legacyMigrated: true };
+        tx.objectStore(META).put(result);
+        if (needsMigration && v1Owner === identity.email && !wipe) {
           const queue = tx.objectStore(QUEUE);
-          const queueRows = queue.getAll();
-          queueRows.onsuccess = () => {
-            for (const row of queueRows.result as Queued[]) {
+          const rows = queue.getAll();
+          rows.onsuccess = () => {
+            for (const row of rows.result as Queued[]) {
               if (row.owner === v1Owner) queue.put({ ...row, owner: ns, key: row.key ?? row.id });
             }
-            // Attachment payloads fold into their draft's single record.
-            const atts = tx.objectStore(ATTACHMENTS).getAll();
-            atts.onsuccess = () => {
-              const byDraft = new Map<string, unknown[]>();
-              for (const row of atts.result as DraftAttachmentRow[]) {
-                if (row.owner === v1Owner && Array.isArray(row.files)) byDraft.set(row.id, row.files);
-              }
-              migrateDraftRing(tx.objectStore(DRAFTS), ns, byDraft);
-              tx.objectStore(ATTACHMENTS).clear();
-            };
           };
-        });
-      } finally {
-        db.close();
+          const attachments = tx.objectStore(ATTACHMENTS).getAll();
+          attachments.onsuccess = () => {
+            const byDraft = new Map<string, unknown[]>();
+            for (const row of attachments.result as DraftAttachmentRow[]) {
+              if (row.owner === v1Owner && Array.isArray(row.files)) byDraft.set(row.id, row.files);
+            }
+            migrateDraftRing(tx.objectStore(DRAFTS), ns, byDraft);
+            tx.objectStore(ATTACHMENTS).clear();
+          };
+        }
+      };
+    });
+    if (version !== transitionVersion) throw new OfflineOwnerChangedError("A newer offline storage transition already started");
+    if (!admitted || admitted.owner !== meta.owner || admitted.generation !== meta.generation) {
+      draftRevisions.clear();
+      if (admitted) resetPrivateState();
+    }
+    publishMeta(meta, identity.email);
+    if (migrate) {
+      localStorage.setItem(V2_KEY, "1");
+      for (const key of Object.keys(localStorage)) {
+        if (key === "es-drafts" || key.startsWith("es-draft-")) localStorage.removeItem(key);
       }
-    } else {
-      await clearOfflineData();
+      localStorage.removeItem(OWNER);
     }
-    // The migration's commit boundary (audit 5 OFF-01): the completion
-    // marker is written ONLY after the copy committed, and the legacy
-    // keys are removed only after that. A quota error or aborted
-    // transaction used to leave the marker set and the source drafts
-    // deleted — the only copies gone. On any failure the originals stay
-    // and the next boot retries the idempotent copy.
-    localStorage.setItem(V2_KEY, "1");
-    for (const key of Object.keys(localStorage)) {
-      if (key === "es-drafts" || key.startsWith("es-draft-")) localStorage.removeItem(key);
-    }
-    localStorage.removeItem(OWNER);
+    for (const key of recoveredPurgeHints) localStorage.removeItem(key);
+    if (wipePending === pendingWipe) wipePending = undefined;
+    if (snapshotPurgePending === pendingPurge) snapshotPurgePending = undefined;
+    storageSuspended = false;
   } catch (error) {
-    // Nothing was destroyed: legacy data stays exactly as it was, the
-    // marker stays unset, and the next boot retries.
-    console.warn("offline v2 storage migration did not complete; legacy data left intact", error);
-  }
+    if (version === transitionVersion) storageSuspended = true;
+    throw error; // A failed migration retains every legacy source for retry.
+  } finally { db.close(); }
 }
 
 /** The v1 ring lived in localStorage ("es-drafts" metadata plus one
@@ -336,45 +454,70 @@ function cacheKey(ns: string, path: string): string {
   return ns + "\n" + accountOf(path) + "\n" + path;
 }
 
-export async function cacheResponse(path: string, value: unknown, gen = offlineGeneration()): Promise<void> {
+export async function cacheResponse(path: string, value: unknown, gen = offlineGeneration(), snapshots = snapshotGeneration()): Promise<void> {
   if (storageSuspended || !generationCurrent(gen)) return;
   const owner = offlineOwner(); if (!owner || typeof indexedDB === "undefined") return;
   await transaction(CACHE, "readwrite", (store) => store.put({
     key: cacheKey(owner, path), owner, account: accountOf(path), savedAt: Date.now(), value,
-  } as Cached));
+  } as Cached), () => !storageSuspended && offlineOwner() === owner && generationCurrent(gen) && snapshotGeneration() === snapshots, context(gen, snapshots));
 }
 
-export async function cachedResponse<T>(path: string, gen = offlineGeneration()): Promise<T | undefined> {
+export async function cachedResponse<T>(path: string, gen = offlineGeneration(), snapshots = snapshotGeneration()): Promise<T | undefined> {
   if (storageSuspended || !generationCurrent(gen)) return undefined;
   const owner = offlineOwner(); if (!owner || typeof indexedDB === "undefined") return undefined;
-  const item = await transaction<Cached | undefined>(CACHE, "readonly", (store) => store.get(cacheKey(owner, path)));
-  if (!generationCurrent(gen)) return undefined;
+  const item = await transaction<Cached | undefined>(CACHE, "readonly", (store) => store.get(cacheKey(owner, path)), undefined, context(gen, snapshots));
+  if (storageSuspended || offlineOwner() !== owner || !generationCurrent(gen) || snapshotGeneration() !== snapshots) return undefined;
   return item?.value as T | undefined;
 }
 
 /** Disconnecting one mailbox removes its snapshots and the unified ones
  *  (they contain its mail); every other mailbox's lensed snapshots stay
  *  (audit 4 F12 + WEB-07's per-mailbox records). */
-export async function purgeAccountSnapshots(accountId: string): Promise<void> {
-  const owner = offlineOwner(); if (!owner || typeof indexedDB === "undefined") return;
-  const db = await openDB();
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(CACHE, "readwrite");
-      tx.oncomplete = () => resolve();
-      tx.onabort = () => reject(tx.error ?? new OfflineStorageError("Snapshot purge aborted"));
-      const request = tx.objectStore(CACHE).openCursor();
-      request.onsuccess = () => {
-        const cursor = request.result;
-        if (!cursor) return;
-        const row = cursor.value as Cached;
-        if (row.owner === owner && (row.account === accountId || row.account === "")) cursor.delete();
-        cursor.continue();
-      };
+export async function purgeAccountSnapshots(accountId: string, mirrorAccountId?: string): Promise<void> {
+  const ctx = context();
+  if (!currentContext(ctx)) return;
+  responseGeneration = snapshotGeneration() + 1;
+  if (!ctx.owner || typeof indexedDB === "undefined") return;
+  snapshotPurgePending = ctx;
+  // Persist cleanup intent before IDB can fail to open. Separate scoped
+  // keys avoid stale owners poisoning a newer session, and concurrent
+  // purges cannot acknowledge/remove one another's still-pending intent.
+  const hint = purgeHintPrefix(ctx) + newMutationKey();
+  try { localStorage.setItem(hint, String(responseGeneration)); }
+  catch { /* still attempt the authoritative disk erase */ }
+  const ids = new Set([accountId, mirrorAccountId]);
+  let committedSnapshots = responseGeneration;
+  const purged = await transaction(CACHE, "readwrite", (store, tx) => {
+    const meta = tx.objectStore(META).get("session");
+    meta.onsuccess = () => {
+      const row = meta.result as StorageMeta;
+      committedSnapshots = Math.max(row.snapshots + 1, responseGeneration);
+      snapshotPurgePending = ctx;
+      try {
+        // Other tabs fail closed even if the ensuing delete/commit fails.
+        // This hint is written only after the authoritative owner check,
+        // never by a stale tab before its transaction has been admitted.
+        localStorage.setItem(SNAPSHOTS_KEY, String(committedSnapshots));
+      } catch { /* the IDB commit can still erase the private rows */ }
+      tx.objectStore(META).put({ ...row, snapshots: committedSnapshots });
+    };
+    const request = store.getAll();
+    request.addEventListener("success", () => {
+      for (const row of request.result as Cached[]) {
+        if (row.owner === ctx.owner && (!mirrorAccountId || ids.has(row.account) || row.account === "")) store.delete(row.key);
+      }
     });
-  } finally {
-    db.close();
+    return request;
+  }, undefined, ctx);
+  // A stale/failed purge cannot acknowledge recovery or rewrite the hint.
+  if (purged === undefined || !currentContext(ctx)) {
+    localStorage.removeItem(hint);
+    return;
   }
+  responseGeneration = Math.max(snapshotGeneration(), committedSnapshots);
+  localStorage.setItem(SNAPSHOTS_KEY, String(responseGeneration));
+  localStorage.removeItem(hint);
+  if (snapshotPurgePending === ctx) snapshotPurgePending = undefined;
 }
 
 const QUEUEABLE = [
@@ -394,7 +537,8 @@ export async function queueMutation(path: string, method: string, body?: unknown
   }
   const owner = offlineOwner(); if (!owner) throw new Error("Offline owner is not initialised");
   const id = newMutationKey();
-  await transaction(QUEUE, "readwrite", (store) => store.put({ id, key: key ?? id, owner, path, method, body, queuedAt: Date.now() } as Queued));
+  const saved = await transaction(QUEUE, "readwrite", (store) => store.put({ id, key: key ?? id, owner, path, method, body, queuedAt: Date.now() } as Queued));
+  if (saved === undefined) throw new OfflineStorageError("The offline owner changed; the change was NOT saved for replay");
 }
 
 /** A client-generated idempotency key: opaque, unique, safe as both the
@@ -427,10 +571,10 @@ export function replayRequestInit(item: Pick<Queued, "method" | "body" | "key">)
  * The callback's argument is load-bearing (audit 5 OFF-03): with
  * ifAvailable, a CONTENDED lock invokes it with null — passing `run`
  * through directly executed a second replay pass next to the holder's.
- * A lock-manager failure still falls back to an uncoordinated pass (safe
- * under the server contract), but a failure INSIDE the worker now
- * propagates instead of re-running the worker outside the lock. */
+ * A lock-manager or worker failure propagates without running another
+ * uncoordinated pass. Only an absent API uses the server-only fallback. */
 const REPLAY_LOCK = "lullmail-offline-replay";
+const REPLAY_ATTEMPT_TIMEOUT_MS = 30_000;
 
 export async function withReplayLock<T>(run: () => Promise<T>): Promise<T | undefined> {
   const locks = (navigator as Navigator & {
@@ -514,6 +658,26 @@ export function replayPlan<T extends { owner: string; queuedAt: number; nextAtte
   return retryAt === undefined ? { due } : { due, retryAt };
 }
 
+/** A stalled network/body read must not hold every tab's replay lock
+ * forever. Abort is an uncertain attempt, so the caller keeps the same
+ * idempotency key and persists backoff instead of dropping the action. */
+async function fetchReplay(item: Queued): Promise<{ response: Response; failureDetail?: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REPLAY_ATTEMPT_TIMEOUT_MS);
+  try {
+    const response = await fetch("/api" + item.path, { ...replayRequestInit(item), signal: controller.signal });
+    let failureDetail: string | undefined;
+    if (replayDecision(response.status) === "failed") {
+      failureDetail = String(response.status);
+      try {
+        const problem = await response.json();
+        failureDetail = problem.detail || problem.title || failureDetail;
+      } catch { /* the definitive status survives an unreadable/stalled body */ }
+    }
+    return { response, failureDetail };
+  } finally { clearTimeout(timer); }
+}
+
 /** One ordered replay pass over this owner's queue (oldest first, a
  *  backed-off head stops the pass — audit 4 F09). Runs under the
  *  cross-tab replay lock when the browser offers one. The generation is
@@ -521,60 +685,59 @@ export function replayPlan<T extends { owner: string; queuedAt: number; nextAtte
  *  mid-pass must stop the pass, never replay the previous owner's
  *  mutations under the new session (audit 5 OFF-02). */
 async function replayDueMutations(): Promise<ReplaySummary> {
-  const gen = offlineGeneration();
-  const all = await transaction<Queued[]>(QUEUE, "readonly", (store) => store.getAll());
-  if (!generationCurrent(gen)) return { committed: 0, rejected: 0 };
+  const ctx = context();
+  const all = await transaction<Queued[]>(QUEUE, "readonly", (store) => store.getAll(), undefined, ctx);
+  if (!all || !currentContext(ctx)) return { committed: 0, rejected: 0 };
   const now = Date.now();
   let committed = 0;
   let rejected = 0;
-  const plan = replayPlan(all, offlineOwner(), now);
+  const plan = replayPlan(all, ctx.owner, now);
   // A persisted backoff from an earlier attempt must reach the driver's
   // scheduler, or a reload with nothing due schedules no retry until some
   // unrelated event fires (audit 5 OFF-04).
   let retryAt = plan.retryAt;
   for (const item of plan.due) {
-    if (!generationCurrent(gen)) break; // owner changed: stop the pass
+    if (!currentContext(ctx)) break;
+    const live = await transaction<Queued>(QUEUE, "readonly", (store) => store.get(item.id), undefined, ctx);
+    if (!live || !currentContext(ctx)) break; // check authoritative session before each send
     let response: Response;
+    let failureDetail: string | undefined;
     try {
-      response = await fetch("/api" + item.path, replayRequestInit(item));
+      ({ response, failureDetail } = await fetchReplay(item));
     } catch {
-      if (!generationCurrent(gen)) break; // owner changed: no writeback
+      if (!currentContext(ctx)) break; // owner changed: no writeback
       // A network-level failure while navigator.onLine can still be true:
       // give the queue head a backoff slot and schedule the retry, or the
       // work strands until some later navigation or connectivity event
       // (audit 4 F10).
       const attempts = (item.attempts ?? 0) + 1;
       const delay = retryDelay(attempts, null);
-      retryAt = retryAt === undefined ? now + delay : Math.min(retryAt, now + delay);
-      await transaction(QUEUE, "readwrite", (store) => store.put({ ...item, attempts, nextAttemptAt: now + delay }));
+      retryAt = Date.now() + delay;
+      await transaction(QUEUE, "readwrite", (store) => store.put({ ...item, attempts, nextAttemptAt: retryAt }), undefined, ctx);
       break; // keep the rest queued behind this one, in order
     }
     const decision = replayDecision(response.status);
     if (decision === "reauth") break;
     if (decision === "retry") {
-      if (!generationCurrent(gen)) break;
+      if (!currentContext(ctx)) break;
       const attempts = (item.attempts ?? 0) + 1;
       const delay = retryDelay(attempts, response.headers.get("Retry-After"));
-      retryAt = retryAt === undefined ? now + delay : Math.min(retryAt, now + delay);
-      await transaction(QUEUE, "readwrite", (store) => store.put({ ...item, attempts, nextAttemptAt: now + delay }));
+      retryAt = Date.now() + delay;
+      await transaction(QUEUE, "readwrite", (store) => store.put({ ...item, attempts, nextAttemptAt: retryAt }), undefined, ctx);
       break; // keep the rest queued behind this one, in order
     }
     if (decision === "failed") {
-      if (!generationCurrent(gen)) break;
+      if (!currentContext(ctx)) break;
       // Permanently invalid: keep a marked record for visibility instead
       // of counting it as replayed, and let detail show what rejected it.
-      let detail = String(response.status);
-      try {
-        const problem = await response.json();
-        detail = problem.detail || problem.title || detail;
-      } catch { /* non-JSON error body */ }
+      const detail = failureDetail ?? String(response.status);
       console.warn("Offline action rejected by the server and dropped from retry:", item.path, detail);
-      await transaction(QUEUE, "readwrite", (store) => store.put({ ...item, failed: detail }));
+      await transaction(QUEUE, "readwrite", (store) => store.put({ ...item, failed: detail }), undefined, ctx);
       rejected++;
       continue;
     }
-    if (!generationCurrent(gen)) break;
-    await transaction(QUEUE, "readwrite", (store) => store.delete(item.id));
+    if (!currentContext(ctx)) break;
+    await transaction(QUEUE, "readwrite", (store) => store.delete(item.id), undefined, ctx);
     committed++;
   }
   return retryAt === undefined ? { committed, rejected } : { committed, rejected, retryAt };
@@ -602,28 +765,55 @@ export async function clearResponseCache(): Promise<void> {
  *  counter is NEVER removed: it keeps counting up across wipes so a
  *  pre-wipe async write can never publish into a post-wipe namespace. */
 export async function clearOfflineData(): Promise<void> {
+  const version = ++transitionVersion;
+  const expected = wipePending ?? admitted ?? context();
+  const stale = admitted && (admitted.owner !== offlineOwner() || admitted.generation !== offlineGeneration());
+  // Tear down this tab before awaiting storage, but an old tab has no
+  // authority to erase a newer admitted owner's durable state.
+  storageSuspended = true;
+  resetPrivateState();
+  draftRevisions.clear();
+  if (stale && !wipePending) return;
+  const pendingWipe = expected;
+  wipePending = pendingWipe;
+  if (!stale) {
+    responseGeneration = snapshotGeneration() + 1;
+    localStorage.setItem(GEN_KEY, String(offlineGeneration() + 1));
+    localStorage.setItem(SNAPSHOTS_KEY, String(responseGeneration));
+  }
   if (typeof indexedDB === "undefined") {
     localStorage.removeItem(NS_KEY);
     localStorage.removeItem(EMAIL_KEY);
+    wipePending = undefined;
     return;
   }
   const db = await openDB();
   try {
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction([CACHE, QUEUE, ATTACHMENTS, DRAFTS], "readwrite");
-      tx.oncomplete = () => resolve();
+    const meta = await new Promise<StorageMeta | undefined>((resolve, reject) => {
+      const tx = db.transaction([META, CACHE, QUEUE, ATTACHMENTS, DRAFTS, TOMBSTONES], "readwrite");
+      let result: StorageMeta | undefined;
+      tx.oncomplete = () => resolve(result);
       tx.onabort = () => reject(tx.error ?? new OfflineStorageError("Private-data reset aborted"));
       tx.onerror = () => { /* the abort handler owns rejection */ };
-      tx.objectStore(CACHE).clear();
-      tx.objectStore(QUEUE).clear();
-      tx.objectStore(ATTACHMENTS).clear();
-      tx.objectStore(DRAFTS).clear();
+      const request = tx.objectStore(META).get("session");
+      request.onsuccess = () => {
+        const previous = request.result as StorageMeta | undefined;
+        if (previous && !matches(previous, expected)) return;
+        for (const name of [CACHE, QUEUE, ATTACHMENTS, DRAFTS, TOMBSTONES]) tx.objectStore(name).clear();
+        result = { key: "session", owner: "", generation: Math.max((previous?.generation ?? 0) + 1, offlineGeneration()), snapshots: Math.max((previous?.snapshots ?? 0) + 1, responseGeneration), legacyMigrated: true };
+        tx.objectStore(META).put(result);
+      };
     });
-  } finally {
-    db.close();
-  }
-  localStorage.removeItem(NS_KEY);
-  localStorage.removeItem(EMAIL_KEY);
+    if (meta && version === transitionVersion) {
+      publishMeta(meta);
+      // A logout before first migration must not reimport these old drafts.
+      localStorage.setItem(V2_KEY, "1");
+      for (const key of Object.keys(localStorage)) {
+        if (key === OWNER || key === "es-drafts" || key.startsWith("es-draft-")) localStorage.removeItem(key);
+      }
+    }
+    if (wipePending === pendingWipe) wipePending = undefined;
+  } finally { db.close(); }
 }
 
 /* ---- drafts: one record per draft, the ring in the same rows ---- */
@@ -631,20 +821,56 @@ export async function clearOfflineData(): Promise<void> {
 /** Field edits merge into the draft's single record (get+put in one
  *  transaction, so a fields write can never clobber the attachments in
  *  the same row or vice versa). */
-export async function saveDraftFields(id: string, fields: Partial<DraftRecord>): Promise<void> {
-  const ns = offlineOwner(); if (!ns || typeof indexedDB === "undefined") return;
+export async function saveDraftFields(id: string, fields: Partial<DraftRecord>, gen = offlineGeneration(), stillLive: () => boolean = () => true): Promise<boolean> {
+  const ns = offlineOwner(); if (storageSuspended || !generationCurrent(gen) || !ns || typeof indexedDB === "undefined") return false;
+  const current = () => !storageSuspended && offlineOwner() === ns && generationCurrent(gen) && stillLive();
   const db = await openDB();
   try {
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(DRAFTS, "readwrite");
-      tx.oncomplete = () => resolve();
-      tx.onabort = () => reject(tx.error ?? new OfflineStorageError("Draft save aborted"));
+    if (!current()) return false;
+    return await new Promise<boolean>((resolve, reject) => {
+      const tx = db.transaction([META, DRAFTS, TOMBSTONES], "readwrite");
+      let savedRevision: number | undefined;
+      let failure: Error | undefined;
+      tx.oncomplete = () => {
+        if (savedRevision !== undefined && current()) draftRevisions.set(ns + "\n" + id, savedRevision);
+        resolve(savedRevision !== undefined && current());
+      };
+      tx.onabort = () => reject(failure ?? tx.error ?? new OfflineStorageError("Draft save aborted"));
       const store = tx.objectStore(DRAFTS);
-      const existing = store.get(id);
-      existing.onsuccess = () => {
-        const row = existing.result as DraftRecord | undefined;
-        const seq = row?.seq ?? Date.now();
-        store.put({ ...row, ...fields, id, ns, seq, savedAt: Date.now() } as DraftRecord);
+      const meta = tx.objectStore(META).get("session");
+      meta.onsuccess = () => {
+        if (!current() || !matches(meta.result, { owner: ns, generation: gen })) return;
+        const tombstone = tx.objectStore(TOMBSTONES).get(id);
+        tombstone.onsuccess = () => {
+          if (tombstone.result) {
+            failure = new OfflineStorageError("This draft was sent or discarded in another tab");
+            tx.abort(); return;
+          }
+          const existing = store.get(id);
+          existing.onsuccess = () => {
+            if (!current()) return;
+            const row = existing.result as DraftRecord | undefined;
+            if (row && row.ns !== ns) return;
+            const previousRevision = row?.revision ?? 0;
+            const expectedRevision = draftRevisions.get(ns + "\n" + id);
+            if (row && expectedRevision !== previousRevision) {
+              failure = new OfflineStorageError("This draft changed in another tab; reload before editing it");
+              tx.abort(); return;
+            }
+            // Hydration and pagehide may flush an unchanged draft. They
+            // must not manufacture a conflict for a real edit in another tab.
+            // Check CAS first: a stale partial no-op must not acknowledge an
+            // unseen newer revision and authorize a later stale full save.
+            if (row && Object.entries(fields).every(([key, value]) => key === "revision" || JSON.stringify(value) === JSON.stringify(row[key as keyof DraftRecord]))) {
+              savedRevision = previousRevision;
+              return;
+            }
+            const revision = previousRevision + 1;
+            savedRevision = revision;
+            const seq = row?.seq ?? Date.now();
+            store.put({ ...row, ...fields, id, ns, seq, revision, savedAt: Date.now() } as DraftRecord);
+          };
+        };
       };
     });
   } finally {
@@ -660,14 +886,37 @@ export async function saveDraftAttachments(id: string, files: Array<{ filename: 
 
 /** Every parked draft for this owner, in ring (seq) order. */
 export async function loadDrafts(): Promise<DraftRecord[]> {
-  const ns = offlineOwner(); if (!ns || typeof indexedDB === "undefined") return [];
+  const ns = offlineOwner(), gen = offlineGeneration();
+  if (storageSuspended || !ns || typeof indexedDB === "undefined") return [];
   const rows = await transaction<DraftRecord[]>(DRAFTS, "readonly", (store) => store.getAll());
-  return rows.filter((row) => row && row.ns === ns).sort((a, b) => a.seq - b.seq);
+  if (storageSuspended || offlineOwner() !== ns || !generationCurrent(gen)) return [];
+  const owned = (rows ?? []).filter((row) => row && row.ns === ns).sort((a, b) => a.seq - b.seq);
+  for (const row of owned) {
+    const key = ns + "\n" + row.id;
+    // A background read is not permission to overwrite a newer revision
+    // from an existing live editor. Reloading the page starts a fresh map.
+    if (!draftRevisions.has(key)) draftRevisions.set(key, row.revision ?? 0);
+  }
+  return owned;
 }
 
-export async function deleteDraft(id: string): Promise<void> {
-  if (typeof indexedDB === "undefined") return;
-  await transaction(DRAFTS, "readwrite", (store) => store.delete(id));
+export async function deleteDraft(id: string, gen = offlineGeneration()): Promise<void> {
+  const ns = offlineOwner();
+  if (storageSuspended || !ns || typeof indexedDB === "undefined") return;
+  await transaction(DRAFTS, "readwrite", (store, tx) => {
+    const request = store.get(id);
+    request.addEventListener("success", () => {
+      if (storageSuspended || offlineOwner() !== ns || !generationCurrent(gen)) return;
+      const row = request.result as DraftRecord | undefined;
+      if (row && (row.ns !== ns || draftRevisions.get(ns + "\n" + id) !== (row.revision ?? 0))) {
+        tx.abort(); return; // a stale discard/send must preserve the newer edit
+      }
+      tx.objectStore(TOMBSTONES).put({ id, ns, deletedAt: Date.now() });
+      store.delete(id);
+    });
+    return request;
+  },
+    () => !storageSuspended && offlineOwner() === ns && generationCurrent(gen));
 }
 
 export function startOfflineData(authenticated: () => boolean = () => true): () => void {
@@ -731,4 +980,19 @@ export function startOfflineData(authenticated: () => boolean = () => true): () 
     window.removeEventListener("lullmail-auth-refreshed", retryWhenAuthenticated);
     if (timer !== undefined) window.clearTimeout(timer);
   };
+}
+
+
+// Storage events are a UI invalidation hint, never the transaction fence.
+// Pinning the admitted owner also blocks an old tab that observes the new
+// markers synchronously before this event has been delivered.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (event) => {
+    if (![NS_KEY, GEN_KEY, SNAPSHOTS_KEY, null].includes(event.key)) return;
+    if (admitted && (admitted.owner !== offlineOwner() || admitted.generation !== offlineGeneration())) {
+      suspendOfflineStorage();
+      resetPrivateState();
+      window.dispatchEvent(new Event("lullmail-offline-invalidated"));
+    }
+  });
 }

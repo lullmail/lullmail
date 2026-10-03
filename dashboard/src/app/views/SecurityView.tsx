@@ -178,8 +178,8 @@ export function SecurityView() {
       // caches, queued work, and drafts belong to the session owner and
       // leave with the session — no survivorship for the next owner of
       // this browser.
-      try { await clearOfflineData(); } catch { /* the session is dead server-side; a failed local wipe suspends offline storage on next prepare */ }
       authed.value = false;
+      try { await clearOfflineData(); } catch { /* already suspended fail-closed; next prepare retries the wipe */ }
       await refreshAuth();
       navigate("/today");
     } catch (e) {
@@ -258,8 +258,9 @@ export function SecurityView() {
     setDeleting(true);
     try {
       await api("/account", { method: "DELETE", body: { confirmation: confirm } });
-      await clearOfflineData();
-      authed.value = false; await refreshAuth(); navigate("/today");
+      authed.value = false;
+      try { await clearOfflineData(); } catch { /* already suspended fail-closed; next prepare retries the wipe */ }
+      await refreshAuth(); navigate("/today");
     } catch (e) { report(e, "Could not delete account"); setDeleting(false); }
   };
 

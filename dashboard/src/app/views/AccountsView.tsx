@@ -20,11 +20,11 @@ import { installApp, installKind } from "../lib/pwa";
  *  not mail content. Returns an error message when device cleanup failed
  *  (the server side already succeeded and must not be retried as if it
  *  had not). */
-async function purgeDeviceMailSnapshots(accountId: string): Promise<string | null> {
+async function purgeDeviceMailSnapshots(account: Account): Promise<string | null> {
   closeReader();
   clearMemoryCache();
   try {
-    await purgeAccountSnapshots(accountId);
+    await purgeAccountSnapshots(account.id, account.mirror_account_id);
     return null;
   } catch {
     return "removed on the server, but this device's cached copies could not be cleared — reload before going offline";
@@ -84,7 +84,7 @@ function AccountCard({ account, onChange }: { account: Account; onChange: () => 
     setBusy("delete");
     try {
       await api("/accounts/" + encodeURIComponent(account.id), { method: "DELETE" });
-      const cleanupProblem = await purgeDeviceMailSnapshots(account.id);
+      const cleanupProblem = await purgeDeviceMailSnapshots(account);
       if (cleanupProblem) {
         showError(account.address + " " + cleanupProblem);
       } else {
@@ -107,7 +107,7 @@ function AccountCard({ account, onChange }: { account: Account; onChange: () => 
       if (days > 0) {
         // Retention removed local mail server-side; this device's cached
         // copies of it must not outlive the policy (audit 4 F12).
-        const cleanupProblem = await purgeDeviceMailSnapshots(account.id);
+        const cleanupProblem = await purgeDeviceMailSnapshots(account);
         if (cleanupProblem) {
           showError("Local mail " + cleanupProblem);
         } else {

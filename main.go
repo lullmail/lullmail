@@ -19,13 +19,18 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("migrate: ok")
+	case "repair-scans":
+		if err := repairScans(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "repair-scans:", err)
+			os.Exit(1)
+		}
 	case "backfill-bodies":
 		if err := backfillBodies(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "backfill-bodies:", err)
 			os.Exit(1)
 		}
 	default:
-		fmt.Fprintln(os.Stderr, "usage: lullmail [serve|migrate|backfill-bodies]")
+		fmt.Fprintln(os.Stderr, "usage: lullmail [serve|migrate|backfill-bodies|repair-scans]")
 		os.Exit(2)
 	}
 }

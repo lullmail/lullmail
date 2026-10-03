@@ -20,17 +20,18 @@ import (
 )
 
 type accountJSON struct {
-	ID            string  `json:"id"`
-	Provider      string  `json:"provider"`
-	Address       string  `json:"address"`
-	Label         string  `json:"label"`
-	BackfillDays  int     `json:"backfill_days"`
-	RetentionDays int     `json:"retention_days"`
-	SyncEnabled   bool    `json:"sync_enabled"`
-	LastSyncAt    *string `json:"last_sync_at"`
-	LastError     *string `json:"last_error"`
-	MessageCount  int     `json:"message_count"`
-	ScreenerCount int     `json:"screener_count"`
+	ID              string  `json:"id"`
+	MirrorAccountID string  `json:"mirror_account_id"`
+	Provider        string  `json:"provider"`
+	Address         string  `json:"address"`
+	Label           string  `json:"label"`
+	BackfillDays    int     `json:"backfill_days"`
+	RetentionDays   int     `json:"retention_days"`
+	SyncEnabled     bool    `json:"sync_enabled"`
+	LastSyncAt      *string `json:"last_sync_at"`
+	LastError       *string `json:"last_error"`
+	MessageCount    int     `json:"message_count"`
+	ScreenerCount   int     `json:"screener_count"`
 
 	// Desired vs applied policy versions (audit 5 API-04): a client can
 	// tell a requested transition from one whose data work finished.
@@ -64,7 +65,7 @@ func (a *App) listAccountsJSON(w http.ResponseWriter, r *http.Request) {
 	// it — a polling client could not see a failed restoration job or
 	// tell desired from applied policy through this endpoint.
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT ea.id, ea.provider, ea.address, ea.label, ea.backfill_days, ea.retention_days, ea.sync_enabled,
+		SELECT ea.id, ea.mirror_account_id, ea.provider, ea.address, ea.label, ea.backfill_days, ea.retention_days, ea.sync_enabled,
 		       COALESCE(ea.last_sync_at::text,''), COALESCE(ea.last_error,''),
 		       (SELECT count(*) FROM mail_messages m WHERE m.account_id = ea.mirror_account_id),
 		       (SELECT count(*) FROM hey_messages h
@@ -89,7 +90,7 @@ func (a *App) listAccountsJSON(w http.ResponseWriter, r *http.Request) {
 		var jobState, jobError sql.NullString
 		var jobVersion sql.NullInt64
 		var jobFull sql.NullBool
-		if err := rows.Scan(&acc.ID, &acc.Provider, &acc.Address, &acc.Label, &acc.BackfillDays, &acc.RetentionDays, &acc.SyncEnabled,
+		if err := rows.Scan(&acc.ID, &acc.MirrorAccountID, &acc.Provider, &acc.Address, &acc.Label, &acc.BackfillDays, &acc.RetentionDays, &acc.SyncEnabled,
 			&lastSync, &lastErr, &acc.MessageCount, &acc.ScreenerCount,
 			&acc.PolicyVersion, &acc.AppliedPolicyVersion,
 			&jobState, &jobVersion, &jobFull, &jobError); err != nil {
@@ -335,7 +336,7 @@ func (a *App) getAccountJSON(w http.ResponseWriter, r *http.Request, id string) 
 	var acc accountJSON
 	var lastSync, lastErr string
 	err = a.db.QueryRowContext(r.Context(), `
-		SELECT ea.id, ea.provider, ea.address, ea.label, ea.backfill_days, ea.retention_days, ea.sync_enabled,
+		SELECT ea.id, ea.mirror_account_id, ea.provider, ea.address, ea.label, ea.backfill_days, ea.retention_days, ea.sync_enabled,
 		       COALESCE(ea.last_sync_at::text,''), COALESCE(ea.last_error,''),
 		       (SELECT count(*) FROM mail_messages m WHERE m.account_id = ea.mirror_account_id),
 		       (SELECT count(*) FROM hey_messages h
@@ -344,7 +345,7 @@ func (a *App) getAccountJSON(w http.ResponseWriter, r *http.Request, id string) 
 		         WHERE h.user_id = ea.user_id AND h.bucket = 'screener')
 		FROM email_accounts ea
 		WHERE ea.user_id = $1 AND ea.id::text = $2`, uid, id).
-		Scan(&acc.ID, &acc.Provider, &acc.Address, &acc.Label, &acc.BackfillDays, &acc.RetentionDays, &acc.SyncEnabled,
+		Scan(&acc.ID, &acc.MirrorAccountID, &acc.Provider, &acc.Address, &acc.Label, &acc.BackfillDays, &acc.RetentionDays, &acc.SyncEnabled,
 			&lastSync, &lastErr, &acc.MessageCount, &acc.ScreenerCount)
 	if err == sql.ErrNoRows {
 		writeProblem(w, http.StatusNotFound, "Not Found", "no such account")
@@ -686,6 +687,14 @@ func (a *App) applyAccountRetention(ctx context.Context, uid string, acct mail.A
 }
 
 func (a *App) deleteAccount(w http.ResponseWriter, r *http.Request, id string) {
+	// Serialize this whole seal/drain/delete against full-owner deletion.
+	// An already sealed gate can mean an IN-PROGRESS account deletion,
+	// not a retired account; the owner must not skip its unfinished work.
+	// Account deletions take only the read side, so unrelated mailboxes
+	// remain independent. This route is not inside accountWorkLifecycle,
+	// and full-owner deletion performs its own SQL rather than calling it.
+	a.accountOwnerMu.RLock()
+	defer a.accountOwnerMu.RUnlock()
 	uid, err := a.userID(r.Context())
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
@@ -790,12 +799,7 @@ func (a *App) triggerSync(w http.ResponseWriter, r *http.Request, id string) {
 // account cancels the provider I/O mid-flight (audit OPS-04/OPS-05).
 func (a *App) launchAccountSync(acct mail.AccountID) {
 	a.launch("account-sync", func(ctx context.Context) {
-		gateCtx, releaseGate, ok := a.beginAccountWork(acct)
-		if !ok {
-			return
-		}
-		defer releaseGate()
-		_ = a.syncAccount(gateCtx, acct)
+		_ = a.syncAccount(ctx, acct)
 	})
 }
 
@@ -806,16 +810,16 @@ func (a *App) launchAccountSync(acct mail.AccountID) {
 // account coalesce on a context-aware gate — a queued request whose context
 // went away returns instead of stacking a provider connection.
 func (a *App) syncAccount(ctx context.Context, acct mail.AccountID) error {
+	ctx, releaseUse, ok := a.beginAccountWorkCtx(ctx, acct)
+	if !ok {
+		return fmt.Errorf("account %s is being deleted", acct)
+	}
+	defer releaseUse()
 	releaseGate, err := accountSyncGate(acct).Lock(ctx)
 	if err != nil {
 		return err
 	}
 	defer releaseGate()
-	releaseUse, ok := a.beginAccountUse(acct)
-	if !ok {
-		return fmt.Errorf("account %s is being deleted", acct)
-	}
-	defer releaseUse()
 	cred, err := a.Token(ctx, acct)
 	if err != nil {
 		return a.finishSync(ctx, acct, nil, err)
@@ -835,7 +839,7 @@ func (a *App) syncResolver() mail.Resolver {
 	if a.dial != nil {
 		return a.dial
 	}
-	return newResolver()
+	return newResolverWithGmailRefresh(a.refreshGmailToken)
 }
 
 func (a *App) finishSync(ctx context.Context, acct mail.AccountID, reports []mail.SyncReport, syncErr error) error {

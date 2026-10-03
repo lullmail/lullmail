@@ -6,6 +6,7 @@ package main
 // login factor.
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -514,6 +515,10 @@ func (a *App) handleBootstrapFinish(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 401, "Unauthorized", "the one-time setup token is required")
 		return
 	}
+	proof, err := a.verifyRegistration(w, r, "bootstrap")
+	if err != nil {
+		return
+	}
 	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeProblem(w, 500, "Setup Failed", err.Error())
@@ -527,7 +532,7 @@ func (a *App) handleBootstrapFinish(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 500, "Setup Failed", err.Error())
 		return
 	}
-	uid, err := a.finishRegistration(w, r, "bootstrap", tx)
+	uid, err := a.finishRegistration(w, r, "bootstrap", tx, proof)
 	if err != nil {
 		return
 	}
@@ -734,13 +739,17 @@ func (a *App) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Request
 	if !a.requireRecentReauth(w, r) {
 		return
 	}
+	proof, err := a.verifyRegistration(w, r, "register")
+	if err != nil {
+		return
+	}
 	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeProblem(w, 500, "Passkey Failed", err.Error())
 		return
 	}
 	defer tx.Rollback()
-	uid, err := a.finishRegistration(w, r, "register", tx)
+	uid, err := a.finishRegistration(w, r, "register", tx, proof)
 	if err != nil {
 		return
 	}
@@ -751,31 +760,43 @@ func (a *App) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Request
 	writeJSON(w, map[string]any{"ok": true, "user_id": uid})
 }
 
-func (a *App) finishRegistration(w http.ResponseWriter, r *http.Request, kind string, tx *sql.Tx) (string, error) {
+type registrationProof struct {
+	uid, id, name, sealed string
+}
+
+// Consume the one-use ceremony and verify its response BEFORE reserving a
+// credential-write transaction. Both steps use the pool; nesting them
+// inside that transaction deadlocks a full pool. Consumption commits
+// independently, so a rejected proof or rolled-back enrollment cannot
+// restore the challenge for replay.
+func (a *App) verifyRegistration(w http.ResponseWriter, r *http.Request, kind string) (*registrationProof, error) {
 	uid, session, err := a.takeCeremony(r, kind)
 	if err != nil {
 		writeProblem(w, 400, "Passkey Expired", "start the passkey step again")
-		return "", err
+		return nil, err
 	}
 	user, err := a.loadWebUser(r.Context(), uid)
 	if err != nil {
 		writeProblem(w, 500, "Passkey Failed", err.Error())
-		return "", err
+		return nil, err
+	}
+	if err := readPasskeyBody(w, r); err != nil {
+		return nil, err
 	}
 	credential, err := a.webAuthn().FinishRegistration(user, *session, r)
 	if err != nil {
 		writeProblem(w, 400, "Passkey Rejected", "the browser response could not be verified")
-		return "", err
+		return nil, err
 	}
 	encoded, err := json.Marshal(credential)
 	if err != nil {
 		writeProblem(w, 500, "Passkey Failed", err.Error())
-		return "", err
+		return nil, err
 	}
 	sealed, err := sealSecret(a.cfg, string(encoded))
 	if err != nil {
 		writeProblem(w, 500, "Passkey Failed", err.Error())
-		return "", err
+		return nil, err
 	}
 	name := strings.TrimSpace(r.URL.Query().Get("name"))
 	if name == "" {
@@ -783,6 +804,14 @@ func (a *App) finishRegistration(w http.ResponseWriter, r *http.Request, kind st
 	}
 	name = utf8Prefix(name, 80)
 	id := base64.RawURLEncoding.EncodeToString(credential.ID)
+	return &registrationProof{uid: uid, id: id, name: name, sealed: sealed}, nil
+}
+
+// Only transaction-local reads/writes occur here. Bootstrap still takes
+// its installation lock first, then this owner lock, before re-checking
+// whether the first credential was installed by a competing ceremony.
+func (a *App) finishRegistration(w http.ResponseWriter, r *http.Request, kind string, tx *sql.Tx, proof *registrationProof) (string, error) {
+	uid := proof.uid
 	if _, err := lockAuthUser(r.Context(), tx, uid); err != nil {
 		writeProblem(w, 409, "Passkey Failed", "the account is being deleted")
 		return "", err
@@ -796,8 +825,8 @@ func (a *App) finishRegistration(w http.ResponseWriter, r *http.Request, kind st
 			return "", sql.ErrNoRows
 		}
 	}
-	_, err = tx.ExecContext(r.Context(), `INSERT INTO auth_credentials
-		(id,user_id,name,credential_ciphertext) VALUES ($1,$2,$3,$4)`, id, uid, name, sealed)
+	_, err := tx.ExecContext(r.Context(), `INSERT INTO auth_credentials
+		(id,user_id,name,credential_ciphertext) VALUES ($1,$2,$3,$4)`, proof.id, uid, proof.name, proof.sealed)
 	if err != nil {
 		writeProblem(w, 409, "Passkey Exists", "this passkey is already registered")
 		return "", err
@@ -845,6 +874,9 @@ func (a *App) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 400, "Sign In Expired", "start sign-in again")
 		return
 	}
+	if err := readPasskeyBody(w, r); err != nil {
+		return
+	}
 	userAny, credential, err := a.webAuthn().FinishPasskeyLogin(func(rawID, handle []byte) (webauthn.User, error) {
 		user, err := a.loadWebUserByHandle(r.Context(), handle)
 		if err != nil {
@@ -883,6 +915,24 @@ func (a *App) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
 	a.clearAuthAttempts(r)
 	a.clearCookie(w, ceremonyCookie)
 	writeJSON(w, map[string]any{"ok": true, "email": user.Email})
+}
+
+const passkeyBodyLimit = 16 << 10
+
+// The WebAuthn decoder does not impose a body limit and drains the entire
+// reader even on invalid proofs. Read the small ceremony response through
+// our bound first, including trailing bytes, so every oversized request is
+// a 413 rather than unbounded parsing or a disguised verification failure.
+func readPasskeyBody(w http.ResponseWriter, r *http.Request) error {
+	body := http.MaxBytesReader(w, r.Body, passkeyBodyLimit)
+	raw, err := io.ReadAll(body)
+	_ = body.Close()
+	if err != nil {
+		writeDecodeProblem(w, err)
+		return err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
+	return nil
 }
 
 // handlePasswordLogin is the default face of sign-in: email + password for a

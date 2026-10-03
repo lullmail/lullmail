@@ -4,7 +4,7 @@
 // bucket pages, so Today, the Screener and the reader were mouse-only. This is
 // one handler for the whole app: it reads the current list out of the store, so
 // every surface that publishes rows gets the same keys for free.
-import { closeCompose, compose, composeOpen, cursor, checked, list, newDraft, noteKeyUse, openCompose, overlayOpen, palette, reader, resetSelection, shortcuts, snoozePickerRows, toggleChecked, closeReader, targetRows, dismissToast, toast } from "./store";
+import { closeCompose, compose, composeOpen, cursor, checked, clearChecked, focusRow, list, newDraft, noteKeyUse, openCompose, overlayOpen, palette, reader, readerOwnsPage, selectAllRows, selectRange, shortcuts, snoozePickerRows, toggleChecked, closeReader, targetRows, dismissToast, toast } from "./store";
 import { decide, markDone, moveTo, openThread, pinThreads } from "./actions";
 import { navigate } from "./router";
 import { splitFrom } from "./fmt";
@@ -25,25 +25,29 @@ const GOTO: Record<string, string> = {
 function isTyping(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
   if (!el || !el.closest) return false;
-  return !!el.closest("input, textarea, select, [contenteditable='true']");
+  return !!el.closest("input, textarea, select, [contenteditable]:not([contenteditable='false']), [role='textbox']");
 }
 
-function moveCursor(delta: number) {
+function moveCursor(delta: number, range = false, additive = false, edge?: "first" | "last") {
+  if (readerOwnsPage()) return;
   const l = list.value;
   const len = l.kind === "rows" ? l.rows.length : l.kind === "senders" ? l.senders.length : 0;
   if (!len) return;
   const at = cursor.value;
-  const next = at < 0 ? (delta > 0 ? 0 : len - 1) : Math.min(len - 1, Math.max(0, at + delta));
-  cursor.value = next;
+  const next = edge ? (edge === "first" ? 0 : len - 1) : at < 0 ? (delta > 0 ? 0 : len - 1) : Math.min(len - 1, Math.max(0, at + delta));
+  if (range && l.kind === "rows") selectRange(next, additive);
+  else focusRow(next, additive);
   const node = document.querySelector<HTMLElement>('[data-cursor-index="' + next + '"]');
   node?.scrollIntoView({ block: "nearest" });
+  if (node?.hasAttribute("tabindex")) node.focus({ preventScroll: true });
 }
 
 function openAtCursor() {
+  if (readerOwnsPage()) return;
   const l = list.value;
   if (l.kind !== "rows") return;
   const row = l.rows[cursor.value];
-  if (row) openThread(row.thread_id, row.account, l.origin);
+  if (row) { clearChecked(); focusRow(cursor.value); openThread(row.thread_id, row.account, l.origin); }
 }
 
 function replyToCursor() {
@@ -76,36 +80,60 @@ export function installKeys(): () => void {
   let gPending = false;
   let gTimer: ReturnType<typeof setTimeout> | undefined;
 
+  const cancelJump = () => { gPending = false; clearTimeout(gTimer); };
   const onKey = (ev: KeyboardEvent) => {
+    if (ev.defaultPrevented || ev.isComposing || ev.keyCode === 229) { cancelJump(); return; }
     // Anything the handler actually acts on counts as learning; the hint bar
     // uses this to decide it is no longer needed.
     const learn = () => noteKeyUse();
     // Palette is global and must win everywhere, including inside inputs.
-    if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "k") {
+    if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === "k") {
+      cancelJump();
       ev.preventDefault();
       palette.value = !palette.value;
       return;
     }
     if (ev.key === "Escape") {
+      cancelJump();
       if (palette.value) { palette.value = false; return; }
       if (shortcuts.value) { shortcuts.value = false; return; }
       if (snoozePickerRows.value.length) { snoozePickerRows.value = []; return; }
       if (composeOpen.value) { closeCompose(); return; }
       if (toast.value) { dismissToast(); return; }
-      if (checked.value.size) { resetSelection(); return; }
+      if (checked.value.size && !readerOwnsPage()) { clearChecked(); return; }
       if (reader.value.threadId) { closeReader(); return; }
       return;
     }
     // While composing, `c` stacks another draft onto the carousel instead of
     // being swallowed by the overlay guard.
-    if (composeOpen.value && !isTyping(ev.target) && ev.key.toLowerCase() === "c") {
+    if (composeOpen.value && !isTyping(ev.target) && !ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey && !ev.repeat && ev.key === "c") {
       ev.preventDefault();
       newDraft();
       return;
     }
-    if (overlayOpen.value) return;
-    if (isTyping(ev.target)) return;
-    if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+    if (overlayOpen.value || isTyping(ev.target) || (ev.target as HTMLElement | null)?.closest?.("[role='menu']")) { cancelJump(); return; }
+    const interactive = (ev.target as HTMLElement | null)?.closest?.("button, a, summary, [role='button'], [role='menuitem'], [role='separator']");
+    const rowCheck = interactive?.classList.contains("row-check");
+    if (interactive && (["Enter", " "].includes(ev.key) || (!rowCheck && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"].includes(ev.key)))) { cancelJump(); return; }
+    const target = ev.target as HTMLElement | null;
+    const inList = !target?.closest || target === document.body || !!target.closest(".msg-list, .bulkbar");
+    const multi = inList && !readerOwnsPage() && list.value.kind === "rows" && !!document.querySelector(".msg-list");
+    if (multi && (ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === "a") {
+      cancelJump(); ev.preventDefault(); learn(); selectAllRows(); return;
+    }
+    if (multi && !ev.altKey && ["ArrowDown", "ArrowUp", "Home", "End"].includes(ev.key)) {
+      cancelJump(); ev.preventDefault(); learn();
+      moveCursor(ev.key === "ArrowUp" ? -1 : 1, ev.shiftKey, ev.ctrlKey || ev.metaKey,
+        ev.key === "Home" ? "first" : ev.key === "End" ? "last" : undefined);
+      return;
+    }
+    if (multi && ev.key === " " && !ev.altKey && !ev.shiftKey && list.value.rows[cursor.value]) {
+      cancelJump(); ev.preventDefault();
+      if (!ev.repeat) { learn(); toggleChecked(list.value.rows[cursor.value]); }
+      return;
+    }
+    if (ev.metaKey || ev.ctrlKey || ev.altKey) { cancelJump(); return; }
+    if (ev.repeat && !["j", "k", "ArrowDown", "ArrowUp"].includes(ev.key)) return;
 
     const k = ev.key;
 
@@ -127,9 +155,9 @@ export function installKeys(): () => void {
     }
 
     switch (k) {
-      case "j": case "ArrowDown": ev.preventDefault(); learn(); moveCursor(1); return;
-      case "k": case "ArrowUp": ev.preventDefault(); learn(); moveCursor(-1); return;
-      case "Enter": case "o": ev.preventDefault(); learn(); openAtCursor(); return;
+      case "j": case "ArrowDown": if (readerOwnsPage()) return; ev.preventDefault(); learn(); moveCursor(1); return;
+      case "k": case "ArrowUp": if (readerOwnsPage()) return; ev.preventDefault(); learn(); moveCursor(-1); return;
+      case "Enter": case "o": if (readerOwnsPage()) return; ev.preventDefault(); learn(); openAtCursor(); return;
       case "u": ev.preventDefault(); learn(); closeReader(); return;
       case "c": ev.preventDefault(); learn(); openCompose(); return;
       case "r": ev.preventDefault(); learn(); replyToCursor(); return;
@@ -138,7 +166,7 @@ export function installKeys(): () => void {
     }
 
     // Screener decisions by number, in the order the buttons appear.
-    if (list.value.kind === "senders") {
+    if (list.value.kind === "senders" && !readerOwnsPage()) {
       const sender = list.value.senders[cursor.value];
       if (!sender) return;
       const map: Record<string, [boolean, "imbox" | "feed" | "paper_trail" | "blocked"]> = {
@@ -161,6 +189,7 @@ export function installKeys(): () => void {
     if (!rows.length) return;
     switch (k) {
       case "x":
+        if (readerOwnsPage()) return;
         ev.preventDefault();
         learn();
         { const at = list.value.rows[cursor.value]; if (at) toggleChecked(at); }
@@ -175,14 +204,19 @@ export function installKeys(): () => void {
   };
 
   document.addEventListener("keydown", onKey);
-  return () => document.removeEventListener("keydown", onKey);
+  return () => { cancelJump(); document.removeEventListener("keydown", onKey); };
 }
 
 export const SHORTCUTS: [string, string][] = [
-  ["j / k", "Move down / up"],
-  ["Enter", "Open the selected thread"],
+  ["j / k or ↓ / ↑", "Move focus down / up without changing selection"],
+  ["Shift + click / ↑ / ↓", "Select a range from the anchor"],
+  ["Ctrl/⌘ + click", "Toggle one message"],
+  ["Ctrl/⌘ + Shift + click", "Add a range to the selection"],
+  ["Home / End", "Focus first / last loaded message (Shift selects range)"],
+  ["Ctrl/⌘ + A", "Select all loaded messages in this list"],
+  ["Enter", "Open the focused thread and clear selection"],
   ["u", "Back to the list"],
-  ["x", "Select — then any verb applies to all of them"],
+  ["x / Space", "Toggle selection — then any verb applies to all selected messages"],
   ["e", "Done"],
   ["s", "Choose when to snooze"],
   ["i", "Move to the Inbox"],
@@ -191,7 +225,7 @@ export const SHORTCUTS: [string, string][] = [
   ["c", "Compose"],
   ["1 2 3 0", "Screener: Inbox, Reading, Receipts, Block"],
   ["g then t b d n i r z s c p", "Go to Today, Board, Calendar, Notes, Inbox, Reading, Snoozed, Screener, Receipts, People"],
-  ["/ or ⌘K", "Search, browse, jump — one palette"],
+  ["/ or Ctrl/⌘K", "Search, browse, jump — one palette"],
   ["Esc", "Dismiss"],
   ["?", "This list"],
 ];

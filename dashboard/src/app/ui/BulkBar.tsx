@@ -1,5 +1,5 @@
 import { useState } from "preact/hooks";
-import { checked, list, resetSelection, rowIdentity } from "../lib/store";
+import { checked, clearChecked, list, rowIdentity } from "../lib/store";
 import { markDone, markRead, moveTo, snooze } from "../lib/actions";
 import { countOf } from "../lib/fmt";
 import { Icon } from "./Icon";
@@ -44,7 +44,7 @@ export function BulkBar() {
       </button>
 
       <span class="bulkbar-spacer" />
-      <button class="btn btn-ghost btn-sm" type="button" onClick={resetSelection}>
+      <button class="btn btn-ghost btn-sm" type="button" onClick={clearChecked}>
         Clear <span class="kbd">Esc</span>
       </button>
     </div>

@@ -222,10 +222,12 @@ func TestIntegrationAccountListExposesReconcileState(t *testing.T) {
 		t.Fatalf("list status = %d: %s", w.Code, w.Body.String())
 	}
 	var accounts []struct {
+		ID                   string `json:"id"`
+		MirrorAccountID      string `json:"mirror_account_id"`
 		PolicyVersion        int64  `json:"policy_version"`
 		AppliedPolicyVersion int64  `json:"applied_policy_version"`
 		Reconcile            *struct {
-			State            string `json:"state"`
+			State           string `json:"state"`
 			FullEnumeration bool   `json:"full_enumeration"`
 		} `json:"reconcile"`
 	}
@@ -236,6 +238,18 @@ func TestIntegrationAccountListExposesReconcileState(t *testing.T) {
 		t.Fatalf("accounts = %d, want 1", len(accounts))
 	}
 	acc := accounts[0]
+	if acc.MirrorAccountID != "acct-list" || acc.ID == acc.MirrorAccountID {
+		t.Fatalf("account identities missing or conflated: product=%q mirror=%q", acc.ID, acc.MirrorAccountID)
+	}
+	detail := httptest.NewRecorder()
+	p.app.getAccountJSON(detail, r, acc.ID)
+	var got accountJSON
+	if err := json.Unmarshal(detail.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Code != http.StatusOK || got.MirrorAccountID != acc.MirrorAccountID {
+		t.Fatalf("detail mirror identity: %d %s", detail.Code, detail.Body.String())
+	}
 	if acc.PolicyVersion != 4 || acc.AppliedPolicyVersion != 0 {
 		t.Fatalf("policy versions = desired %d / applied %d, want 4 / 0", acc.PolicyVersion, acc.AppliedPolicyVersion)
 	}

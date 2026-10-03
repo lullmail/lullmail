@@ -3,7 +3,7 @@
 // the same place instead of two rival result views.
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { api } from "../lib/api";
-import { accountQS, layout, palette, query, toggleLayout } from "../lib/store";
+import { accountQS, layout, palette, searchMail, toggleLayout } from "../lib/store";
 import { openThread } from "../lib/actions";
 import { navigate } from "../lib/router";
 import { fmtDate, splitFrom } from "../lib/fmt";
@@ -157,7 +157,7 @@ export function Palette() {
         items: [{
           key: "search",
           label: "Search all mail for “" + q.trim() + "”",
-          run: () => { close(); query.value = q.trim(); },
+          run: () => { close(); searchMail(q); },
         }],
       });
     }

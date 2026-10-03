@@ -33,7 +33,9 @@ import (
 
 // Adapter is a Gmail client bound to one account.
 type Adapter struct {
-	svc *gmail.Service
+	svc         *gmail.Service
+	reads       *ReadLimiter
+	retryJitter func() time.Duration
 
 	// user is always "me" in practice; the API keys off the token.
 	user string
@@ -45,11 +47,19 @@ type Adapter struct {
 // stay outside this package — x/oauth2 already handles refresh correctly and
 // reimplementing it here would only add a second thing to get wrong.
 func New(ctx context.Context, opts ...option.ClientOption) (*Adapter, error) {
+	return NewWithReadLimiter(ctx, NewReadLimiter(), opts...)
+}
+
+// NewWithReadLimiter shares pacing across adapters without sharing credentials.
+func NewWithReadLimiter(ctx context.Context, limiter *ReadLimiter, opts ...option.ClientOption) (*Adapter, error) {
+	if limiter == nil {
+		limiter = NewReadLimiter()
+	}
 	svc, err := gmail.NewService(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("gmail: new service: %w", err)
 	}
-	return &Adapter{svc: svc, user: "me"}, nil
+	return &Adapter{svc: svc, user: "me", reads: limiter, retryJitter: readJitter}, nil
 }
 
 func (a *Adapter) Provider() mail.Provider { return mail.ProviderGmail }
@@ -87,7 +97,7 @@ func classify(err error) error {
 // Mailboxes lists labels. Gmail models folders as labels, and a message can
 // carry several at once.
 func (a *Adapter) Mailboxes(ctx context.Context) ([]mail.Mailbox, error) {
-	res, err := a.svc.Users.Labels.List(a.user).Context(ctx).Do()
+	res, err := readCall(ctx, a, func() (*gmail.ListLabelsResponse, error) { return a.svc.Users.Labels.List(a.user).Context(ctx).Do() })
 	if err != nil {
 		return nil, classify(err)
 	}
@@ -130,7 +140,7 @@ func roleFrom(labelID string) mail.Role {
 // reset, which is the same recovery path an IMAP UIDVALIDITY change takes.
 func (a *Adapter) Sync(ctx context.Context, box mail.MailboxID, cur mail.Cursor) (*mail.Changes, error) {
 	if cur == "" {
-		profile, err := a.svc.Users.GetProfile(a.user).Context(ctx).Do()
+		profile, err := readCall(ctx, a, func() (*gmail.Profile, error) { return a.svc.Users.GetProfile(a.user).Context(ctx).Do() })
 		if err != nil {
 			return nil, classify(err)
 		}
@@ -161,7 +171,7 @@ func (a *Adapter) Sync(ctx context.Context, box mail.MailboxID, cur mail.Cursor)
 		call = call.PageToken(pageToken)
 	}
 
-	res, err := call.Context(ctx).Do()
+	res, err := readCall(ctx, a, func() (*gmail.ListHistoryResponse, error) { return call.Context(ctx).Do() })
 	if err != nil {
 		if errors.Is(classify(err), mail.ErrNotFound) {
 			// The history window has moved past this cursor.
@@ -231,11 +241,11 @@ func (a *Adapter) initialSync(ctx context.Context, box mail.MailboxID, pageToken
 		// first scan of those labels would silently see nothing (audit
 		// GMAIL-04). The label filter still selects the intended mailbox.
 		IncludeSpamTrash(true).
-		MaxResults(500)
+		MaxResults(initialPageSize)
 	if pageToken != "" {
 		call = call.PageToken(pageToken)
 	}
-	res, err := call.Context(ctx).Do()
+	res, err := readCall(ctx, a, func() (*gmail.ListMessagesResponse, error) { return call.Context(ctx).Do() })
 	if err != nil {
 		return nil, classify(err)
 	}
@@ -326,12 +336,14 @@ func (a *Adapter) Envelopes(ctx context.Context, ids []mail.MessageID) ([]mail.E
 	out := make([]mail.Envelope, 0, len(ids))
 	for _, id := range ids {
 		// format=metadata returns headers and labels without body content,
-		// which is all an envelope needs and a fraction of the quota cost.
-		m, err := a.svc.Users.Messages.Get(a.user, nativeID(id)).
-			Format("metadata").
-			MetadataHeaders("From", "To", "Cc", "Bcc", "Reply-To",
-				"Subject", "Date", "Message-ID", "In-Reply-To", "References").
-			Context(ctx).Do()
+		// which reduces bytes, but has the same messages.get quota cost.
+		m, err := readCall(ctx, a, func() (*gmail.Message, error) {
+			return a.svc.Users.Messages.Get(a.user, nativeID(id)).
+				Format("metadata").
+				MetadataHeaders("From", "To", "Cc", "Bcc", "Reply-To",
+					"Subject", "Date", "Message-ID", "In-Reply-To", "References").
+				Context(ctx).Do()
+		})
 		if err != nil {
 			if errors.Is(classify(err), mail.ErrNotFound) {
 				continue
@@ -455,8 +467,10 @@ func parseAddrs(header string) []mail.Address {
 
 // Body fetches and decodes a message body.
 func (a *Adapter) Body(ctx context.Context, id mail.MessageID) (*mail.Body, error) {
-	m, err := a.svc.Users.Messages.Get(a.user, nativeID(id)).
-		Format("full").Context(ctx).Do()
+	m, err := readCall(ctx, a, func() (*gmail.Message, error) {
+		return a.svc.Users.Messages.Get(a.user, nativeID(id)).
+			Format("full").Context(ctx).Do()
+	})
 	if err != nil {
 		return nil, classify(err)
 	}
@@ -547,8 +561,10 @@ func (a *Adapter) partBytes(ctx context.Context, messageID string, p *gmail.Mess
 		return decodeURLBytes(p.Body.Data)
 	}
 	if p.Body.AttachmentId != "" {
-		result, err := a.svc.Users.Messages.Attachments.
-			Get(a.user, messageID, p.Body.AttachmentId).Context(ctx).Do()
+		result, err := readCall(ctx, a, func() (*gmail.MessagePartBody, error) {
+			return a.svc.Users.Messages.Attachments.
+				Get(a.user, messageID, p.Body.AttachmentId).Context(ctx).Do()
+		})
 		if err != nil {
 			return nil, classify(err)
 		}
@@ -602,8 +618,10 @@ func decodeCharset(raw []byte, charset string) (string, error) {
 
 // Raw returns the original RFC 5322 message.
 func (a *Adapter) Raw(ctx context.Context, id mail.MessageID) (io.ReadCloser, error) {
-	m, err := a.svc.Users.Messages.Get(a.user, nativeID(id)).
-		Format("raw").Context(ctx).Do()
+	m, err := readCall(ctx, a, func() (*gmail.Message, error) {
+		return a.svc.Users.Messages.Get(a.user, nativeID(id)).
+			Format("raw").Context(ctx).Do()
+	})
 	if err != nil {
 		return nil, classify(err)
 	}
@@ -622,8 +640,10 @@ func (a *Adapter) Raw(ctx context.Context, id mail.MessageID) (io.ReadCloser, er
 // merely its attachment id — is what carries the data: a named attachment
 // can hold inline Body.Data with no attachment id at all (audit GMAIL-02).
 func (a *Adapter) Attachment(ctx context.Context, id mail.MessageID, partID string) (io.ReadCloser, error) {
-	m, err := a.svc.Users.Messages.Get(a.user, nativeID(id)).
-		Format("full").Context(ctx).Do()
+	m, err := readCall(ctx, a, func() (*gmail.Message, error) {
+		return a.svc.Users.Messages.Get(a.user, nativeID(id)).
+			Format("full").Context(ctx).Do()
+	})
 	if err != nil {
 		return nil, classify(err)
 	}

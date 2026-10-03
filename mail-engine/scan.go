@@ -19,11 +19,11 @@ import (
 // A scan is the replacement: a full-mailbox enumeration that stages every
 // page durably (envelopes, seen IDs, continuation cursor in one
 // transaction) and prunes NOTHING until the final page has been staged.
-// At authoritative completion, FinishScan prunes memberships absent from
-// the seen set, publishes the terminal cursor, and drops the scan rows in
-// a single transaction. A crash at any earlier point leaves the previous
-// mirror contents fully readable and the scan resumable from its stored
-// continuation.
+// At authoritative completion, PgStore atomically stages the final page,
+// prunes memberships absent from the seen set, publishes the terminal
+// cursor, and drops the scan rows. A crash leaves either the previous
+// continuation retryable or the entire scan completed, never a running
+// scan whose terminal cursor has lost its completion evidence.
 
 // ScanID identifies one staged scan.
 type ScanID string
@@ -93,6 +93,21 @@ type ScanStore interface {
 	// number of pruned memberships. Nothing is pruned before this call,
 	// ever.
 	FinishScan(ctx context.Context, acct AccountID, box MailboxID, scan ScanID, terminal Cursor) (int, error)
+}
+
+// FinalScanPageStore atomically stages the terminal page and completes its
+// scan. Committing a terminal cursor with ApplyScanPage and then calling
+// FinishScan separately leaves a crash window: the provider's incremental
+// response at that cursor need not repeat the enumeration's Complete flag.
+// PgStore implements this extension so a failed final transaction leaves the
+// previous continuation retryable, while a committed one has already pruned
+// absences, published the cursor, and recorded the generation's completion.
+//
+// This is additive to ScanStore so existing external implementations keep
+// their non-destructive staged path. They must implement this extension to
+// get atomic terminal-page completion as well.
+type FinalScanPageStore interface {
+	ApplyFinalScanPage(ctx context.Context, scan ScanID, envs []Envelope, seen, destroyed []MessageID, terminal Cursor) (int, error)
 }
 
 // NewScanID mints a scan identifier. It is generated client-side so the

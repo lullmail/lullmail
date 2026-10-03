@@ -1,9 +1,9 @@
 // Cross-cutting app state. Anything two surfaces both need lives here — most
 // importantly the current list and its selection, because the keyboard layer
 // has to drive whichever list is on screen without knowing which view drew it.
-import { signal, computed } from "@preact/signals";
+import { signal, computed, batch } from "@preact/signals";
 import type { Bucket, Counts, ListBucket, Message, Row, ScreenerSender } from "./types";
-import { loadDrafts, saveDraftFields, worthRestoring } from "./offline";
+import { generationCurrent, loadDrafts, newMutationKey, offlineGeneration, offlineOwner, offlineStorageSuspended, saveDraftFields, worthRestoring } from "./offline";
 
 /* ---- theme ---- */
 
@@ -223,6 +223,11 @@ function initialAccountFilter(): string {
 export const accountFilter = signal<string>("");
 
 export function setAccountFilter(id: string) {
+  if (id !== accountFilter.value) {
+    resetSelection();
+    dismissReader();
+    setList({ kind: "none", key: "", rows: [], senders: [] });
+  }
   accountFilter.value = id;
   try {
     localStorage.setItem("es-account", id);
@@ -366,26 +371,80 @@ export const list = signal<ListState>({
 
 export const cursor = signal<number>(-1);
 export const checked = signal<Set<string>>(new Set());
+let selectionAnchor: string | null = null;
 
 export function rowIdentity(row: Pick<Row, "account" | "message_id">): string {
   return row.account + "\u0000" + row.message_id;
 }
 
 export function setList(next: Partial<ListState>) {
-  list.value = { ...list.value, ...next };
+  const previous = list.value;
+  const updated = { ...previous, ...next };
+  batch(() => {
+    if (previous.key !== updated.key || previous.kind !== updated.kind) {
+      resetSelection();
+    } else if (updated.kind === "rows") {
+      const focused = previous.rows[cursor.value];
+      const ids = new Set(updated.rows.map(rowIdentity));
+      cursor.value = focused ? updated.rows.findIndex((row) => rowIdentity(row) === rowIdentity(focused)) : -1;
+      checked.value = new Set([...checked.value].filter((id) => ids.has(id)));
+      if (selectionAnchor && !ids.has(selectionAnchor)) selectionAnchor = null;
+    } else if (updated.kind === "senders") {
+      const focused = previous.senders[cursor.value];
+      cursor.value = focused ? updated.senders.findIndex((sender) => sender.sender === focused.sender) : -1;
+    }
+    list.value = updated;
+  });
+}
+
+export function clearChecked() {
+  checked.value = new Set();
+  selectionAnchor = null;
 }
 
 export function resetSelection() {
   cursor.value = -1;
-  checked.value = new Set();
+  clearChecked();
+}
+
+export function focusRow(index: number, keepAnchor = false) {
+  const row = list.value.kind === "rows" ? list.value.rows[index] : undefined;
+  cursor.value = index;
+  if (!keepAnchor) selectionAnchor = row ? rowIdentity(row) : null;
 }
 
 export function toggleChecked(row: Pick<Row, "account" | "message_id">) {
   const id = rowIdentity(row);
+  const index = list.value.kind === "rows" ? list.value.rows.findIndex((item) => rowIdentity(item) === id) : -1;
+  if (index < 0) return;
+  focusRow(index);
   const next = new Set(checked.value);
   if (next.has(id)) next.delete(id);
   else next.add(id);
   checked.value = next;
+}
+
+export function selectRange(index: number, additive = false) {
+  const rows = list.value.kind === "rows" ? list.value.rows : [];
+  if (!rows[index]) return;
+  let start = rows.findIndex((row) => rowIdentity(row) === selectionAnchor);
+  if (start < 0) start = rows[cursor.value] ? cursor.value : index;
+  selectionAnchor = rowIdentity(rows[start]);
+  const next = additive ? new Set(checked.value) : new Set<string>();
+  for (let at = Math.min(start, index); at <= Math.max(start, index); at++) next.add(rowIdentity(rows[at]));
+  checked.value = next;
+  focusRow(index, true);
+}
+
+export function selectAllRows() {
+  if (list.value.kind !== "rows" || !list.value.rows.length) return;
+  if (!list.value.rows[cursor.value]) focusRow(0);
+  checked.value = new Set(list.value.rows.map(rowIdentity));
+}
+
+export function readerOwnsPage(): boolean {
+  return !!reader.value.threadId && (layout.value !== "classic" ||
+    (typeof window !== "undefined" && typeof window.matchMedia === "function" && !window.matchMedia("(min-width: 1080px)").matches));
 }
 
 /** Rows the verbs apply to: the explicit checkbox selection, else the cursor
@@ -394,15 +453,13 @@ export function toggleChecked(row: Pick<Row, "account" | "message_id">) {
     e/s/i/p acted on a different thread than the one on screen. */
 export function targetRows(): Row[] {
   const l = list.value;
-  if (l.kind !== "rows") return [];
-  if (checked.value.size) return l.rows.filter((r) => checked.value.has(rowIdentity(r)));
-  if (reader.value.threadId && layout.value !== "classic") {
+  if (readerOwnsPage()) {
     const messages = reader.value.messages;
     const last = messages[messages.length - 1];
     if (!last) return [];
     return [{
       account: last.account,
-      thread_id: reader.value.threadId,
+      thread_id: reader.value.threadId!,
       message_id: last.id,
       subject: last.subject,
       from: last.from,
@@ -412,6 +469,8 @@ export function targetRows(): Row[] {
       bucket: last.bucket as Row["bucket"],
     }];
   }
+  if (l.kind !== "rows") return [];
+  if (checked.value.size) return l.rows.filter((r) => checked.value.has(rowIdentity(r)));
   const at = l.rows[cursor.value];
   return at ? [at] : [];
 }
@@ -444,15 +503,25 @@ export const imageSenders = signal<Set<string>>(storedImageSenders());
 /** Where the list was scrolled to when a thread was opened, so closing it does
     not dump you back at the top of a long bucket. */
 let listScroll = 0;
+let readerDismissal = 0;
 
 export function rememberListScroll() {
   if (typeof window !== "undefined") listScroll = window.scrollY;
 }
 
-export function closeReader() {
+export function dismissReader() {
+  readerDismissal++;
   reader.value = { threadId: null, account: null, bucket: null, loading: false, error: null, messages: [], imagesOk: new Set() };
-  if (typeof window !== "undefined") {
-    requestAnimationFrame(() => window.scrollTo({ top: listScroll }));
+}
+
+export function closeReader() {
+  const wasOpen = !!reader.value.threadId;
+  dismissReader();
+  const dismissal = readerDismissal;
+  if (wasOpen && typeof window !== "undefined") {
+    requestAnimationFrame(() => {
+      if (readerDismissal === dismissal && !reader.value.threadId) window.scrollTo({ top: listScroll });
+    });
   }
 }
 
@@ -486,6 +555,8 @@ export interface ComposeState {
   replyToId?: string;
   /** Shown above the fields so a reply never looks like a fresh message. */
   context?: string;
+  /** Reused only while this draft's send content is unchanged. */
+  sendKey?: string;
   /** Full attachment set, carried by undo-send so a restored draft is
    * complete rather than a hand-picked subset of fields (audit SEND-05).
    * Structural twin of actions.SendAttachment; typed inline to keep this
@@ -529,18 +600,29 @@ function fieldsOf(d: ComposeState): Omit<ComposeState, "id"> {
 }
 
 async function flushDrafts(): Promise<void> {
+  const gen = offlineGeneration(), owner = offlineOwner();
+  const rows = [...draftStack.value];
+  const current = () => generationCurrent(gen) && offlineOwner() === owner && !offlineStorageSuspended();
+  draftSaveQueued = false;
   try {
-    for (const d of draftStack.value) await saveDraftFields(d.id, fieldsOf(d));
-    draftsUnsaved.value = false;
+    for (const { id } of rows) {
+      if (!current()) return;
+      const d = draftStack.value.find((live) => live.id === id);
+      if (d && !await saveDraftFields(id, fieldsOf(d), gen, () => draftStack.value.find((live) => live.id === id) === d)) {
+        if (current()) draftsUnsaved.value = true;
+        return;
+      }
+    }
+    if (current()) draftsUnsaved.value = false;
   } catch {
-    draftsUnsaved.value = true;
+    if (current()) draftsUnsaved.value = true;
   }
 }
 
 function scheduleDraftFlush() {
   // SSR prerendering has no storage to flush to, and a timer left running
   // past the build's module lifetime is a crash, not a save.
-  if (typeof window === "undefined") return;
+  if (typeof window === "undefined" || !draftStack.value.length || offlineStorageSuspended()) return;
   draftSaveQueued = true;
   clearTimeout(draftSaveTimer);
   draftSaveTimer = setTimeout(() => {
@@ -561,9 +643,10 @@ if (typeof window !== "undefined") {
  *  started in this page. Blank drafts are not worth restoring; content
  *  and attachment-only drafts are (audit 4 F05). */
 export async function hydrateDrafts(): Promise<void> {
+  const gen = offlineGeneration(), owner = offlineOwner();
   try {
     const rows = await loadDrafts();
-    if (draftStack.value.length || !rows.length) return;
+    if (!generationCurrent(gen) || offlineOwner() !== owner || offlineStorageSuspended() || draftStack.value.length || !rows.length) return;
     const live = rows
       .filter((row) => worthRestoring(row))
       .map(({ ns: _ns, seq: _seq, savedAt: _savedAt, ...rest }) => rest as ComposeState);
@@ -576,7 +659,7 @@ export async function hydrateDrafts(): Promise<void> {
   } catch {
     // Unreadable drafts stay parked on disk; the ring starts empty rather
     // than half-restored, and the unsaved marker warns nothing persisted.
-    draftsUnsaved.value = true;
+    if (generationCurrent(gen) && offlineOwner() === owner && !offlineStorageSuspended()) draftsUnsaved.value = true;
   }
 }
 
@@ -627,6 +710,7 @@ export function closeCompose() {
 /** Removes the active draft from the ring (send or discard). The window
     follows the last one out. */
 export function retireDraft(id: string) {
+  releaseDraftAttachmentReads(id);
   const stack = draftStack.value.filter((d) => d.id !== id);
   draftStack.value = stack;
   draftIndex.value = Math.min(draftIndex.value, stack.length - 1);
@@ -639,7 +723,7 @@ export function updateDraft(patch: Partial<ComposeState>) {
   const stack = [...draftStack.value];
   const at = draftIndex.value;
   if (stack[at]) {
-    stack[at] = { ...stack[at], ...patch };
+    stack[at] = patchDraft(stack[at], patch);
     draftStack.value = stack;
   }
 }
@@ -654,8 +738,149 @@ export function updateDraftById(id: string, patch: Partial<ComposeState>) {
   const stack = [...draftStack.value];
   const at = stack.findIndex((d) => d.id === id);
   if (at < 0) return;
-  stack[at] = { ...stack[at], ...patch };
+  stack[at] = patchDraft(stack[at], patch);
   draftStack.value = stack;
+}
+
+// Only content changes start a different submission. Persist the key with
+// the draft, so parking, switching drafts, and reloading after a lost
+// acknowledgment retain the retry identity. A new/undo draft starts fresh.
+const sendFields: Array<keyof ComposeState> = ["to", "cc", "bcc", "subject", "body", "htmlMode", "accountId", "replyToId", "attachments"];
+function patchDraft(draft: ComposeState, patch: Partial<ComposeState>): ComposeState {
+  const changed = sendFields.some((field) => field in patch && JSON.stringify(patch[field]) !== JSON.stringify(draft[field]));
+  return { ...draft, ...patch, sendKey: changed ? undefined : (patch.sendKey ?? draft.sendKey) };
+}
+
+export const sendingDrafts = signal<Set<string>>(new Set());
+export const pendingDraftReads = signal<Map<string, number>>(new Map());
+
+export const MAX_DRAFT_ATTACHMENT_BYTES = 25 << 20;
+export const MAX_DRAFT_ATTACHMENT_COUNT = 20;
+export const MAX_DRAFT_MEMORY_BYTES = 128 << 20;
+const MAX_ATTACHMENT_BYTES = 15 << 20;
+type DraftAttachment = NonNullable<ComposeState["attachments"]>[number];
+interface AttachmentReservation { draftId: string; bytes: number; reading: boolean; generation: number; owner: string }
+const attachmentReservations = new Map<symbol, AttachmentReservation>();
+
+export function attachmentBytes(attachment: DraftAttachment): number {
+  const encoded = attachment.dataBase64;
+  return Math.max(0, Math.floor(encoded.length * 3 / 4) - (encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0));
+}
+
+function attachmentMemoryBytes(): number {
+  // Conservative UTF-16 payload accounting plus the ArrayBuffer and
+  // intermediate binary string during conversion. This is a bounded
+  // application payload budget, not a promise about browser heap overhead.
+  let bytes = 0;
+  for (const draft of draftStack.value) {
+    for (const value of [draft.to, draft.cc, draft.bcc, draft.subject, draft.body]) bytes += (value?.length ?? 0) * 2;
+    for (const attachment of draft.attachments ?? []) bytes += attachment.dataBase64.length * 2;
+  }
+  for (const entry of attachmentReservations.values()) {
+    bytes += Math.ceil(entry.bytes / 3) * 4 * 2;
+    if (entry.reading) bytes += entry.bytes * 3;
+  }
+  return bytes;
+}
+
+function publishPendingAttachmentReads(): void {
+  const counts = new Map<string, number>();
+  for (const entry of attachmentReservations.values()) counts.set(entry.draftId, (counts.get(entry.draftId) ?? 0) + 1);
+  pendingDraftReads.value = counts;
+}
+
+/** Reserve the entire selection synchronously before any arrayBuffer
+ * call. Concurrent choosers and parked drafts share these reservations. */
+export function reserveDraftAttachment(draftId: string, bytes: number): symbol | string {
+  const draft = draftStack.value.find((entry) => entry.id === draftId);
+  if (!draft || offlineStorageSuspended()) return "The draft is no longer active";
+  if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > MAX_ATTACHMENT_BYTES) return "is over 15 MiB and was skipped";
+  const pending = [...attachmentReservations.values()].filter((entry) => entry.draftId === draftId);
+  const attachments = draft.attachments ?? [];
+  if (attachments.length + pending.length >= MAX_DRAFT_ATTACHMENT_COUNT) return "would exceed the 20 attachments per message limit";
+  const used = attachments.reduce((sum, attachment) => sum + attachmentBytes(attachment), 0) + pending.reduce((sum, entry) => sum + entry.bytes, 0);
+  if (used + bytes > MAX_DRAFT_ATTACHMENT_BYTES) return "would exceed the 25 MiB per message limit";
+  if (attachmentMemoryBytes() + Math.ceil(bytes / 3) * 4 * 2 > MAX_DRAFT_MEMORY_BYTES) return "would exceed the 128 MiB draft memory budget; remove attachments or discard another draft first";
+  const token = Symbol(draftId);
+  attachmentReservations.set(token, { draftId, bytes, reading: false, generation: offlineGeneration(), owner: offlineOwner() });
+  publishPendingAttachmentReads();
+  return token;
+}
+
+/** Admit transient conversion memory immediately before starting a read. */
+export function beginDraftAttachmentRead(token: symbol): boolean {
+  const entry = attachmentReservations.get(token);
+  if (!entry || entry.reading || !generationCurrent(entry.generation) || offlineOwner() !== entry.owner || offlineStorageSuspended() || !draftStack.value.some((draft) => draft.id === entry.draftId)) return false;
+  if (attachmentMemoryBytes() + entry.bytes * 3 > MAX_DRAFT_MEMORY_BYTES) return false;
+  entry.reading = true;
+  return true;
+}
+
+/** Release and publish a decoded file synchronously, so another selection
+ * never observes a gap between its pending and completed byte accounting. */
+export function finishDraftAttachmentRead(token: symbol, attachment?: DraftAttachment): void {
+  const entry = attachmentReservations.get(token);
+  if (!entry) return; // reset/retirement already released it
+  attachmentReservations.delete(token);
+  if (attachment && generationCurrent(entry.generation) && offlineOwner() === entry.owner && !offlineStorageSuspended()) {
+    const draft = draftStack.value.find((item) => item.id === entry.draftId);
+    if (draft) updateDraftById(entry.draftId, { attachments: [...(draft.attachments ?? []), attachment] });
+  }
+  publishPendingAttachmentReads();
+}
+
+function releaseDraftAttachmentReads(draftId?: string): void {
+  for (const [token, entry] of attachmentReservations) {
+    if (draftId === undefined || entry.draftId === draftId) attachmentReservations.delete(token);
+  }
+  publishPendingAttachmentReads();
+}
+
+/** Mint and persist before the first fetch; no key rotates on a failure. */
+export async function prepareDraftSend(id: string): Promise<string | null> {
+  const gen = offlineGeneration(), owner = offlineOwner();
+  const draft = draftStack.value.find((d) => d.id === id);
+  if (!draft || offlineStorageSuspended()) return null;
+  const key = draft.sendKey || newMutationKey();
+  updateDraftById(id, { sendKey: key });
+  const saved = draftStack.value.find((d) => d.id === id)!;
+  try {
+    if (!await saveDraftFields(id, fieldsOf(saved), gen, () => draftStack.value.find((live) => live.id === id)?.sendKey === key)) {
+      if (generationCurrent(gen)) draftsUnsaved.value = true;
+      return null;
+    }
+  }
+  catch { if (generationCurrent(gen)) draftsUnsaved.value = true; return null; }
+  if (!generationCurrent(gen) || offlineOwner() !== owner || offlineStorageSuspended()) return null;
+  return draftStack.value.find((d) => d.id === id)?.sendKey === key ? key : null;
+}
+
+/** Forces component-local private state (including inline replies) to unmount. */
+export const privateStateVersion = signal(0);
+
+/** Called before an offline wipe, even if storage later refuses that wipe. */
+export function resetPrivateState(): void {
+  clearTimeout(draftSaveTimer);
+  draftSaveTimer = undefined;
+  draftSaveQueued = false;
+  draftStack.value = [];
+  draftIndex.value = 0;
+  composeOpen.value = false;
+  draftsUnsaved.value = false;
+  sendingDrafts.value = new Set();
+  releaseDraftAttachmentReads();
+  dismissToast(); // undo closures can hold a complete private sent draft
+  dismissReader();
+  list.value = { kind: "none", key: "", loading: false, error: null, rows: [], senders: [], origin: null };
+  resetSelection();
+  query.value = "";
+  snoozePickerRows.value = [];
+  accounts.value = [];
+  accountCount.value = null;
+  accountFilter.value = "";
+  counts.value = {};
+  mailboxes.value = [];
+  privateStateVersion.value++;
 }
 
 /** The carousel: rotate through open drafts, wrapping around. */
@@ -680,3 +905,12 @@ export const overlayOpen = computed(
 /* ---- list-column search ---- */
 
 export const query = signal<string>("");
+
+export function searchMail(value: string) {
+  const next = value.trim();
+  dismissReader();
+  if (next !== query.value) {
+    setList({ kind: "none", key: "", rows: [], senders: [] });
+  }
+  query.value = next;
+}

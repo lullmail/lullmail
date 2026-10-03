@@ -1,15 +1,17 @@
 // @vitest-environment jsdom
 import { render } from "preact";
 import { act } from "preact/test-utils";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { authStatus } from "../lib/api";
 import { Gate } from "./Gate";
 
 const host = document.createElement("div");
 
 afterEach(() => {
-  render(null, host);
+  act(() => render(null, host));
   authStatus.value = null;
+  vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe("first-run setup", () => {
@@ -22,7 +24,7 @@ describe("first-run setup", () => {
       passkey_supported: true,
       detected_origin: "https://mail.example.test",
     };
-    render(<Gate />, host);
+    act(() => render(<Gate />, host));
 
     act(() => host.querySelector<HTMLButtonElement>("button")!.click());
     expect(host.textContent).toContain("Enter your setup code");
@@ -51,7 +53,7 @@ describe("signed-out gate", () => {
       bootstrap_available: false,
       passkey_supported: true,
     };
-    render(<Gate />, host);
+    act(() => render(<Gate />, host));
 
     expect(host.querySelector<HTMLInputElement>("#gate-email")).not.toBeNull();
     expect(host.querySelector<HTMLInputElement>("#gate-password")).not.toBeNull();
@@ -73,9 +75,24 @@ describe("unreachable server", () => {
 
   it("offers a retry rather than a passkey prompt", async () => {
     const { Unreachable } = await import("./Gate");
-    render(<Unreachable />, host);
+    act(() => render(<Unreachable />, host));
     expect(host.textContent).toContain("Can't reach your mailbox");
     expect(host.textContent).not.toContain("Continue with a passkey");
     expect(host.querySelector("button")!.textContent).toContain("Try again");
+  });
+
+  it("cleans up reconnect effects when the gate is dismissed", async () => {
+    const { Unreachable } = await import("./Gate");
+    vi.useFakeTimers();
+    const add = vi.spyOn(window, "addEventListener");
+    const remove = vi.spyOn(window, "removeEventListener");
+    act(() => render(<Unreachable />, host));
+    const online = add.mock.calls.find(([type]) => type === "online")?.[1];
+    expect(online).toBeTypeOf("function");
+    expect(vi.getTimerCount()).toBe(1);
+
+    act(() => render(null, host));
+    expect(vi.getTimerCount()).toBe(0);
+    expect(remove).toHaveBeenCalledWith("online", online);
   });
 });

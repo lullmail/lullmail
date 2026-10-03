@@ -33,18 +33,9 @@ export function SnoozeMenu(
     };
     // Deferred: the click that opened the menu is still propagating.
     const t = setTimeout(() => document.addEventListener("click", away), 0);
-    const key = (ev: KeyboardEvent) => {
-      const items = [...(ref.current?.querySelectorAll<HTMLButtonElement>("button") || [])];
-      const at = items.indexOf(document.activeElement as HTMLButtonElement);
-      if (ev.key === "Escape") { ev.preventDefault(); onClose(); }
-      else if (ev.key === "ArrowDown") { ev.preventDefault(); items[(at + 1 + items.length) % items.length]?.focus(); }
-      else if (ev.key === "ArrowUp") { ev.preventDefault(); items[(at - 1 + items.length) % items.length]?.focus(); }
-    };
-    document.addEventListener("keydown", key);
     return () => {
       clearTimeout(t);
       document.removeEventListener("click", away);
-      document.removeEventListener("keydown", key);
       previous?.focus();
     };
   }, [onClose]);
@@ -52,6 +43,15 @@ export function SnoozeMenu(
   return (
     <div
       class="menu" ref={ref} role="menu"
+      onKeyDown={(ev) => {
+        if (!["Escape", "ArrowDown", "ArrowUp"].includes(ev.key)) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (ev.key === "Escape") { onClose(); return; }
+        const items = [...(ref.current?.querySelectorAll<HTMLButtonElement>("button") || [])];
+        const at = items.indexOf(document.activeElement as HTMLButtonElement);
+        items[(at + (ev.key === "ArrowDown" ? 1 : -1) + items.length) % items.length]?.focus();
+      }}
       style={standalone ? { position: "relative" } : placement === "up" ? { bottom: "100%", left: 0, marginBottom: 6 } : { top: "100%", right: 0, marginTop: 6 }}
     >
       {choices().map(([label, days, note]) => (

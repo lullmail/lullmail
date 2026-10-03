@@ -6,7 +6,7 @@
 // reader, the list scroll position and the keyboard selection on every click.
 import { signal } from "@preact/signals";
 import type { ListBucket } from "./types";
-import { query } from "./store";
+import { dismissReader, query, setList } from "./store";
 
 export type PageKind = "today" | "board" | "notes" | "calendar" | "bucket" | "screener" | "people" | "accounts" | "security" | "appearance" | "settings-mail" | "settings-home" | "search" | "folder";
 
@@ -82,6 +82,8 @@ export const path = signal<string>("");
 // change — link, g-key, back — is the user saying "show me this instead".
 export function navigate(to: string) {
 	const next = normalise(to);
+	dismissReader();
+	if (next !== path.value || query.value) setList({ kind: "none", key: "", rows: [], senders: [] });
 	query.value = "";
 	if (next === path.value) return;
 	window.history.pushState({}, "", next);
@@ -92,11 +94,13 @@ export function navigate(to: string) {
 export function startRouter() {
   if (typeof window === "undefined") return;
   path.value = normalise(window.location.pathname);
-  window.addEventListener("popstate", () => {
+  const onPopState = () => {
+    dismissReader();
+    if (normalise(window.location.pathname) !== path.value || query.value) setList({ kind: "none", key: "", rows: [], senders: [] });
     query.value = "";
     path.value = normalise(window.location.pathname);
-  });
-  document.addEventListener("click", (ev) => {
+  };
+  const onClick = (ev: MouseEvent) => {
     if (ev.defaultPrevented || ev.button !== 0) return;
     if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
     const a = (ev.target as HTMLElement | null)?.closest?.("a");
@@ -109,5 +113,11 @@ export function startRouter() {
     if (!ROUTES[normalise(href)] && !normalise(href).startsWith(FOLDER_PREFIX)) return;
     ev.preventDefault();
     navigate(href);
-  });
+  };
+  window.addEventListener("popstate", onPopState);
+  document.addEventListener("click", onClick);
+  return () => {
+    window.removeEventListener("popstate", onPopState);
+    document.removeEventListener("click", onClick);
+  };
 }

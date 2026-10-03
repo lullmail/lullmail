@@ -17,8 +17,10 @@ import (
 	"github.com/neutron-build/neutron/mail/imap"
 )
 
-func newResolver() mail.Resolver {
-	stock := dialer.New()
+func newResolver() mail.Resolver { return newResolverWithGmailRefresh(nil) }
+
+func newResolverWithGmailRefresh(refresh dialer.GmailRefresh) mail.Resolver {
+	stock := dialer.NewWithGmailRefresh(refresh)
 	return func(ctx context.Context, acct mail.AccountID, cred mail.Credential) (mail.Adapter, func(), error) {
 		if cred.Provider == mail.ProviderIMAP && isLoopbackHost(cred.Host) {
 			user := strings.TrimSpace(cred.Username)

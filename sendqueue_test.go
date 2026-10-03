@@ -7,9 +7,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -253,9 +256,13 @@ func TestGuardDeliveryFencesAccountDeletion(t *testing.T) {
 	acct := mail.AccountID("mirror-1")
 
 	delivered := make(chan struct{})
+	cancelled := make(chan struct{})
+	cleanup := make(chan struct{})
 	guarded := a.guardDelivery(acct, func(ctx context.Context, _ *mail.Outgoing) error {
 		close(delivered)
-		<-ctx.Done() // hold the lease like a slow submission would
+		<-ctx.Done()
+		close(cancelled)
+		<-cleanup // cancellation must still wait for transport cleanup
 		return ctx.Err()
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -274,12 +281,22 @@ func TestGuardDeliveryFencesAccountDeletion(t *testing.T) {
 		close(deletionDone)
 	}()
 	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		cancel()
+		close(cleanup)
+		t.Fatal("account deletion did not cancel the admitted delivery")
+	}
+	select {
 	case <-deletionDone:
+		cancel()
+		close(cleanup)
 		t.Fatal("deletion completed while a delivery held the account lease")
 	case <-time.After(50 * time.Millisecond):
 	}
 
 	cancel()
+	close(cleanup)
 	<-deletionDone
 
 	// ...and after deletion began, new sends fail admission.
@@ -345,8 +362,8 @@ func TestHandleSendRejectsJMAPWithoutSubmissionTransport(t *testing.T) {
 	for _, fresh := range []bool{true, false} {
 		t.Run(map[bool]string{true: "fresh send", false: "reply"}[fresh], func(t *testing.T) {
 			steps := []dbStep{{
-				kind:  "query",
-				rows:  &testRows{columns: []string{"mirror_account_id", "provider"}, values: [][]driver.Value{{"mirror-1", "jmap"}}},
+				kind: "query",
+				rows: &testRows{columns: []string{"mirror_account_id", "provider"}, values: [][]driver.Value{{"mirror-1", "jmap"}}},
 			}}
 			payload := map[string]any{"to": "dest@example.com", "subject": "s", "text": "hi"}
 			if !fresh {
@@ -489,5 +506,310 @@ func TestHandleSendIdempotentAcceptance(t *testing.T) {
 	conflict := post(a, "key-1", "different")
 	if conflict.Code != http.StatusConflict {
 		t.Fatalf("key reuse with different body: status = %d body = %s", conflict.Code, conflict.Body.String())
+	}
+}
+
+// The enqueue boundary is the linearization point: even callers that all
+// passed handleSend's optimistic lookup must share one worker and budget slot.
+func TestConcurrentEnqueueClaimsSendKeyOnce(t *testing.T) {
+	a := &App{sendq: newSendQueue(), log: discardLogger()}
+	t.Cleanup(func() { a.stopBackground(time.Second) })
+	const count = 32
+	start := make(chan struct{})
+	results := make(chan *httptest.ResponseRecorder, count)
+	var delivered atomic.Int32
+	for i := 0; i < count; i++ {
+		go func() {
+			<-start
+			w := httptest.NewRecorder()
+			a.enqueue(w, func(context.Context, *mail.Outgoing) error {
+				delivered.Add(1)
+				return nil
+			}, &mail.Outgoing{Text: "one send"}, "same-key", "same-hash")
+			results <- w
+		}()
+	}
+	close(start)
+	var id string
+	for i := 0; i < count; i++ {
+		w := <-results
+		if w.Code != http.StatusOK {
+			t.Fatalf("caller %d: %d %s", i, w.Code, w.Body.String())
+		}
+		var response struct {
+			Queued string `json:"queued"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			id = response.Queued
+		}
+		if id == "" || response.Queued != id {
+			t.Fatalf("duplicate queue ids: %q and %q", id, response.Queued)
+		}
+	}
+	a.sendq.mu.Lock()
+	jobs := len(a.sendq.sends)
+	a.sendq.mu.Unlock()
+	a.sendq.budget.mu.Lock()
+	budgetJobs := a.sendq.budget.jobs
+	a.sendq.budget.mu.Unlock()
+	if jobs != 1 || budgetJobs != 1 {
+		t.Fatalf("jobs=%d budget=%d, want one", jobs, budgetJobs)
+	}
+	// The single token cancels ALL retries' accepted work, not just the
+	// last one racing to overwrite the key index.
+	r := httptest.NewRequest(http.MethodDelete, "/send/"+id, nil)
+	r.SetPathValue("id", id)
+	w := httptest.NewRecorder()
+	a.handleUndoSend(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("undo: %d", w.Code)
+	}
+	if !a.stopBackground(time.Second) {
+		t.Fatal("send worker did not stop")
+	}
+	if delivered.Load() != 0 {
+		t.Fatal("an undone retry was delivered")
+	}
+}
+
+func TestEnqueueReplaysBeforeBudgetAndRejectsConflictingBody(t *testing.T) {
+	a := &App{sendq: newSendQueue(), log: discardLogger()}
+	t.Cleanup(func() { a.stopBackground(time.Second) })
+	deliver := func(context.Context, *mail.Outgoing) error { return nil }
+	first := httptest.NewRecorder()
+	a.enqueue(first, deliver, &mail.Outgoing{Text: "one"}, "key", "hash")
+	var releases []func()
+	for i := 1; i < sendMaxJobs; i++ {
+		release, err := a.sendq.budget.acquire(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		releases = append(releases, release)
+	}
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+	replay := httptest.NewRecorder()
+	a.enqueue(replay, deliver, &mail.Outgoing{Text: "one"}, "key", "hash")
+	if replay.Code != http.StatusOK || replay.Header().Get("X-Idempotent-Replay") != "true" {
+		t.Fatalf("full-budget retry: %d %s", replay.Code, replay.Body.String())
+	}
+	conflict := httptest.NewRecorder()
+	a.enqueue(conflict, deliver, &mail.Outgoing{Text: "different"}, "key", "different")
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("conflict: %d", conflict.Code)
+	}
+}
+
+func TestConcurrentEnqueueDuringShutdownNeverPublishesAcceptance(t *testing.T) {
+	a := &App{sendq: newSendQueue(), log: discardLogger()}
+	a.tasksGroup().Stop(time.Second)
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w := httptest.NewRecorder()
+			a.enqueue(w, nil, &mail.Outgoing{}, "key", "hash")
+			if w.Code != http.StatusServiceUnavailable {
+				t.Errorf("shutdown replayed an unadmitted send: %d", w.Code)
+			}
+		}()
+	}
+	wg.Wait()
+	if len(a.sendq.sends) != 0 || len(a.sendq.keyed) != 0 || a.sendq.budget.jobs != 0 {
+		t.Fatal("shutdown leaked send reservations")
+	}
+}
+
+func waitForSendWorkers(t *testing.T, a *App) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { a.tasksGroup().wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("send workers did not finish")
+	}
+}
+
+func TestSendReceiptsPreventResubmissionAfterWorkerExit(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		outcome sendOutcome
+		status  int
+	}{
+		{"submitted", sendSubmitted, http.StatusOK},
+		{"transport-error", sendAmbiguous, http.StatusConflict},
+		{"transport-panic", sendAmbiguous, http.StatusConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &App{sendq: newSendQueue(), log: discardLogger()}
+			t.Cleanup(func() { a.stopBackground(time.Second) })
+			var delivered atomic.Int32
+			deliver := func(context.Context, *mail.Outgoing) error {
+				delivered.Add(1)
+				if tc.name == "transport-panic" {
+					panic("transport interrupted")
+				}
+				if tc.name == "transport-error" {
+					return errors.New("provider acknowledgment lost")
+				}
+				return nil
+			}
+			first := httptest.NewRecorder()
+			a.enqueueAfter(first, deliver, &mail.Outgoing{Text: "one"}, "receipt-key", "hash", 0)
+			if first.Code != http.StatusOK {
+				t.Fatalf("initial: %d", first.Code)
+			}
+			waitForSendWorkers(t, a)
+			if len(a.sendq.sends) != 0 || a.sendq.budget.jobs != 0 || a.sendq.budget.bytes != 0 {
+				t.Fatal("completed payload still owns queue capacity")
+			}
+			receipt := a.sendq.receipts["receipt-key"]
+			if receipt.outcome != tc.outcome || receipt.expiresAt.IsZero() {
+				t.Fatalf("receipt: %+v", receipt)
+			}
+			for i := 0; i < 3; i++ {
+				replay := httptest.NewRecorder()
+				a.enqueueAfter(replay, deliver, &mail.Outgoing{Text: "one"}, "receipt-key", "hash", 0)
+				if replay.Code != tc.status || replay.Header().Get("X-Idempotent-Replay") != "true" {
+					t.Fatalf("replay: %d %s", replay.Code, replay.Body.String())
+				}
+				if tc.outcome == sendSubmitted {
+					var result struct {
+						Queued string `json:"queued"`
+						Undo   int    `json:"undo_seconds"`
+						Status string `json:"status"`
+					}
+					if err := json.Unmarshal(replay.Body.Bytes(), &result); err != nil {
+						t.Fatal(err)
+					}
+					if result.Queued != receipt.id || result.Undo != 0 || result.Status != "submitted" {
+						t.Fatalf("completed replay: %+v", result)
+					}
+				} else if !strings.Contains(replay.Body.String(), "may have reached") {
+					t.Fatal("uncertain outcome was presented as a definite failure")
+				}
+			}
+			if delivered.Load() != 1 {
+				t.Fatalf("receipt retry delivered %d times", delivered.Load())
+			}
+			if !a.sendq.receipts["receipt-key"].expiresAt.Equal(receipt.expiresAt) {
+				t.Fatal("retry extended receipt expiry")
+			}
+			conflict := httptest.NewRecorder()
+			a.enqueueAfter(conflict, deliver, &mail.Outgoing{Text: "changed"}, "receipt-key", "different", 0)
+			if conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), "Key Reused") {
+				t.Fatalf("hash conflict: %d %s", conflict.Code, conflict.Body.String())
+			}
+		})
+	}
+}
+
+func TestUndoRetainsCancelledReceipt(t *testing.T) {
+	a := &App{sendq: newSendQueue(), log: discardLogger()}
+	t.Cleanup(func() { a.stopBackground(time.Second) })
+	first := httptest.NewRecorder()
+	a.enqueue(first, func(context.Context, *mail.Outgoing) error { t.Error("cancelled mail delivered"); return nil }, &mail.Outgoing{}, "undo-key", "hash")
+	var response struct {
+		Queued string `json:"queued"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodDelete, "/outbox/"+response.Queued, nil)
+	r.SetPathValue("id", response.Queued)
+	w := httptest.NewRecorder()
+	a.handleUndoSend(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("undo: %d", w.Code)
+	}
+	waitForSendWorkers(t, a)
+	if got := a.sendq.receipts["undo-key"].outcome; got != sendCancelled {
+		t.Fatalf("undo outcome: %q", got)
+	}
+	replay := httptest.NewRecorder()
+	a.enqueue(replay, nil, &mail.Outgoing{}, "undo-key", "hash")
+	if replay.Code != http.StatusConflict || !strings.Contains(replay.Body.String(), "Send Cancelled") {
+		t.Fatalf("cancelled replay: %d %s", replay.Code, replay.Body.String())
+	}
+}
+
+func TestSendReceiptRetentionIsBoundedAndExpires(t *testing.T) {
+	q := newSendQueue()
+	now := time.Now()
+	q.receipts["expired"] = sendReceipt{reqHash: "hash", expiresAt: now.Add(-time.Second)}
+	if q.sendReplay("expired", "hash") != nil {
+		t.Fatal("expired receipt was replayed")
+	}
+	for i := 0; i <= sendReceiptLimit; i++ {
+		q.receipts[fmt.Sprint(i)] = sendReceipt{expiresAt: now.Add(sendReceiptTTL + time.Duration(i)*time.Second)}
+	}
+	q.pruneReceipts(now)
+	if len(q.receipts) != sendReceiptLimit {
+		t.Fatalf("retained %d receipts", len(q.receipts))
+	}
+	if _, ok := q.receipts["0"]; ok {
+		t.Fatal("oldest receipt was not evicted at capacity")
+	}
+	q.pruneReceipts(now.Add(sendReceiptTTL + time.Duration(sendReceiptLimit+1)*time.Second))
+	if len(q.receipts) != 0 {
+		t.Fatal("expired receipts were retained")
+	}
+}
+
+func TestShutdownBeforeSubmissionRetainsCancelledReceipt(t *testing.T) {
+	a := &App{sendq: newSendQueue(), log: discardLogger()}
+	var delivered atomic.Int32
+	w := httptest.NewRecorder()
+	a.enqueue(w, func(context.Context, *mail.Outgoing) error { delivered.Add(1); return nil }, &mail.Outgoing{}, "shutdown-key", "hash")
+	if w.Code != http.StatusOK {
+		t.Fatalf("acceptance: %d", w.Code)
+	}
+	if !a.stopBackground(time.Second) {
+		t.Fatal("shutdown did not cancel the undo timer")
+	}
+	if delivered.Load() != 0 || a.sendq.receipts["shutdown-key"].outcome != sendCancelled {
+		t.Fatal("shutdown lost the pre-submission outcome")
+	}
+	replay := httptest.NewRecorder()
+	a.enqueue(replay, nil, &mail.Outgoing{}, "shutdown-key", "hash")
+	if replay.Code != http.StatusConflict {
+		t.Fatalf("cancelled replay: %d", replay.Code)
+	}
+}
+
+func TestHandleSendReceiptIsScopedToOwner(t *testing.T) {
+	body := []byte(`{"to":"dest@example.com","subject":"s","text":"hello"}`)
+	a := &App{
+		sendq: newSendQueue(),
+		log:   discardLogger(),
+		db:    openStepDB(t, dbStep{kind: "query", rows: &testRows{columns: []string{"mirror_account_id", "provider"}}}),
+	}
+	a.sendq.receipts["owner-1\x00shared-key"] = sendReceipt{
+		id: "already-submitted", reqHash: mutationRequestHash("POST", "/api/send", "", body),
+		outcome: sendSubmitted, expiresAt: time.Now().Add(sendReceiptTTL),
+	}
+	for _, tc := range []struct {
+		owner  string
+		status int
+	}{{"owner-1", http.StatusOK}, {"owner-2", http.StatusPreconditionFailed}} {
+		r := httptest.NewRequest("POST", "/api/send", bytes.NewReader(body))
+		r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, tc.owner))
+		r.Header.Set("Idempotency-Key", "shared-key")
+		w := httptest.NewRecorder()
+		a.handleSend(w, r)
+		if w.Code != tc.status {
+			t.Fatalf("owner %s: %d %s", tc.owner, w.Code, w.Body.String())
+		}
+		if tc.owner == "owner-2" && w.Header().Get("X-Idempotent-Replay") != "" {
+			t.Fatal("new owner replayed previous owner's receipt")
+		}
 	}
 }
