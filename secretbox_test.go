@@ -50,20 +50,14 @@ func TestSealBoundKeyFailuresAreDistinctAndRecoverable(t *testing.T) {
 	}
 }
 
-func TestOpenBoundStillReadsTheUnversionedFormat(t *testing.T) {
+func TestOpenBoundRefusesTheUnboundFormat(t *testing.T) {
 	cfg := &Config{SecretKey: "legacy-key"}
-	legacy, err := sealSecret(cfg, "written before row binding")
+	unbound, err := sealSecret(cfg, "a stored credential")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.HasPrefix(legacy, "v2:") {
-		t.Fatal("fixture is not the legacy format")
-	}
-	if got, err := openBound(cfg, "payload", "any-owner", "any-row", legacy); err != nil || got != "written before row binding" {
-		t.Fatalf("legacy read: %q %v", got, err)
-	}
-	if _, err := openBound(&Config{SecretKey: "other"}, "payload", "o", "r", legacy); !errors.Is(err, errSealedKeyUnavailable) {
-		t.Fatalf("legacy with a changed key: %v", err)
+	if got, err := openBound(cfg, "sent", "any-owner", "any-row", unbound); !errors.Is(err, errSealedInvalid) || got != "" {
+		t.Fatalf("unbound ciphertext opened: %q %v", got, err)
 	}
 }
 

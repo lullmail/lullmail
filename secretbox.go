@@ -145,7 +145,7 @@ func sealBound(cfg *Config, purpose, owner, row, plaintext string) (string, erro
 	return sealedV2Prefix + base64.StdEncoding.EncodeToString(out), nil
 }
 
-// openBound decrypts sealBound output, or the legacy unbound format. Errors
+// openBound decrypts sealBound output. Errors
 // satisfy errors.Is against errNoSecretKey, errSealedKeyUnavailable or
 // errSealedInvalid, so callers can tell "restore the key" from "damaged".
 func openBound(cfg *Config, purpose, owner, row, encoded string) (string, error) {
@@ -156,13 +156,9 @@ func openBound(cfg *Config, purpose, owner, row, encoded string) (string, error)
 		return "", errNoSecretKey
 	}
 	if !strings.HasPrefix(encoded, sealedV2Prefix) {
-		plain, err := openSecret(cfg, encoded)
-		if err != nil {
-			// The legacy format has no key id: a failed authentication is
-			// either a different key or damage, and cannot be told apart.
-			return "", fmt.Errorf("%w: %v", errSealedKeyUnavailable, err)
-		}
-		return plain, nil
+		// Only sealBound output is accepted. The unversioned format carries no
+		// binding, so a credential ciphertext copied into a row would open.
+		return "", fmt.Errorf("%w: not a bound ciphertext", errSealedInvalid)
 	}
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(encoded, sealedV2Prefix))
 	if err != nil {
