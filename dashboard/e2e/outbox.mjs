@@ -897,6 +897,59 @@ async function s6Cancel() {
   setUndoExtra(0);
 }
 
+// 7. A lost acknowledgment is resolved by its key, never reported as a plain failure.
+async function s7LostAck() {
+  scenario("S7", "lost acknowledgment: resolved by key lookup; an edited unconfirmed draft asks before a second copy");
+  await freshState();
+  const context = await newContext();
+  const page = await context.newPage();
+  const sends = trackSends(page);
+  await login(page, "Owner");
+  const toastText = () => page.locator(".toast").first().innerText().catch(() => "");
+
+  // The request reaches the server and commits; its answer never arrives.
+  const m = "S7-" + tag();
+  await page.route("**/api/send", async (route) => { await route.fetch(); await route.abort("failed"); });
+  await openCompose(page, { to: "s7@example.test", subject: m, body: "body " + m });
+  await sendButton(page).click();
+  const attempt = await poll("send failed at the network", () => sends[0]?.failed ? sends[0] : null, { timeout: 30_000 });
+  await page.unroute("**/api/send");
+  check("the row was committed although the answer was lost", jobCount(attempt.key) === 1);
+  const shown = await poll("resolved toast", async () => { const t = await toastText(); return /Sending in|undo window has ended|Message submitted/.test(t) ? t : null; }, { timeout: 20_000 }).catch(() => "");
+  check("the lost acknowledgment is shown as queued, not as a failure", !!shown, JSON.stringify(shown || await toastText()));
+  check("the composer retired the draft", !(await page.getByRole("dialog", { name: "Compose" }).isVisible()));
+  await poll("delivered", async () => (await smtpCount(m)) === 1, { timeout: 90_000 });
+  await observe("single delivery holds", 5000, async () => ((await smtpCount(m)) === 1 && jobCount(attempt.key) === 1 ? null : "duplicated"));
+  await shot(page, "lost-ack-resolved");
+
+  // Committed, but the lookup cannot see it either: the outcome is unconfirmed.
+  // Editing the draft then asks before a possible second copy goes out.
+  const e = "S7E-" + tag();
+  const n = sends.length;
+  await page.route("**/api/send", async (route) => { await route.fetch(); await route.abort("failed"); });
+  await page.route(/\/api\/outbox\?key=/, (route) => route.fulfill({ status: 404, contentType: "application/problem+json", body: JSON.stringify({ title: "Not Found" }) }));
+  await openCompose(page, { to: "s7e@example.test", subject: e, body: "body " + e });
+  await sendButton(page).click();
+  const first = await poll("second send failed at the network", () => sends[n]?.failed ? sends[n] : null, { timeout: 30_000 });
+  const unconfirmed = await poll("unconfirmed toast", async () => { const t = await toastText(); return /could not be confirmed/.test(t) ? t : null; }, { timeout: 20_000 }).catch(() => "");
+  check("an unconfirmable send says so and keeps the draft", !!unconfirmed && (await page.getByRole("dialog", { name: "Compose" }).isVisible()), JSON.stringify(unconfirmed));
+  await page.unroute("**/api/send");
+  await page.unroute(/\/api\/outbox\?key=/);
+  await page.getByPlaceholder("Write something worth reading.").fill("edited body " + e);
+  const dialogs = [];
+  page.once("dialog", (dialog) => { dialogs.push(dialog.message()); void dialog.dismiss(); });
+  await sendButton(page).click();
+  await poll("confirmation asked", () => dialogs.length > 0, { timeout: 20_000 });
+  check("editing an unconfirmed draft asks before a second copy", /may already have been sent/.test(dialogs[0] || ""), JSON.stringify(dialogs));
+  await observe("declining sends nothing", 3000, async () => (sends.length === n + 1 && jobCount(first.key) === 1 ? null : "sent anyway"));
+  check("declining keeps the draft", await page.getByRole("dialog", { name: "Compose" }).isVisible());
+  await poll("first copy delivered", async () => (await smtpCount(e)) === 1, { timeout: 90_000 });
+  check("exactly one copy after declining", (await smtpCount(e)) === 1);
+  await shot(page, "edited-unconfirmed-declined");
+  await context.close();
+  current.status = current.checks.every((c) => c.ok) ? "pass" : "fail";
+}
+
 // ---------------------------------------------------------------- main
 let exitCode = 1;
 try {
@@ -921,7 +974,7 @@ try {
   seedAccount("second@owner.local", "acct-b", "sender-b@example.test");
   // OUTBOX_ONLY=S3,S5 runs a subset while debugging; CI runs everything.
   const only = (process.env.OUTBOX_ONLY || "").split(",").map((v) => v.trim().toLowerCase()).filter(Boolean);
-  const all = [["s1", s1OwnerSwitch], ["s2", s2LogoutPending], ["s3", s3KillRecovery], ["s4", s4MultiTabOffline], ["s5", s5AmbiguousUi], ["s5b", s5bFailed], ["s5c", s5cFiling], ["s6", s6Cancel]];
+  const all = [["s1", s1OwnerSwitch], ["s2", s2LogoutPending], ["s3", s3KillRecovery], ["s4", s4MultiTabOffline], ["s5", s5AmbiguousUi], ["s5b", s5bFailed], ["s5c", s5cFiling], ["s6", s6Cancel], ["s7", s7LostAck]];
   for (const [id, run] of all) {
     if (only.length && !only.includes(id)) continue;
     try { await run(); }
