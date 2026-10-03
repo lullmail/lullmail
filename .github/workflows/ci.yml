@@ -148,6 +148,67 @@ jobs:
           path: ${{ runner.temp }}/lullmail-keybinds-browser
           if-no-files-found: ignore
 
+  # NEW, NOT YET RUN ON GITHUB ACTIONS (written beside the dashboard-selection job
+  # above; only exercised locally so far). Real-browser durable-outbox recovery:
+  # boots the built binary, a loopback SMTP/IMAP fault sink and a throwaway
+  # PostgreSQL schema, then drives Chromium through owner switch, sign-out,
+  # kill -9 recovery, multi-tab/offline, ambiguous/failed/unconfirmed-filing and
+  # cancel flows. Loopback fakes only; no real mailbox or provider is contacted.
+  # Not in `publish`'s needs: until it has a clean run here, it reports but does
+  # not gate releases.
+  dashboard-outbox:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: outboxe2e
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U test -d outboxe2e"
+          --health-interval 2s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: |
+            go.sum
+            mail-engine/go.sum
+            mcp/go.sum
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - name: Build the dashboard the Go binary embeds
+        working-directory: dashboard
+        run: npm ci && npm run build
+      - name: Install test Chromium and psql
+        working-directory: dashboard
+        run: |
+          npx playwright install --with-deps chromium
+          command -v psql || sudo apt-get install -y postgresql-client
+      - name: Durable-outbox browser recovery
+        working-directory: dashboard
+        env:
+          DATABASE_URL: postgres://test:test@localhost:5432/outboxe2e?sslmode=disable
+          PGPASSWORD: test
+          E2E_OUTPUT: ${{ runner.temp }}/lullmail-outbox-browser
+        run: |
+          mkdir -p "$E2E_OUTPUT"
+          npm run test:outbox 2>&1 | tee "$E2E_OUTPUT/outbox.log"
+      - name: Preserve outbox evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lullmail-outbox-browser
+          path: ${{ runner.temp }}/lullmail-outbox-browser
+          if-no-files-found: ignore
+
   publish:
     # Real-database integration and race checks gate publication too: a
     # green unit-only build must not be able to publish an image past a
