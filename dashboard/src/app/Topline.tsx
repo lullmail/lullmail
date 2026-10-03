@@ -46,18 +46,30 @@ function NavLink({ item, here }: { item: NavItem; here: string }) {
 
 /** The per-mailbox lens. One mailbox is the product's normal state — this
     only appears once a second mailbox exists, and "All" is always offered. */
-function AccountPicker() {
+export function AccountPicker() {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const list = accounts.value;
 
   useEffect(() => {
     if (!open) return;
+    ref.current?.querySelector<HTMLButtonElement>("[role='menuitem']")?.focus();
     const away = (ev: MouseEvent) => {
       if (!ref.current?.contains(ev.target as Node)) setOpen(false);
     };
     const t = setTimeout(() => document.addEventListener("click", away), 0);
-    return () => { clearTimeout(t); document.removeEventListener("click", away); };
+    // Same keyboard contract as the settings menu: focus lives in the menu,
+    // Escape closes just the menu, arrows move.
+    const key = (ev: KeyboardEvent) => {
+      const items = [...(ref.current?.querySelectorAll<HTMLButtonElement>("[role='menuitem']") || [])];
+      const at = items.indexOf(document.activeElement as HTMLButtonElement);
+      if (ev.key === "Escape") { ev.preventDefault(); setOpen(false); triggerRef.current?.focus(); }
+      else if (ev.key === "ArrowDown") { ev.preventDefault(); items[(at + 1) % items.length]?.focus(); }
+      else if (ev.key === "ArrowUp") { ev.preventDefault(); items[(at - 1 + items.length) % items.length]?.focus(); }
+    };
+    document.addEventListener("keydown", key);
+    return () => { clearTimeout(t); document.removeEventListener("click", away); document.removeEventListener("keydown", key); };
   }, [open]);
 
   // Hooks above must run unconditionally; hiding is a render concern.
@@ -69,7 +81,7 @@ function AccountPicker() {
 
   return (
     <div style={{ position: "relative" }} ref={ref}>
-      <button class="acct-toggle" type="button" aria-expanded={open} aria-label="Choose mailbox"
+      <button ref={triggerRef} class="acct-toggle" type="button" aria-expanded={open} aria-label="Choose mailbox"
         title={current ? current.address : "All mailboxes"}
         onClick={() => setOpen((v) => !v)}>
         {label}<Icon name="chevron" size={12} />
