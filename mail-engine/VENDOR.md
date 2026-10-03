@@ -7,6 +7,12 @@ with no Neutron checkout, so the copy has to be in-tree.
 
 Synced: 2026-10-02, from Neutron cab1aeb4 (PR #61 backflowed every vendored fix; copy is byte-identical to upstream mail/ apart from this file).
 
+**Pending backflow (landed here first, 2026-10-02, durable outbox):** `send.go`
+and `send_test.go` add `NotSubmittedError` / `IsNotSubmitted` so a caller can
+tell an SMTP failure that provably precedes acceptance from an unknown outcome.
+Until these two files are applied to Neutron's `mail/` module the byte-identical
+statement above does not hold; do not re-vendor over them.
+
 ## Rule
 
 Fix upstream first, then re-copy. Editing here directly is how, in August 2026,
