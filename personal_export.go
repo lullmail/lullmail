@@ -143,7 +143,18 @@ func (a *App) handlePersonalExport(w http.ResponseWriter, r *http.Request) {
 	}
 	notesJSON, _ := json.MarshalIndent(notes, "", "  ")
 	cardsJSON, _ := json.MarshalIndent(cards, "", "  ")
-	manifest, _ := json.MarshalIndent(map[string]any{"format": "lullmail-personal-export", "version": 1, "exported_at": time.Now().UTC(), "notes": len(notes), "board_cards": len(cards)}, "", "  ")
+	// Saved outbox compositions have no provider original, so they belong in
+	// the owner's export; agent tokens never receive them (outbox_export.go).
+	outbox := outboxExportSummary{Note: "not included: saved compositions are exported to interactive sessions only"}
+	if outboxExportRequestAllowed(r) {
+		var err error
+		if outbox, err = a.writeOutboxExport(r.Context(), zw, uid); err != nil {
+			a.log.Error("personal export outbox failed", "err", err)
+			writeProblem(w, http.StatusInternalServerError, "Export Failed", "saved sends could not be read")
+			return
+		}
+	}
+	manifest, _ := json.MarshalIndent(map[string]any{"format": "lullmail-personal-export", "version": 1, "exported_at": time.Now().UTC(), "notes": len(notes), "board_cards": len(cards), "outbox": outbox}, "", "  ")
 	files := map[string][]byte{"notes.md": []byte(notesMD.String()), "notes-layout.json": notesJSON, "board.md": []byte(cardsMD.String()), "board.json": cardsJSON, "export-manifest.json": manifest}
 	if err := writeZipEntries(zw, files); err != nil {
 		// Entry writes fail before any download header is sent, so this is
