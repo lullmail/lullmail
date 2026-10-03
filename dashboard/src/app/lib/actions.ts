@@ -8,7 +8,7 @@ import { api, ApiError, clearMemoryCache, QueuedOffline, StaleOwnerError } from 
 import { generationCurrent, offlineGeneration, offlineOwner, offlineStorageSuspended } from "./offline";
 import type { BoardCard, Bucket, Counts, ListBucket, Message, Row, StickyNote } from "./types";
 import {
-  accountCount, accountFilter, accountQS, accounts, closeReader, counts, list, type Mailbox, mailboxes, openCompose, reader, rememberListScroll, resetSelection, screeningEnabled, setAccountFilter, showError, showToast, undoSeconds,
+  accountCount, accountsFailed, accountFilter, accountQS, accounts, closeReader, counts, list, type Mailbox, mailboxes, openCompose, reader, rememberListScroll, resetSelection, screeningEnabled, setAccountFilter, showError, showToast, undoSeconds,
 } from "./store";
 
 /** The one place bucket names are written. Storage values are unchanged. */
@@ -68,14 +68,17 @@ export async function refreshAccounts() {
     const rows = await api<{ id: string; address: string }[]>("/accounts", { fresh: true });
     accounts.value = rows;
     accountCount.value = rows.length;
+    accountsFailed.value = false;
     // A lens pointing at a mailbox that no longer exists (disconnected while
     // lensed, or another owner's id in this browser) is a silent dead-end:
     // every list would fetch an empty account forever. Fall back to All.
     if (accountFilter.value && !rows.some((a) => a.id === accountFilter.value)) {
       setAccountFilter("");
     }
-  } catch {
-    /* the welcome gate keeps its last known count */
+  } catch (e) {
+    /* the welcome gate keeps its last known count; with none, release the
+       routes that were waiting for it (a stale owner's rejection is not a failure) */
+    if (accountCount.value === null && !(e instanceof StaleOwnerError)) accountsFailed.value = true;
   }
 }
 

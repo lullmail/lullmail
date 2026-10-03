@@ -6,6 +6,9 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
+// Ctrl on Linux/Windows, Cmd on macOS: Ctrl+click is a context-menu click and
+// Ctrl+A is "start of line" in a native text field there.
+const mod = process.platform === "darwin" ? "Meta" : "Control";
 const output = process.env.E2E_OUTPUT || "/tmp/lullmail-selection-browser";
 const server = await createServer({
   root, configFile: false, plugins: [preact(), {
@@ -17,6 +20,9 @@ const server = await createServer({
       });
     },
   }], server: { host: "127.0.0.1", port: 0 },
+  // Pre-bundle the fixture's deps before the first request; otherwise a cold
+  // cache makes Vite re-optimize and reload the page mid-test.
+  optimizeDeps: { entries: ["e2e/selection-fixture.tsx"] },
 });
 let browser, page;
 const requests = [];
@@ -47,7 +53,7 @@ try {
   const selected = page.getByTestId("selected");
   const clickSubject = (n, modifiers = []) => rows.nth(n).locator(".row-subject").click({ modifiers });
   await expect(rows).toHaveCount(8);
-  await clickSubject(1, ["Control"]);
+  await clickSubject(1, [mod]);
   await clickSubject(4, ["Shift"]);
   await expect(selected).toHaveText("thread-1,thread-2,thread-3,thread-4");
   await clickSubject(2, ["Shift"]);
@@ -63,18 +69,18 @@ try {
   await page.keyboard.press("Shift+ArrowDown");
   await expect(selected).toHaveText("thread-2,thread-3");
   await expect(rows.nth(3)).toBeFocused();
-  await page.keyboard.press("Control+a");
+  await page.keyboard.press(`${mod}+a`);
   await expect(page.locator(".msg-row.picked")).toHaveCount(8);
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("cursor")).toHaveText("3");
   await page.keyboard.press("Space");
   await expect(selected).toHaveText("thread-3");
   await page.getByRole("textbox", { name: "Typing field" }).fill("untouched input");
-  await page.keyboard.press("Control+a");
+  await page.keyboard.press(`${mod}+a`);
   await expect(selected).toHaveText("thread-3");
   await page.keyboard.type("x");
   await expect(page.getByRole("textbox", { name: "Typing field" })).toHaveValue("x");
-  await clickSubject(5, ["Control"]);
+  await clickSubject(5, [mod]);
   await page.evaluate(() => window.selectionFixture.reorder());
   await expect(page.getByTestId("cursor")).toHaveText("2");
   await expect(selected).toHaveText("thread-5,thread-3");
@@ -82,6 +88,8 @@ try {
   await expect(selected).toHaveText("thread-7,thread-6,thread-5");
   await rows.nth(0).hover();
   await rows.nth(0).getByRole("button", { name: "Set aside", exact: true }).click();
+  // The menu moves focus into itself in an effect; Escape only closes it once it holds focus.
+  await expect(page.getByRole("menu").getByRole("menuitem").first()).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("menu")).toHaveCount(0);
   await expect(selected).toHaveText("thread-7,thread-6,thread-5");

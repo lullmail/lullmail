@@ -5,7 +5,7 @@ import { signal } from "@preact/signals";
 import { path, routeFor, startRouter } from "./lib/router";
 import { installKeys } from "./lib/keys";
 import { refreshAccounts, refreshCounts, refreshFolders, refreshPrefs, reload } from "./lib/actions";
-import { accountCount, accountFilter, attentionTotal, compose, composeOpen, isDarkTheme, layout, palette, privateStateVersion, query, reader, resolveLayout, setSplitWidth, shortcuts, splitWidth, theme } from "./lib/store";
+import { accountCount, accountsFailed, accountFilter, attentionTotal, compose, composeOpen, isDarkTheme, layout, palette, privateStateVersion, query, reader, resolveLayout, setSplitWidth, shortcuts, splitWidth, theme } from "./lib/store";
 import { Topline } from "./Topline";
 import { Sidebar } from "./Sidebar";
 import { Thread } from "./reader/Thread";
@@ -54,13 +54,20 @@ function useWide(): boolean {
   return wide;
 }
 
-function CurrentView() {
+// Lazy views that the Welcome gate can replace. They must not start loading
+// until the mailbox count is known: a Suspense boundary whose pending child is
+// swapped for different, non-suspending content (Welcome) never resumes and
+// leaves the column empty.
+const WELCOME_GATED_LAZY = new Set(["board", "notes", "calendar", "people", "folder"]);
+
+export function CurrentView() {
   // A live search takes over the column from whatever route drew it, so there
   // is exactly one place results appear.
   const q = query.value.trim();
   if (q) return <SearchView q={q} />;
 
   const route = routeFor(path.value);
+  if (accountCount.value === null && !accountsFailed.value && WELCOME_GATED_LAZY.has(route.kind)) return <RouteSkeleton />;
   // Nothing connected yet: six empty buckets read as "no mail", which is the
   // wrong answer. Settings still opens so they can actually connect one.
   if (accountCount.value === 0 && route.kind !== "accounts" && route.kind !== "security" &&

@@ -203,6 +203,9 @@ export function toggleLayout() {
 
 /** null = not checked yet. 0 means show the setup screen, not six empty buckets. */
 export const accountCount = signal<number | null>(null);
+/** The mailbox list could not be fetched, so the count stays null. Gated
+    routes must stop waiting for it instead of showing a skeleton forever. */
+export const accountsFailed = signal(false);
 
 /* ---- the per-mailbox lens ----
    The unified view is the product; the lens is a scope, not a mode switch.
@@ -877,6 +880,7 @@ export function resetPrivateState(): void {
   snoozePickerRows.value = [];
   accounts.value = [];
   accountCount.value = null;
+  accountsFailed.value = false;
   accountFilter.value = "";
   counts.value = {};
   mailboxes.value = [];
