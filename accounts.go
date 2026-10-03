@@ -711,6 +711,15 @@ func (a *App) deleteAccount(w http.ResponseWriter, r *http.Request, id string) {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return
 	}
+	// Checked before the seal so a refusal does not cancel the send it is
+	// protecting; rechecked under the admission lock inside the transaction.
+	if active, _, err := accountOutboxRows(r.Context(), a.db, mirror); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	} else if active > 0 {
+		writeOutboxActive(w, active)
+		return
+	}
 	finishDelete, ok := a.beginAccountDeletion(r.Context(), mail.AccountID(mirror))
 	if !ok {
 		writeProblem(w, http.StatusServiceUnavailable, "Delete Busy",
@@ -750,7 +759,6 @@ func (a *App) deleteAccount(w http.ResponseWriter, r *http.Request, id string) {
 		{`DELETE FROM mail_mailboxes WHERE account_id = $1`, []any{mirror}},
 		{`DELETE FROM mail_sync_state WHERE account_id = $1`, []any{mirror}},
 		{`DELETE FROM mail_accounts WHERE id = $1`, []any{mirror}},
-		{`DELETE FROM email_accounts WHERE user_id = $1 AND id = $2`, []any{uid, id}},
 	}
 	for _, deletion := range deletes {
 		if _, err := tx.ExecContext(r.Context(), deletion.query, deletion.args...); err != nil {
@@ -758,12 +766,48 @@ func (a *App) deleteAccount(w http.ResponseWriter, r *http.Request, id string) {
 			return
 		}
 	}
+	// The account row cascades to its outbox rows. Outbox admission takes
+	// this lock, so no send can be queued for the account between this
+	// check and the commit; a send queued before it is counted here.
+	if _, err := tx.ExecContext(r.Context(), `SELECT pg_advisory_xact_lock($1)`, outboxLockKey); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Delete Failed", err.Error())
+		return
+	}
+	active, retained, err := accountOutboxRows(r.Context(), tx, mirror)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Delete Failed", err.Error())
+		return
+	}
+	if active > 0 {
+		writeOutboxActive(w, active)
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM email_accounts WHERE user_id = $1 AND id = $2`, uid, id); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Delete Failed", err.Error())
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Commit Failed", err.Error())
 		return
 	}
 	committed = true
-	writeJSON(w, map[string]any{"deleted": id})
+	writeJSON(w, map[string]any{"deleted": id, "outbox_deleted": retained})
+}
+
+// accountOutboxRows counts an account's outbox rows: active ones (pending or
+// submitting, which block deletion) and all of them (deleted with it).
+func accountOutboxRows(ctx context.Context, q outboxQuerier, mirror string) (active, total int, err error) {
+	err = q.QueryRowContext(ctx, `SELECT COUNT(*) FILTER (WHERE state IN ('pending','submitting')), COUNT(*) FROM outbox_jobs WHERE account_id=$1`, mirror).Scan(&active, &total)
+	return
+}
+
+func writeOutboxActive(w http.ResponseWriter, active int) {
+	noun := "sends are"
+	if active == 1 {
+		noun = "send is"
+	}
+	writeProblem(w, http.StatusConflict, "Sends In Progress",
+		fmt.Sprintf("%d %s still waiting or being submitted from this account; wait for them to finish (see Outbox) before disconnecting it", active, noun))
 }
 
 func (a *App) triggerSync(w http.ResponseWriter, r *http.Request, id string) {
