@@ -35,6 +35,22 @@ function AccountCard({ account, onChange }: { account: Account; onChange: () => 
   const [busy, setBusy] = useState<"sync" | "export" | "delete" | null>(null);
   const [exportProgress, setExportProgress] = useState("");
   const [confirming, setConfirming] = useState(false);
+  // This account's outbox entries, read when the confirmation opens: the
+  // deletion takes them with it, and refuses while any is still active.
+  const [outbox, setOutbox] = useState<{ active: number; retained: number } | null>(null);
+
+  const confirmDisconnect = async () => {
+    setConfirming(true);
+    setOutbox(null);
+    try {
+      const rows = await api<Array<{ account_id: string; status: string }>>("/outbox", { fresh: true });
+      const mine = rows.filter((r) => r.account_id === account.id);
+      const active = mine.filter((r) => r.status === "pending" || r.status === "submitting").length;
+      setOutbox({ active, retained: mine.length - active });
+    } catch {
+      setOutbox(null); // the server still refuses an active send and says so
+    }
+  };
 
   const sync = async () => {
     setBusy("sync");
@@ -192,19 +208,32 @@ function AccountCard({ account, onChange }: { account: Account; onChange: () => 
         {confirming ? (
           <>
             {/* Inline confirm: a native confirm() blocks the page and is unstyleable. */}
-            <button class="btn btn-danger btn-sm" type="button" disabled={!!busy} onClick={disconnect}>
+            <button class="btn btn-danger btn-sm" type="button" disabled={!!busy || (outbox?.active ?? 0) > 0} onClick={disconnect}>
               Delete credentials and local mail
             </button>
             <button class="btn btn-ghost btn-sm" type="button" disabled={!!busy} onClick={() => setConfirming(false)}>Cancel</button>
           </>
         ) : (
-          <button class="btn btn-ghost btn-sm" type="button" disabled={!!busy} onClick={() => setConfirming(true)}>Disconnect</button>
+          <button class="btn btn-ghost btn-sm" type="button" disabled={!!busy} onClick={confirmDisconnect}>Disconnect</button>
         )}
       </div>
       {confirming && (
         <p class="account-warning">
           This permanently removes the encrypted credential, mirrored messages, bodies, sync state,
           and filing state for this mailbox. It does not delete anything at your mail provider.
+        </p>
+      )}
+      {confirming && outbox && outbox.active > 0 && (
+        <p class="account-warning" role="alert">
+          {outbox.active === 1 ? "1 send from this account is" : outbox.active + " sends from this account are"} still
+          waiting or being submitted. Wait for {outbox.active === 1 ? "it" : "them"} to finish (see Outbox) before disconnecting.
+        </p>
+      )}
+      {confirming && outbox && outbox.active === 0 && outbox.retained > 0 && (
+        <p class="account-warning">
+          It also deletes {outbox.retained === 1 ? "1 Outbox entry" : outbox.retained + " Outbox entries"} from this account:
+          their recorded outcomes and any saved compositions or Sent copies, including unsent and
+          possibly-sent messages. Use Export personal data below first to keep them.
         </p>
       )}
     </div>
