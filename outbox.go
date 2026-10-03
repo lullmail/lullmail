@@ -514,6 +514,9 @@ func (a *App) attemptOutbox(ctx context.Context, job outboxAttempt, account, cip
 	work, stop := a.outboxWork(ctx)
 	defer stop()
 	a.deliverOutbox(work, job, account, ciphertext)
+	if work.Err() != nil {
+		return // past the drain grace: a pending filing is claimed by the next process
+	}
 	filing, err := a.claimSentCopy(work, job.ID, []string{})
 	if err == nil {
 		_ = a.fileSentCopy(work, filing)
