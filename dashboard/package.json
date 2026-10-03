@@ -27,7 +27,7 @@
     "@preact/preset-vite": "^2.9.4",
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^30.0.1",
-    "typescript": "^5.9.3",
+    "typescript": "^7.0.2",
     "vite": "^6.0.7",
     "vitest": "^4.1.11"
   }
