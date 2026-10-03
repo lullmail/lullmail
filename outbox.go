@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -63,11 +64,16 @@ const outboxMaxBytes int64 = 512 << 20
 const outboxOwnerMaxBytes int64 = 256 << 20
 const outboxLockKey int64 = 7812634095511117
 
+// outboxOwnerMaxJobs is one owner's share of the process-wide active-send
+// bound (sendMaxJobs), so a single owner can never fill it for everyone.
+const outboxOwnerMaxJobs = 4
+
 // outboxSettled selects rows with no submission or filing in flight. Only
 // these are ever expired; pending work is never silently dropped.
 const outboxSettled = `state IN ('submitted','failed','ambiguous','cancelled') AND filing_state NOT IN ('pending','submitting')`
 
 var errOutboxCapacity = errors.New("outbox capacity exhausted")
+var errOutboxOwnerCapacity = errors.New("owner's share of active sends exhausted")
 var errOutboxReceiptLimit = errors.New("outbox retained-receipt limit reached")
 
 // errOutboxFenced: a newer build has migrated this database. This build must
@@ -149,6 +155,11 @@ func (a *App) acceptOutbox(w http.ResponseWriter, r *http.Request, uid, account,
 		writeProblem(w, 429, "Outbox Full", "wait for pending sends to finish or remove saved recoverable compositions before adding more")
 		return
 	}
+	if errors.Is(err, errOutboxOwnerCapacity) {
+		w.Header().Set("Retry-After", "10")
+		writeProblem(w, 429, "Too Many Sends In Progress", fmt.Sprintf("you already have %d sends waiting or being submitted; the message was not queued, send it again once one of them finishes", outboxOwnerMaxJobs))
+		return
+	}
 	if errors.Is(err, errOutboxFenced) {
 		w.Header().Set("Retry-After", "5")
 		writeProblem(w, 503, "Server Updating", "this server version is being replaced; the message was not queued, retry with the same submission key")
@@ -213,7 +224,7 @@ func (a *App) saveOutbox(ctx context.Context, uid, account, key, hash, id, ciphe
 	if newest > outboxSupportedSchema() {
 		return result, false, errOutboxFenced
 	}
-	live, bytes, ownerBytes, receipts, err := readOutboxUsage(ctx, tx, uid)
+	live, ownerLive, bytes, ownerBytes, receipts, err := readOutboxUsage(ctx, tx, uid)
 	if err != nil {
 		return result, false, err
 	}
@@ -223,7 +234,7 @@ func (a *App) saveOutbox(ctx context.Context, uid, account, key, hash, id, ciphe
 		if _, err = tx.ExecContext(ctx, outboxPruneOwnerSQL, uid, int(outboxReceiptRetention.Seconds()), outboxPruneBatch); err != nil {
 			return result, false, err
 		}
-		if live, bytes, ownerBytes, receipts, err = readOutboxUsage(ctx, tx, uid); err != nil {
+		if live, ownerLive, bytes, ownerBytes, receipts, err = readOutboxUsage(ctx, tx, uid); err != nil {
 			return result, false, err
 		}
 		if receipts >= outboxOwnerReceiptLimit {
@@ -232,6 +243,9 @@ func (a *App) saveOutbox(ctx context.Context, uid, account, key, hash, id, ciphe
 	}
 	if live >= sendMaxJobs || size < 0 || size > outboxMaxBytes || bytes > outboxMaxBytes-size || ownerBytes > outboxOwnerMaxBytes-size {
 		return result, false, errOutboxCapacity
+	}
+	if ownerLive >= outboxOwnerMaxJobs {
+		return result, false, errOutboxOwnerCapacity
 	}
 	result = outboxRecord{ID: id, AccountID: account, State: "pending", UndoUntil: time.Now().UTC().Add(undoWindow)}
 	res, err := tx.ExecContext(ctx, `INSERT INTO outbox_jobs(id,user_id,account_id,submission_key,request_hash,state,payload_ciphertext,payload_bytes,undo_until)
@@ -261,14 +275,15 @@ type outboxQuerier interface {
 }
 
 // readOutboxUsage reads the admission counters. Live work and private bytes are
-// global (they bound the process); retained receipts and the per-owner byte
-// share are scoped to the submitting owner.
-func readOutboxUsage(ctx context.Context, q outboxQuerier, uid string) (live int, bytes, ownerBytes int64, receipts int, err error) {
+// global (they bound the process); the owner's live share, retained receipts
+// and the per-owner byte share are scoped to the submitting owner.
+func readOutboxUsage(ctx context.Context, q outboxQuerier, uid string) (live, ownerLive int, bytes, ownerBytes int64, receipts int, err error) {
 	err = q.QueryRowContext(ctx, `SELECT
  (SELECT COUNT(*) FROM outbox_jobs WHERE state IN ('pending','submitting')),
+ (SELECT COUNT(*) FROM outbox_jobs WHERE user_id=$1 AND state IN ('pending','submitting')),
  (SELECT COALESCE(SUM(payload_bytes),0) FROM outbox_jobs WHERE payload_bytes > 0),
  (SELECT COALESCE(SUM(payload_bytes),0) FROM outbox_jobs WHERE user_id=$1 AND payload_bytes > 0),
- (SELECT COUNT(*) FROM outbox_jobs WHERE user_id=$1)`, uid).Scan(&live, &bytes, &ownerBytes, &receipts)
+ (SELECT COUNT(*) FROM outbox_jobs WHERE user_id=$1)`, uid).Scan(&live, &ownerLive, &bytes, &ownerBytes, &receipts)
 	return
 }
 

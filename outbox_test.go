@@ -59,7 +59,10 @@ func outboxUsage(jobs, bytes, receipts int64) dbStep {
 	return outboxUsageFor(jobs, bytes, 0, receipts)
 }
 func outboxUsageFor(jobs, bytes, ownerBytes, receipts int64) dbStep {
-	return dbStep{kind: "query", rows: &testRows{columns: []string{"jobs", "bytes", "owner_bytes", "receipts"}, values: [][]driver.Value{{jobs, bytes, ownerBytes, receipts}}}}
+	return outboxUsageOwner(jobs, 0, bytes, ownerBytes, receipts)
+}
+func outboxUsageOwner(jobs, ownerJobs, bytes, ownerBytes, receipts int64) dbStep {
+	return dbStep{kind: "query", rows: &testRows{columns: []string{"jobs", "owner_jobs", "bytes", "owner_bytes", "receipts"}, values: [][]driver.Value{{jobs, ownerJobs, bytes, ownerBytes, receipts}}}}
 }
 func outboxStored(id, state, hash string) dbStep {
 	return dbStep{kind: "query", rows: &testRows{columns: []string{"id", "account_id", "state", "undo_until", "request_hash"}, values: [][]driver.Value{{id, "mirror-1", state, time.Now().Add(time.Second), hash}}}}
@@ -80,6 +83,8 @@ func TestOutboxDurableAdmissionAndKeyReplay(t *testing.T) {
 		{"replay", []dbStep{{kind: "exec"}, outboxStored("job", "submitted", "hash")}, nil, nil, true},
 		{"conflict", []dbStep{{kind: "exec"}, outboxStored("job", "pending", "different")}, nil, errOutboxKeyConflict, true},
 		{"full", []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsage(sendMaxJobs, 0, 0)}, nil, errOutboxCapacity, false},
+		{"owner share full", []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsageOwner(outboxOwnerMaxJobs, outboxOwnerMaxJobs, 0, 0, 0)}, nil, errOutboxOwnerCapacity, false},
+		{"owner share free", []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsageOwner(sendMaxJobs-1, outboxOwnerMaxJobs-1, 0, 0, 0), {kind: "exec"}}, nil, nil, false},
 		{"bytes", []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsage(0, outboxMaxBytes, 0)}, nil, errOutboxCapacity, false},
 		{"owner bytes", []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsageFor(0, 0, outboxOwnerMaxBytes, 0)}, nil, errOutboxCapacity, false},
 		{"receipts", []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsage(0, 0, outboxOwnerReceiptLimit), {kind: "exec"}, outboxUsage(0, 0, outboxOwnerReceiptLimit)}, nil, errOutboxReceiptLimit, false},

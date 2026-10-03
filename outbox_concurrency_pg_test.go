@@ -134,7 +134,7 @@ func TestConcurrentCancelRacesClaimAtUndoBoundary(t *testing.T) {
 func TestConcurrentWorkersNeverShareAClaim(t *testing.T) {
 	e := newOutboxEnv(t)
 	api := e.newProc()
-	const jobs = sendMaxJobs
+	const jobs = outboxOwnerMaxJobs
 	markers := make([]string, jobs)
 	for i := range markers {
 		markers[i] = marker(fmt.Sprintf("contend-%d", i))
