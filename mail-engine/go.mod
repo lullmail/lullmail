@@ -1,11 +1,11 @@
 module github.com/neutron-build/neutron/mail
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/jhillyerd/enmime/v2 v2.4.1
-	golang.org/x/text v0.40.0
+	golang.org/x/text v0.42.0
 	google.golang.org/api v0.291.0
 )
 
@@ -48,7 +48,7 @@ require (
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260724162435-b2f20204f0df // indirect
 	google.golang.org/grpc v1.82.1 // indirect
