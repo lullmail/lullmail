@@ -85,6 +85,7 @@ func TestOutboxDurableAdmissionAndKeyReplay(t *testing.T) {
 		{"full", []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsage(sendMaxJobs, 0, 0)}, nil, errOutboxCapacity, false},
 		{"owner share full", []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsageOwner(outboxOwnerMaxJobs, outboxOwnerMaxJobs, 0, 0, 0)}, nil, errOutboxOwnerCapacity, false},
 		{"owner share free", []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsageOwner(sendMaxJobs-1, outboxOwnerMaxJobs-1, 0, 0, 0), {kind: "exec"}}, nil, nil, false},
+		{"account gone", []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsage(0, 0, 0), {kind: "exec", zeroAffected: true}}, nil, errOutboxAccountGone, false},
 		{"bytes", []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsage(0, outboxMaxBytes, 0)}, nil, errOutboxCapacity, false},
 		{"owner bytes", []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsageFor(0, 0, outboxOwnerMaxBytes, 0)}, nil, errOutboxCapacity, false},
 		{"receipts", []dbStep{{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsage(0, 0, outboxOwnerReceiptLimit), {kind: "exec"}, outboxUsage(0, 0, outboxOwnerReceiptLimit)}, nil, errOutboxReceiptLimit, false},
