@@ -24,6 +24,15 @@ What is and is not proven is stated in [Validation](#validation) and
   a key before sending. MCP `send_mail` requires `submission_key` and carries it
   unchanged; `outbox_list` exposes outcomes (an intentional MCP contract
   change).
+- `GET /api/outbox?key=<submission key>` returns the owner's entry under that
+  key, in the same outcome shape as the list, or 404 when this server holds
+  none. When a send ends without an acknowledgment (network error, timeout,
+  5xx), the dashboard resolves it with this lookup, retrying with backoff: an
+  entry found is shown in its real state; if none is confirmed it says the
+  outcome is unknown, keeps the key on the draft, and an unchanged re-send
+  reuses the key. If the draft is edited first, the old key is looked up again
+  before a new key is minted, and an entry found (or a lookup that fails) asks
+  for explicit confirmation before a possible second copy is sent.
 - `pending` is the only state that is resumed automatically. A conditional
   database claim wins against cancellation; a job is claimed only after its undo
   deadline (five seconds). Cancellation and claim are decided by one predicate on
@@ -58,7 +67,12 @@ pending -> cancelled                      (only while undo_until > now())
 submitting -> failed                      (provider provably did not accept)
 submitting -> ambiguous                   (uncertain, panic, interrupted claim)
 ambiguous  -> submitted                   (late proof from the same attempt only)
+ambiguous  -> failed                      (late proof of refusal, same attempt only)
 ```
+
+The last two happen when the interrupted-claim sweep has already marked an
+attempt `ambiguous` and that same attempt then finishes: its outcome write
+accepts `submitting` or `ambiguous` under its own `attempt_id`.
 
 SMTP filing: `pending -> submitting -> filed | ambiguous`.
 
@@ -73,6 +87,7 @@ Admission is serialized by a PostgreSQL advisory lock and checks:
 | Bound | Value | Scope |
 | --- | --- | --- |
 | active sends (`pending` + `submitting`) | 8 | process-wide, shared by all owners |
+| active sends (`pending` + `submitting`) | 4 | per owner (429 "Too Many Sends In Progress") |
 | private-payload reservation | 512 MiB | process-wide |
 | private-payload reservation | 256 MiB | per owner |
 | retained receipts | 50,000 | per owner |
@@ -82,8 +97,15 @@ The reservation covers the encrypted composition and the MIME Sent copy
 the Sent copy is refused if it would exceed the reservation. Cancelled and failed
 sends release the Sent-copy part of their reservation immediately. The request
 keeps its 34 MiB wire bound, two decode slots, 25 MiB attachment total, 15 MiB
-per file and provider limits. The worker handles one submission at a time per
-server.
+per file and provider limits.
+
+The worker loop does only short database work each second (fence check,
+interrupted-claim sweep, retention, claims), so the sweep is never held up by
+a provider. Claimed attempts run beside it: at most 4 at once per process and
+at most one per account (the submission, then its Sent filing), so one
+account's sends go out in order and a stalled host delays only its own
+account. The claim stays one conditional statement, so several workers or
+processes still never share a submission.
 
 Two clocks run from a row's last state change once it has settled (no
 submission or filing in flight):
@@ -95,8 +117,9 @@ submission or filing in flight):
   is deleted. It outlives the payload on purpose: it is what turns a late retry
   of a lost acknowledgment into a replay instead of a second send.
 
-Pending work is never expired. Receipts and byte shares are per owner, so one
-owner reaching a cap cannot stop anyone else from sending. When an owner is at
+Pending work is never expired. Receipts, byte shares and the active-send share
+are per owner, so one owner reaching a cap cannot stop anyone else from
+sending. When an owner is at
 the receipt cap, receipts past 90 days are reclaimed inside the admission
 transaction before refusing, so a healthy account is never refused for rows
 retention has already retired; only more than 50,000 sends inside 90 days is
@@ -105,6 +128,13 @@ worker and is indexed.
 
 `Remove saved composition` clears the payload and Sent copy immediately and
 keeps the receipt.
+
+Disconnecting (deleting) an email account deletes its outbox rows with it.
+While any of them is `pending` or `submitting` the deletion is refused (409,
+naming the count) and nothing is cancelled; wait for those sends to settle.
+Otherwise the retained outcomes and saved compositions of that account are
+deleted, the response reports how many (`outbox_deleted`), and the dashboard
+asks for the personal export first.
 
 ## Encryption
 
@@ -146,7 +176,8 @@ archive; the manifest's `outbox.unreadable` names it and the reason.
 Agent tokens never receive compositions: the personal export omits them for an
 agent request (the manifest says `included: false`), and `/api/outbox/{id}`
 (decrypted composition, Sent copy, removal, cancellation) is session-only. The
-agent surface keeps only `GET /api/outbox`, the outcome list the MCP tool uses.
+agent surface keeps only `GET /api/outbox`, the outcome list the MCP tool uses,
+and its `?key=` lookup, which returns the same outcome fields for one entry.
 
 ## Single-writer fence
 
@@ -172,7 +203,15 @@ Lullmail on infra-home deploys with Teploy `ingress: host`
 (`/Users/tyler/Documents/infra/lullmail/teploy.yml`): the container publishes a
 fixed host port, so Teploy recreates it instead of running blue/green. It stops
 the old container (SIGTERM, `stop_timeout: 30`), then starts the new one on the
-same port. The new container's `serve` runs the engine and product migrations
+same port.
+
+On SIGTERM or SIGINT the server stops claiming outbox work at once and drains
+within a 25-second budget (`shutdownBudget` in `cmd_serve.go`), HTTP (at most
+10 s) and background work together, so it exits before the 30-second stop
+timeout ends in SIGKILL. Keep `stop_timeout` above 25 s. Outbox attempts that
+were already claimed are detached from the signal and may finish, Sent filing
+included, for up to 15 seconds (`outboxDrainGrace`); after that they are
+cancelled and end by the usual rules. The new container's `serve` runs the engine and product migrations
 before it listens. There is therefore no moment at which the pre-outbox build and
 this one both run, and the fence is not needed for the first deployment. Keep it
 that way:
@@ -180,8 +219,11 @@ that way:
 1. Before deploying, check nothing is mid-flight (it is harmless for `pending`
    rows to wait; they are sent after the restart):
    `SELECT count(*) FROM outbox_jobs WHERE state='submitting' OR filing_state='submitting';`
-   A graceful stop aborts an in-flight submission: if its body was already on
-   the wire the send becomes `ambiguous` (the user is told), otherwise `failed`.
+   A graceful stop lets an in-flight submission and its Sent filing finish for
+   up to 15 seconds. One still unfinished then is aborted: if its body was
+   already on the wire the send becomes `ambiguous` (the user is told),
+   otherwise `failed`. One the process cannot record before it exits stays
+   `submitting` and the next process marks it `ambiguous` after two minutes.
 2. Deploy the new image once. Do not run a second copy of any build alongside
    it, and do not put a proxy in front that can route to two versions. If you
    ever move to Caddy blue/green, the new build must pass its health gate only
@@ -235,7 +277,11 @@ this code resending after an uncertain outcome.
    retried by the caller.** Each request gets a fresh random key. The dashboard
    and MCP always send keys; only third-party HTTP clients are exposed.
    Requiring the header on `/send` would close this at the cost of breaking such
-   clients; that is a product decision, not made here.
+   clients; that is a product decision, not made here. A dashboard draft edited
+   after a lost acknowledgment is a new submission, but the old key is looked
+   up first and a possible earlier copy needs explicit confirmation (see
+   Contract). The inline reply on Today does the same, for as long as it
+   stays open.
 3. **A pre-outbox build writing against this database** (rollback, or a second
    container): see Deployment. Not fenceable from here.
 4. **A retry after the receipt expired**, 90 days after the original settled, or
@@ -271,11 +317,17 @@ All of these run against PostgreSQL 17 and real sockets, not scripted drivers:
 - `outbox_faults_pg_test.go`: kill or fail at every boundary (before and after
   the insert commit, lost commit acknowledgment, pool exhaustion, after claim,
   every SMTP step, after 250 before the status write, after the status write,
-  every IMAP APPEND step, graceful shutdown), then restart and recover.
+  every IMAP APPEND step, graceful shutdown inside and past the drain grace),
+  then restart and recover.
 - `outbox_concurrency_pg_test.go`: same-key submit, cancel against claim at the
   undo boundary, competing workers, wrong-attempt and late-success transitions,
   discard against filing, account deletion and logout against admission,
   submission and filing.
+- `outbox_limits_pg_test.go`: the production worker loop (a stalled account
+  does not delay another account or the sweep; one submission per account,
+  in order; at most 4 at once), its graceful drain (finishes within the grace,
+  ambiguous past it, nothing claimed after the stop), the `?key=` lookup
+  (owner scope, 404, no composition fields) and the account-deletion guard.
 - `outbox_chaos_pg_test.go`: seeded random walks over the same fault space
   (`LULL_CHAOS_SEEDS`, `LULL_CHAOS_ROUNDS`).
 - `outbox_migration_pg_test.go`: 7 to 8, idempotent rerun, checksum refusal,
