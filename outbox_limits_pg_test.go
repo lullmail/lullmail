@@ -1,7 +1,8 @@
 package main
 
-// The concurrent outbox worker, its graceful drain and the submission-key
-// lookup, against real PostgreSQL and the loopback provider fakes.
+// Fair admission, a non-blocking worker, graceful drain, the submission-key
+// lookup and the account-deletion guard, against real PostgreSQL and the
+// loopback provider fakes.
 
 import (
 	"bytes"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neutron-build/neutron/mail"
 	"lullmail/internal/faketransport"
 )
 
@@ -333,4 +335,70 @@ func TestOutboxLookupBySubmissionKey(t *testing.T) {
 	if !agentAllowedPath("/outbox") || agentAllowedPath("/outbox/"+id) {
 		t.Fatal("agent scope of the outbox changed")
 	}
+}
+
+func TestAccountDeletionGuardsOutbox(t *testing.T) {
+	t.Run("refused while a send is waiting", func(t *testing.T) {
+		e := newOutboxEnv(t)
+		pr := e.newProc()
+		m := marker("guard-pending")
+		id := mustSend(t, pr, m, m)
+		mustSend(t, pr, m+"-2", m+"-2")
+		r := httptest.NewRequest(http.MethodDelete, "/api/accounts/"+e.publicID, nil)
+		r = r.WithContext(contextWithOwner(r.Context(), e.p.uid))
+		w := httptest.NewRecorder()
+		pr.app.deleteAccount(w, r, e.publicID)
+		if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "2 sends are still waiting") {
+			t.Fatalf("delete=%d %s", w.Code, w.Body.String())
+		}
+		if v := e.job(id); v.State != "pending" {
+			t.Fatalf("%s", fmtState(v))
+		}
+		// The refusal did not seal the account: its send still goes out.
+		e.makeDue()
+		pr.pass()
+		if v := e.job(id); v.State != "submitted" || e.delivered(m) != 1 {
+			t.Fatalf("%s delivered=%d", fmtState(v), e.delivered(m))
+		}
+	})
+	t.Run("reports retained outcomes it deletes", func(t *testing.T) {
+		e := newOutboxEnv(t)
+		pr := e.newProc()
+		for _, key := range []string{"guard-a", "guard-b", "guard-c"} {
+			mustSend(t, pr, key, key)
+		}
+		if _, err := e.p.db.Exec(`UPDATE outbox_jobs SET state=CASE submission_key WHEN 'guard-a' THEN 'failed' WHEN 'guard-b' THEN 'ambiguous' ELSE 'cancelled' END`); err != nil {
+			t.Fatal(err)
+		}
+		r := httptest.NewRequest(http.MethodDelete, "/api/accounts/"+e.publicID, nil)
+		r = r.WithContext(contextWithOwner(r.Context(), e.p.uid))
+		w := httptest.NewRecorder()
+		pr.app.deleteAccount(w, r, e.publicID)
+		var body struct {
+			Deleted string `json:"deleted"`
+			Outbox  int    `json:"outbox_deleted"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &body)
+		if w.Code != 200 || body.Outbox != 3 || e.rows("true") != 0 {
+			t.Fatalf("delete=%d %s rows=%d", w.Code, w.Body.String(), e.rows("true"))
+		}
+	})
+	t.Run("a send to a vanished account is not retryable", func(t *testing.T) {
+		e := newOutboxEnv(t)
+		pr := e.newProc()
+		// The account disappears between validation and the insert.
+		out := &mail.Outgoing{From: mail.Address{Email: "sender@example.test"}, To: []mail.Address{{Email: "friend@example.test"}}, Subject: "x", Text: "x"}
+		raw := []byte(`{"to":"friend@example.test","subject":"x","text":"x"}`)
+		r := httptest.NewRequest(http.MethodPost, "/api/send", bytes.NewReader(raw))
+		r = r.WithContext(contextWithOwner(r.Context(), e.p.uid))
+		r.Header.Set("Idempotency-Key", "gone-key")
+		w := httptest.NewRecorder()
+		pr.app.acceptOutbox(w, r, e.p.uid, "no-such-account", "", out, raw)
+		if w.Code != 404 || strings.Contains(w.Body.String(), "retry with the same submission key") || !strings.Contains(w.Body.String(), "not queued") {
+			t.Fatalf("answer=%d %s", w.Code, w.Body.String())
+		}
+		if e.rows("true") != 0 {
+			t.Fatal("a row was stored for a vanished account")
+		}
+	})
 }

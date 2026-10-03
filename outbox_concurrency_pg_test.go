@@ -276,12 +276,31 @@ func TestTeardownRacesAdmissionSubmissionAndFiling(t *testing.T) {
 			}(i)
 		}
 		time.Sleep(15 * time.Millisecond)
-		if code := pr.deleteAccount(); code != 200 {
+		code := pr.deleteAccount()
+		wg.Wait()
+		// A deletion that raced admission either refused because a send was
+		// waiting (the account and its sends stay), or removed the account
+		// with nothing waiting; it never takes a waiting send with it, and a
+		// send that raced it is refused rather than orphaned.
+		var accounts int
+		e.p.db.QueryRow(`SELECT count(*) FROM email_accounts`).Scan(&accounts)
+		switch code {
+		case http.StatusConflict:
+			if accounts != 1 || e.rows("state='pending'") == 0 {
+				t.Fatalf("refused deletion: accounts=%d pending=%d", accounts, e.rows("state='pending'"))
+			}
+			// Cancel what is waiting so the rest of the case checks the
+			// deleted-account path.
+			if _, err := e.p.db.Exec(`UPDATE outbox_jobs SET state='cancelled' WHERE state='pending'`); err != nil {
+				t.Fatal(err)
+			}
+			if code := pr.deleteAccount(); code != 200 {
+				t.Fatalf("deleteAccount after cancelling=%d", code)
+			}
+		case http.StatusOK:
+		default:
 			t.Fatalf("deleteAccount=%d", code)
 		}
-		wg.Wait()
-		// Every send that raced the deletion either was refused or died with
-		// the account; none is left behind, none reaches the provider later.
 		if n := e.rows("true"); n != 0 {
 			t.Fatalf("%d outbox rows outlived their account (accepted=%d refused=%d)", n, accepted.Load(), refused.Load())
 		}
@@ -296,7 +315,7 @@ func TestTeardownRacesAdmissionSubmissionAndFiling(t *testing.T) {
 		e := newOutboxEnv(t)
 		pr := e.newProc()
 		m := marker("teardown-submission")
-		mustSend(t, pr, m, m)
+		id := mustSend(t, pr, m, m)
 		e.makeDue()
 		inFlight := make(chan struct{})
 		var once sync.Once
@@ -310,22 +329,27 @@ func TestTeardownRacesAdmissionSubmissionAndFiling(t *testing.T) {
 		done := make(chan struct{})
 		go func() { pr.pass(); close(done) }()
 		<-inFlight
+		// A send in flight refuses the deletion at once, without cancelling
+		// the submission it protects.
 		deleted := make(chan int, 1)
 		go func() { deleted <- pr.deleteAccount() }()
 		select {
 		case code := <-deleted:
-			if code != 200 {
-				t.Fatalf("deleteAccount=%d", code)
+			if code != http.StatusConflict {
+				t.Fatalf("deleteAccount during a submission=%d", code)
 			}
 		case <-time.After(20 * time.Second):
 			t.Fatal("account deletion hung behind an in-flight send")
 		}
 		<-done
+		if v := e.job(id); v.State != "submitted" || e.delivered(m) != 1 {
+			t.Fatalf("the refused deletion disturbed the send: %s delivered=%d", fmtState(v), e.delivered(m))
+		}
+		if code := pr.deleteAccount(); code != 200 {
+			t.Fatalf("deleteAccount after the send settled=%d", code)
+		}
 		if n := e.rows("true"); n != 0 {
 			t.Fatalf("rows=%d", n)
-		}
-		if e.delivered(m) > 1 {
-			t.Fatalf("delivered %d", e.delivered(m))
 		}
 		// Nothing further may ever be sent for the deleted account.
 		before := e.smtp.Connections()

@@ -368,6 +368,7 @@ func TestAccountResolverNestedLeaseRemainsOwnedByRequest(t *testing.T) {
 func TestOwnerDeletionWaitsForConcurrentAccountDeletion(t *testing.T) {
 	app := &App{db: openStepDB(t,
 		dbStep{kind: "query", rows: &testRows{columns: []string{"mirror_account_id"}, values: [][]driver.Value{{"acct"}}}},
+		dbStep{kind: "query", rows: &testRows{columns: []string{"active", "total"}, values: [][]driver.Value{{int64(0), int64(0)}}}},
 		dbStep{kind: "query", rows: &testRows{columns: []string{"mirror_account_id"}, values: [][]driver.Value{{"acct"}}}},
 	)}
 	workCtx, release, ok := app.beginAccountWork("acct")
