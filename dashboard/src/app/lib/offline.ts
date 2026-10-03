@@ -374,7 +374,14 @@ export async function prepareOfflineOwner(identity: OfflineOwnerIdentity, captur
     });
     if (version !== transitionVersion) throw new OfflineOwnerChangedError("A newer offline storage transition already started");
     if (!admitted || admitted.owner !== meta.owner || admitted.generation !== meta.generation) {
-      draftRevisions.clear();
+      // The first admission of a page load must keep the revisions that this
+      // page's own draft hydration just read for the same owner: hydration
+      // starts from the persisted namespace, usually before auth confirms it.
+      // Clearing them left every restored draft with no expected revision,
+      // so its next save (including prepareDraftSend before a retry) was
+      // refused as "changed in another tab". Other owners' entries still go.
+      if (admitted) draftRevisions.clear();
+      else for (const key of [...draftRevisions.keys()]) if (!key.startsWith(meta.owner + "\n")) draftRevisions.delete(key);
       if (admitted) resetPrivateState();
     }
     publishMeta(meta, identity.email);

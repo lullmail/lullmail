@@ -3,7 +3,7 @@ import "fake-indexeddb/auto";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as first from "./offline";
 import { authed, authStatus, refreshAuth, StaleOwnerError } from "./api";
-import { draftStack, openCompose, prepareDraftSend, resetPrivateState } from "./store";
+import { draftsUnsaved, draftStack, openCompose, prepareDraftSend, resetPrivateState, toast } from "./store";
 
 const identity = { installation_id: "inst", user_id: "a", email: "a@example.test" };
 const other = { installation_id: "inst", user_id: "b", email: "b@example.test" };
@@ -370,6 +370,19 @@ describe("independent tab storage contexts", () => {
     expect(await first.cachedResponse("/threads/t?account=mirror-a")).toBeUndefined();
     expect(await first.cachedResponse("/threads/t?account=mirror-b")).toBe("other mailbox");
     expect(await first.saveDraftFields("kept", { body: "still live" }, gen)).toBe(true);
+  });
+
+  it("explains a refused send when another tab already sent the draft, without claiming drafts are unsaved", async () => {
+    openCompose({ to: "x@example.test", body: "private" });
+    const id = draftStack.value[0].id;
+    expect(await prepareDraftSend(id)).toBeTruthy();
+    await second.loadDrafts();
+    await second.deleteDraft(id);
+    draftsUnsaved.value = false;
+    expect(await prepareDraftSend(id)).toBeNull();
+    expect(toast.value?.tone).toBe("error");
+    expect(toast.value?.message).toMatch(/sent or discarded in another tab.*Nothing was sent from this tab/);
+    expect(draftsUnsaved.value).toBe(false);
   });
 
   it("never starts send when another tab retired the draft or metadata refused its save", async () => {
