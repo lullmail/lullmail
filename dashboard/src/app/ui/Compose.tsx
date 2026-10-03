@@ -1,4 +1,4 @@
-import { useRef, useState } from "preact/hooks";
+import { useLayoutEffect, useRef, useState } from "preact/hooks";
 import { accounts, attachmentBytes, beginDraftAttachmentRead, finishDraftAttachmentRead, reserveDraftAttachment, closeCompose, compose, cycleDraft, draftIndex, draftsUnsaved, draftStack, newDraft, pendingDraftReads, prepareDraftSend, retireDraft, sendingDrafts, showError, showToast, undoSeconds, updateDraft, updateDraftById, type ComposeState } from "../lib/store";
 import { sendMail, type SendAttachment } from "../lib/actions";
 import { deleteDraft, generationCurrent, offlineGeneration, offlineOwner, offlineStorageSuspended } from "../lib/offline";
@@ -57,6 +57,7 @@ function DraftForm({ seed }: { seed: ComposeState }) {
   const current = () => !offlineStorageSuspended() && generationCurrent(generation) && offlineOwner() === owner;
   const [accountId, setAccountId] = useState(seed.accountId ?? "");
   const attachments = seed.attachments || [];
+  const toRef = useRef<HTMLInputElement>(null);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   // Retirement fence: once a draft is sent or discarded, the unmount
@@ -67,6 +68,10 @@ function DraftForm({ seed }: { seed: ComposeState }) {
   // the keyboard shortcut, which funnel through one send() (audit 4 F03).
   const sending = useRef(false);
   const fileBytes = attachments.reduce((n, a) => n + attachmentBytes(a), 0);
+
+  // The autofocus attribute is honoured once per page load; a draft opened
+  // later (reply, stacked draft, reopened ring) needs an explicit focus.
+  useLayoutEffect(() => { (seed.to ? (seed.htmlMode ? null : bodyRef.current) : toRef.current)?.focus(); }, []);
 
   // Pending file reads for THIS draft (audit 5 DRAFT-02): a read that
   // started while the composer was idle used to complete after send or a
@@ -189,7 +194,8 @@ function DraftForm({ seed }: { seed: ComposeState }) {
           >Cc/Bcc</button>
         </div>
         <input
-          class="compose-to" type="text" placeholder="To — comma-separated" autocomplete="off" autofocus={!to}
+          ref={toRef}
+          class="compose-to" type="text" placeholder="To — comma-separated" autocomplete="off"
           value={to} onInput={(e) => { const v = (e.target as HTMLInputElement).value; setTo(v); updateDraft({ to: v }); }}
         />
         {showCc && (
@@ -263,7 +269,6 @@ function DraftForm({ seed }: { seed: ComposeState }) {
             ref={bodyRef}
             class={"compose-body" + (htmlMode ? " html-source" : "")}
             placeholder={htmlMode ? "Write or paste HTML — inline styles travel best in email." : "Write something worth reading."}
-            autofocus={!!to && !htmlMode}
             spellcheck={!htmlMode}
             value={body}
             onInput={(e) => { const v = (e.target as HTMLTextAreaElement).value; setBody(v); updateDraft({ body: v }); }}

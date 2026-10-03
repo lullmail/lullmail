@@ -333,3 +333,24 @@ describe("attachment read admission and release", () => {
     expect(pendingDraftReads.value.size).toBe(0);
   });
 });
+
+describe("composer focus", () => {
+  // The autofocus attribute is honoured once per page load, so a draft opened
+  // later has to take focus explicitly.
+  it("focuses To for a blank draft and the body for a draft that has a recipient, every time", async () => {
+    document.body.append(host);
+    try {
+      openCompose();
+      render(<Compose />, host);
+      await settle();
+      expect(document.activeElement).toBe(host.querySelector(".compose-to"));
+      await act(async () => { openCompose({ to: "person@example.test", subject: "Re: hello" }); await wait(); });
+      expect(document.activeElement).toBe(host.querySelector(".compose-body"));
+      await act(async () => { openCompose({ to: "second@example.test" }); await wait(); });
+      expect(document.activeElement).toBe(host.querySelector(".compose-body"));
+    } finally {
+      await act(async () => { render(null, host); });
+      host.remove();
+    }
+  });
+});

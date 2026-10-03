@@ -1,7 +1,7 @@
 // Browse and jump. Deliberately not a second mail-search surface: typing a
 // query here offers to run it in the list column, so results always land in
 // the same place instead of two rival result views.
-import { useEffect, useMemo, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api } from "../lib/api";
 import { accountQS, layout, palette, searchMail, toggleLayout } from "../lib/store";
 import { openThread } from "../lib/actions";
@@ -46,8 +46,13 @@ export function Palette() {
   const [folderRows, setFolderRows] = useState<Row[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [cursor, setCursor] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const close = () => { palette.value = false; };
+
+  // The autofocus attribute is honoured once per page load; every later
+  // opening needs an explicit focus or typing goes nowhere.
+  useLayoutEffect(() => { inputRef.current?.focus(); }, []);
 
   useEffect(() => {
     const error = (e: unknown) => setLoadError(e instanceof Error ? e.message : "Some palette results did not load.");
@@ -182,7 +187,8 @@ export function Palette() {
         <div class="palette-input-row">
           <Icon name="search" size={16} />
           <input
-            class="palette-input" autofocus placeholder={folder ? "Filter " + folder + "…" : "Search the mail, or jump anywhere…"}
+            ref={inputRef}
+            class="palette-input" placeholder={folder ? "Filter " + folder + "…" : "Search the mail, or jump anywhere…"}
             value={q} onInput={(e) => setQ((e.target as HTMLInputElement).value)} onKeyDown={onKey}
             role="combobox" aria-expanded="true" aria-controls="palette-results" aria-activedescendant={flat[cursor] ? "palette-option-" + cursor : undefined}
           />
