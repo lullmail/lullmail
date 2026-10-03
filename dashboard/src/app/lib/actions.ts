@@ -469,7 +469,7 @@ export interface SendInput {
 const sendFlights = new Map<string, { body: string; result: Promise<boolean> }>();
 
 /** Callers retain the key for one unchanged submission. This is only the
- * server's bounded in-process retry protection, NOT a durable outbox. */
+ * server's immutable durable submission identity. */
 export function sendMail(input: SendInput, idempotencyKey: string): Promise<boolean> {
   const snapshot: SendInput = { ...input, attachments: input.attachments?.map((a) => ({ ...a })) };
   const scope = offlineOwner() + "\n" + offlineGeneration() + "\n" + idempotencyKey;
@@ -486,7 +486,7 @@ async function submitMail(input: SendInput, idempotencyKey: string): Promise<boo
   const owner = offlineOwner(), gen = offlineGeneration();
   const current = () => !offlineStorageSuspended() && offlineOwner() === owner && generationCurrent(gen);
   try {
-    const res = await api<{ queued: string; undo_seconds: number; status?: "submitted" }>("/send", {
+    const res = await api<{ queued: string; undo_seconds: number; status?: "pending" | "submitting" | "submitted" | "failed" | "ambiguous" | "cancelled"; durable?: boolean }>("/send", {
       idempotencyKey,
       body: {
         to: input.to,
@@ -505,6 +505,10 @@ async function submitMail(input: SendInput, idempotencyKey: string): Promise<boo
       },
     });
     if (!current()) return false;
+    if (res.status === "ambiguous" || res.status === "failed" || res.status === "cancelled") {
+      showError(res.status === "ambiguous" ? "This send may already have reached the recipient. Check Outbox and Sent before sending again." : "This submission was not sent. Its saved copy is in Outbox; this draft has been kept.");
+      return false;
+    }
     const window = Math.max(0, res.undo_seconds ?? 5);
     if (window === 0) {
       showToast(res.status === "submitted" ? "Message submitted" : "Send already queued — the undo window has ended");

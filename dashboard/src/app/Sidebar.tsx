@@ -61,6 +61,7 @@ export function Sidebar() {
     <aside class="sidebar">
       <nav>
         <div class="side-label">Mailbox</div>
+        <Item href="/outbox" nav="outbox" label="Outbox" here={here} />
         <Item href="/today" nav="today" label="Today" here={here} />
         {folders.map((f) => (
           <Item

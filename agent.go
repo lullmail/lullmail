@@ -49,6 +49,7 @@ var agentAllowed = map[string]bool{
 	"/threads/":        true,
 	"/messages/":       true,
 	"/send":            true,
+	"/outbox":          true,
 	"/outbox/":         true,
 	"/classify":        true,
 	"/personal/export": true,

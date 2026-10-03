@@ -188,6 +188,7 @@ func connectApp(cfg *Config) *App {
 // OPS-04).
 func (a *App) startBackground(ctx context.Context) {
 	a.startBackgroundTasks(ctx)
+	a.startOutboxWorker()
 	// A crashed export build can leave its temp archive behind; the
 	// handler removes its own file on every return path, so anything
 	// matching the pattern before the server listens is garbage. Run
@@ -419,6 +420,9 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	api.Handle("GET /messages/{message}/eml", a.accountWorkLifecycle(http.HandlerFunc(a.handleMessageEML)))
 	api.HandleFunc("POST /send", withBodyDeadline(sendBodyReadBudget, a.handleSend))
 	api.HandleFunc("DELETE /outbox/{id}", a.handleUndoSend)
+	api.HandleFunc("GET /outbox", a.handleOutbox)
+	api.HandleFunc("GET /outbox/{id}", a.handleOutboxDetail)
+	api.HandleFunc("DELETE /outbox/{id}/payload", a.handleOutboxDiscard)
 	api.HandleFunc("POST /classify", func(w http.ResponseWriter, r *http.Request) {
 		uid, err := a.userID(r.Context())
 		if err != nil {

@@ -164,3 +164,28 @@ func TestOriginPolicyRejectsRemoteHTTP(t *testing.T) {
 		t.Error("scheme-downgrade redirect accepted")
 	}
 }
+
+func TestSendSubmissionKeySurvivesRetries(t *testing.T) {
+	var keys []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		keys = append(keys, r.Header.Get("Idempotency-Key"))
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"queued":"one","durable":true,"status":"pending"}`))
+	}))
+	defer server.Close()
+	c, err := newClient(server.URL, "lull_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := c.doWithKey(context.Background(), "POST", "/send", map[string]string{"text": "synthetic"}, nil, "same-composition"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(keys) != 2 || keys[0] != "same-composition" || keys[1] != keys[0] {
+		t.Fatalf("retry identities=%v", keys)
+	}
+	if _, err := c.doWithKey(context.Background(), "POST", "/send", nil, nil, "bad\r\nkey"); err == nil {
+		t.Fatal("header injection accepted")
+	}
+}

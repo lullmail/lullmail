@@ -29,6 +29,7 @@ import { startLive, stopLive } from "./lib/live";
 // The mailbox loop stays in the first bundle. Larger secondary workspaces and
 // settings load only when opened, keeping the gate and Inbox quick on modest
 // phones without changing the app's one-screen-at-a-time character.
+const OutboxView = lazy(() => import("./views/OutboxView").then((m) => ({ default: m.OutboxView })));
 const BoardView = lazy(() => import("./views/BoardView").then((m) => ({ default: m.BoardView })));
 const NotesView = lazy(() => import("./views/NotesView").then((m) => ({ default: m.NotesView })));
 const CalendarView = lazy(() => import("./views/CalendarView").then((m) => ({ default: m.CalendarView })));
@@ -73,6 +74,7 @@ export function CurrentView() {
   if (accountCount.value === 0 && route.kind !== "accounts" && route.kind !== "security" &&
       route.kind !== "appearance" && route.kind !== "settings-mail" && route.kind !== "settings-home") return <Welcome />;
   switch (route.kind) {
+    case "outbox": return <OutboxView />;
     case "today": return <TodayView />;
     case "board": return <BoardView />;
     case "notes": return <NotesView />;

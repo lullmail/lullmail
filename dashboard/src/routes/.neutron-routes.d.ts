@@ -6,6 +6,7 @@ declare module "@neutron-build/core" {
     | "/board"
     | "/calendar"
     | "/notes"
+    | "/outbox"
     | "/people"
     | "/reading"
     | "/receipts"

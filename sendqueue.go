@@ -251,16 +251,10 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
 			return
 		}
-		idempotencyKey = uid + "\x00" + idempotencyKey
-		a.sendq.mu.Lock()
-		replay := a.sendq.sendReplay(idempotencyKey, sendRequestHash(r, rawBody))
-		a.sendq.mu.Unlock()
-		if replay != nil {
-			replay(w)
+		if a.replayOutbox(w, r, uid, idempotencyKey, sendRequestHash(r, rawBody)) {
 			return
 		}
-		// This is only a fast path. enqueue checks the key again under
-		// the SAME lock as admission and publication, after validation.
+
 	}
 	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
@@ -383,7 +377,7 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, http.StatusNotFound, "Parent Not Found", "reply_to_message_id does not resolve")
 			return
 		}
-		deliver, from, ok := a.deliveryFor(r.Context(), mail.AccountID(parentAcct), req.ReplyToID)
+		_, from, ok := a.deliveryFor(r.Context(), mail.AccountID(parentAcct), req.ReplyToID)
 		if !ok {
 			writeProblem(w, http.StatusPreconditionFailed, "No Send Credential", "cannot send for this account")
 			return
@@ -399,11 +393,11 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(req.Subject) != "" {
 			outgoing.Subject = req.Subject
 		}
-		a.enqueue(w, deliver, outgoing, idempotencyKey, sendRequestHash(r, rawBody))
+		a.acceptOutbox(w, r, uid, parentAcct, req.ReplyToID, outgoing, rawBody)
 		return
 	}
 
-	deliver, from, ok := a.deliveryFor(r.Context(), mail.AccountID(mirror), "")
+	_, from, ok := a.deliveryFor(r.Context(), mail.AccountID(mirror), "")
 	if !ok {
 		writeProblem(w, http.StatusPreconditionFailed, "No Send Credential", "cannot send for this account")
 		return
@@ -418,7 +412,7 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		HTML:        req.HTML,
 		Attachments: attachments,
 	}
-	a.enqueue(w, deliver, outgoing, idempotencyKey, sendRequestHash(r, rawBody))
+	a.acceptOutbox(w, r, uid, mirror, "", outgoing, rawBody)
 }
 
 // sendRequestHash binds one send acceptance to its exact wire body. The
@@ -591,6 +585,10 @@ func (a *App) deliveryFor(ctx context.Context, account mail.AccountID, replyPare
 		_, raw, err := sender.Send(ctx, outgoing)
 		if err != nil {
 			return err
+		}
+		if job, ok := ctx.Value(outboxContextKey{}).(outboxAttempt); ok {
+			// Persist transport acceptance before attempting a separate Sent append.
+			return a.recordOutboxAccepted(job, raw)
 		}
 		a.fileSent(ctx, account, raw)
 		return nil
@@ -853,6 +851,10 @@ func (q *sendQueue) forgetSend(id string) {
 }
 
 func (a *App) handleUndoSend(w http.ResponseWriter, r *http.Request) {
+	if a.db != nil {
+		a.cancelOutbox(w, r)
+		return
+	}
 	id := r.PathValue("id")
 	a.sendq.mu.Lock()
 	p, ok := a.sendq.sends[id]

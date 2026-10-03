@@ -162,15 +162,20 @@ func registerTools(s *mcp.Server, c *client) {
 		Name: "send_mail",
 		Description: "Send an email from a connected mailbox, plain text or HTML. Omit account_id for a new message to use the first " +
 			"connected account. HTML goes out as multipart/alternative with an automatic plain-text fallback. " +
-			"Replies require account_id so the parent is unambiguous; threading is built server-side from reply_to_message_id.",
+			"Replies require account_id so the parent is unambiguous; threading is built server-side from reply_to_message_id. " +
+			"Use one unique submission_key for each new composition and retain it for unchanged retries. A queued response is durable acceptance, not recipient delivery; use outbox_list for outcomes. Never create a new key to retry an ambiguous submission.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
-		AccountID    string `json:"account_id,omitempty" jsonschema:"sending account id; default first connected"`
-		To           string `json:"to" jsonschema:"recipient address"`
-		Subject      string `json:"subject" jsonschema:"subject line"`
-		Text         string `json:"text" jsonschema:"plain-text body; optional when html is given"`
-		HTML         string `json:"html,omitempty" jsonschema:"optional HTML body; sent as a rich message with a derived plain-text alternative"`
-		ReplyToMsgID string `json:"reply_to_message_id,omitempty" jsonschema:"message id being replied to, if any"`
+		SubmissionKey string `json:"submission_key" jsonschema:"unique immutable key for this composition, maximum 128 characters; reuse exactly for unchanged retries"`
+		AccountID     string `json:"account_id,omitempty" jsonschema:"sending account id; default first connected"`
+		To            string `json:"to" jsonschema:"recipient address"`
+		Subject       string `json:"subject" jsonschema:"subject line"`
+		Text          string `json:"text" jsonschema:"plain-text body; optional when html is given"`
+		HTML          string `json:"html,omitempty" jsonschema:"optional HTML body; sent as a rich message with a derived plain-text alternative"`
+		ReplyToMsgID  string `json:"reply_to_message_id,omitempty" jsonschema:"message id being replied to, if any"`
 	}) (*mcp.CallToolResult, any, error) {
+		if strings.TrimSpace(args.SubmissionKey) == "" || len(args.SubmissionKey) > 128 || strings.ContainsAny(args.SubmissionKey, "\r\n") {
+			return nil, nil, errArgs("submission_key is required and must be at most 128 characters")
+		}
 		if args.To == "" || args.Subject == "" || (args.Text == "" && args.HTML == "") {
 			return nil, nil, errArgs("to, subject, and a body (text or html) are required")
 		}
@@ -184,7 +189,11 @@ func registerTools(s *mcp.Server, c *client) {
 		if args.AccountID != "" {
 			payload["account_id"] = args.AccountID
 		}
-		return text(c.post(ctx, "/send", payload))
+		return text(c.doWithKey(ctx, "POST", "/send", payload, nil, args.SubmissionKey))
+	})
+
+	mcp.AddTool(s, &mcp.Tool{Name: "outbox_list", Description: "List durable outbound states, retained for 30 days. Submitted means provider acceptance, not recipient delivery. Ambiguous sends may already have reached the recipient and must never be automatically re-sent. Use the dashboard Outbox to recover saved composition or download unfiled Sent copies."}, func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
+		return text(c.get(ctx, "/outbox", nil))
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
