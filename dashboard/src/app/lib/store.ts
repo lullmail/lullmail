@@ -3,7 +3,7 @@
 // has to drive whichever list is on screen without knowing which view drew it.
 import { signal, computed, batch } from "@preact/signals";
 import type { Bucket, Counts, ListBucket, Message, Row, ScreenerSender } from "./types";
-import { generationCurrent, loadDrafts, newMutationKey, offlineGeneration, offlineOwner, offlineStorageSuspended, saveDraftFields, worthRestoring } from "./offline";
+import { generationCurrent, loadDrafts, newMutationKey, OfflineStorageError, offlineGeneration, offlineOwner, offlineStorageSuspended, saveDraftFields, worthRestoring } from "./offline";
 
 /* ---- theme ---- */
 
@@ -853,7 +853,14 @@ export async function prepareDraftSend(id: string): Promise<string | null> {
       return null;
     }
   }
-  catch { if (generationCurrent(gen)) draftsUnsaved.value = true; return null; }
+  catch (error) {
+    if (!generationCurrent(gen)) return null;
+    // Another tab sent, discarded or edited this draft: say so. The generic
+    // "drafts are NOT saved" banner hid why a press of Send did nothing.
+    if (error instanceof OfflineStorageError && /another tab/.test(error.message)) showError(error.message + ". Nothing was sent from this tab.");
+    else draftsUnsaved.value = true;
+    return null;
+  }
   if (!generationCurrent(gen) || offlineOwner() !== owner || offlineStorageSuspended()) return null;
   return draftStack.value.find((d) => d.id === id)?.sendKey === key ? key : null;
 }
