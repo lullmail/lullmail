@@ -466,27 +466,80 @@ export interface SendInput {
   attachments?: SendAttachment[];
 }
 
-const sendFlights = new Map<string, { body: string; result: Promise<boolean> }>();
+/** How a send ended for the caller. "accepted": the server holds it (queued
+ *  or already submitted). "kept": a definite answer that it is not going out
+ *  from this draft (refused, failed, ambiguous, cancelled); the draft stays.
+ *  "unconfirmed": no acknowledgment arrived and the lookup could not confirm
+ *  a row; the draft keeps its key, and an unchanged re-send reuses it. */
+export type SendOutcome = "accepted" | "kept" | "unconfirmed";
+
+type OutboxStatus = "pending" | "submitting" | "submitted" | "failed" | "ambiguous" | "cancelled";
+interface SendReceipt { queued: string; undo_seconds: number; status?: OutboxStatus; durable?: boolean }
+/** GET /outbox?key= — the list entry for one submission key. */
+export interface SubmissionRecord { id: string; status: OutboxStatus; undo_until: string }
+
+interface SendFlight { body: string; result: Promise<SendOutcome>; accepted: Promise<boolean> }
+const sendFlights = new Map<string, SendFlight>();
 
 /** Callers retain the key for one unchanged submission. This is only the
  * server's immutable durable submission identity. */
 export function sendMail(input: SendInput, idempotencyKey: string): Promise<boolean> {
+  return startSend(input, idempotencyKey).accepted;
+}
+
+export function sendMailOutcome(input: SendInput, idempotencyKey: string): Promise<SendOutcome> {
+  return startSend(input, idempotencyKey).result;
+}
+
+function startSend(input: SendInput, idempotencyKey: string): SendFlight {
   const snapshot: SendInput = { ...input, attachments: input.attachments?.map((a) => ({ ...a })) };
   const scope = offlineOwner() + "\n" + offlineGeneration() + "\n" + idempotencyKey;
   const body = JSON.stringify(snapshot);
   const active = sendFlights.get(scope);
-  if (active?.body === body) return active.result;
+  if (active?.body === body) return active;
   const result = submitMail(snapshot, idempotencyKey);
-  sendFlights.set(scope, { body, result });
-  void result.finally(() => { if (sendFlights.get(scope)?.result === result) sendFlights.delete(scope); });
-  return result;
+  const flight = { body, result, accepted: result.then((outcome) => outcome === "accepted") };
+  sendFlights.set(scope, flight);
+  void result.finally(() => { if (sendFlights.get(scope) === flight) sendFlights.delete(scope); });
+  return flight;
 }
 
-async function submitMail(input: SendInput, idempotencyKey: string): Promise<boolean> {
+/** Pauses between submission lookups after an unacknowledged send. Mutable
+ *  only so tests need not wait. */
+export const submissionLookup = { backoffMs: [500, 1500, 3000] };
+
+/** A send with no acknowledgment may still have been committed: a network
+ *  failure, a timeout, or a 5xx from the server or a proxy. A 4xx is the
+ *  server's definite answer. */
+function outcomeUnknown(e: unknown): boolean {
+  if (e instanceof StaleOwnerError || e instanceof QueuedOffline) return false;
+  if (e instanceof ApiError) return e.status >= 500 || e.status === 408;
+  return true;
+}
+
+/** Resolves a submission key against the server, retrying with backoff.
+ *  "missing": the server answered every time that it holds no such
+ *  submission. "unknown": the last lookup itself failed. */
+export async function lookupSubmission(key: string, backoffMs = submissionLookup.backoffMs): Promise<SubmissionRecord | "missing" | "unknown"> {
+  let verdict: "missing" | "unknown" = "unknown";
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await api<SubmissionRecord>("/outbox?key=" + encodeURIComponent(key), { fresh: true });
+    } catch (e) {
+      if (e instanceof StaleOwnerError) throw e;
+      verdict = e instanceof ApiError && e.status === 404 ? "missing" : "unknown";
+    }
+    if (attempt >= backoffMs.length) return verdict;
+    await new Promise((resolve) => setTimeout(resolve, backoffMs[attempt]));
+  }
+}
+
+async function submitMail(input: SendInput, idempotencyKey: string): Promise<SendOutcome> {
   const owner = offlineOwner(), gen = offlineGeneration();
   const current = () => !offlineStorageSuspended() && offlineOwner() === owner && generationCurrent(gen);
+  let res: SendReceipt;
   try {
-    const res = await api<{ queued: string; undo_seconds: number; status?: "pending" | "submitting" | "submitted" | "failed" | "ambiguous" | "cancelled"; durable?: boolean }>("/send", {
+    res = await api<SendReceipt>("/send", {
       idempotencyKey,
       body: {
         to: input.to,
@@ -504,48 +557,84 @@ async function submitMail(input: SendInput, idempotencyKey: string): Promise<boo
         })),
       },
     });
-    if (!current()) return false;
-    if (res.status === "ambiguous" || res.status === "failed" || res.status === "cancelled") {
-      showError(res.status === "ambiguous" ? "This send may already have reached the recipient. Check Outbox and Sent before sending again." : "This submission was not sent. Its saved copy is in Outbox; this draft has been kept.");
-      return false;
-    }
-    const window = Math.max(0, res.undo_seconds ?? 5);
-    if (window === 0) {
-      showToast(res.status === "submitted" ? "Message submitted" : "Send already queued — the undo window has ended");
-      return true;
-    }
-    undoSeconds.value = window;
-    showToast(
-      `Sending in ${window}s`,
-      async () => {
-        try {
-          if (!current()) return;
-          await api("/outbox/" + encodeURIComponent(res.queued), { method: "DELETE" });
-          if (!current()) return;
-          // The toast promised the draft comes back — so it has to actually
-          // come back complete: recipients, Cc/Bcc, body mode, sending
-          // account, reply parent, and every attachment (audit SEND-05).
-          openCompose({
-            to: input.to, cc: input.cc || "", bcc: input.bcc || "",
-            subject: input.subject,
-            body: input.html || input.text,
-            htmlMode: !!input.html,
-            accountId: input.accountId,
-            replyToId: input.replyToId,
-            attachments: input.attachments || [],
-          });
-          showToast("Send cancelled — your draft is back");
-        } catch (e) {
-          fail(e, "Too late to cancel");
-        }
-      },
-      window * 1000 + 500
-    );
-    return true;
   } catch (e) {
-    if (current()) fail(e, "Could not send");
-    return false;
+    if (!current()) return "kept";
+    if (!outcomeUnknown(e)) {
+      fail(e, "Could not send");
+      return "kept";
+    }
+    // The request may have been committed before its answer was lost:
+    // resolve it instead of reporting a failure the user would "fix" by
+    // sending a second copy.
+    showToast("Checking whether the message was queued…", undefined, 15_000);
+    let found: SubmissionRecord | "missing" | "unknown";
+    try {
+      found = await lookupSubmission(idempotencyKey);
+    } catch {
+      return "kept";
+    }
+    if (!current()) return "kept";
+    if (found === "missing" || found === "unknown") {
+      showError("The send could not be confirmed. Your draft is kept: sending it again unchanged is safe, or check Outbox first.", 12_000);
+      return "unconfirmed";
+    }
+    const remaining = found.status === "pending" ? Math.max(0, Math.floor((Date.parse(found.undo_until) - Date.now()) / 1000)) : 0;
+    res = { queued: found.id, undo_seconds: remaining, status: found.status, durable: true };
   }
+  if (!current()) return "kept";
+  if (res.status === "ambiguous" || res.status === "failed" || res.status === "cancelled") {
+    showError(res.status === "ambiguous" ? "This send may already have reached the recipient. Check Outbox and Sent before sending again." : "This submission was not sent. Its saved copy is in Outbox; this draft has been kept.");
+    return "kept";
+  }
+  const window = Math.max(0, res.undo_seconds ?? 5);
+  if (window === 0) {
+    showToast(res.status === "submitted" ? "Message submitted" : "Send already queued — the undo window has ended");
+    return "accepted";
+  }
+  undoSeconds.value = window;
+  const queued = res.queued;
+  showToast(
+    `Sending in ${window}s`,
+    async () => {
+      try {
+        if (!current()) return;
+        await api("/outbox/" + encodeURIComponent(queued), { method: "DELETE" });
+        if (!current()) return;
+        // The toast promised the draft comes back — so it has to actually
+        // come back complete: recipients, Cc/Bcc, body mode, sending
+        // account, reply parent, and every attachment (audit SEND-05).
+        openCompose({
+          to: input.to, cc: input.cc || "", bcc: input.bcc || "",
+          subject: input.subject,
+          body: input.html || input.text,
+          htmlMode: !!input.html,
+          accountId: input.accountId,
+          replyToId: input.replyToId,
+          attachments: input.attachments || [],
+        });
+        showToast("Send cancelled — your draft is back");
+      } catch (e) {
+        fail(e, "Too late to cancel");
+      }
+    },
+    window * 1000 + 500
+  );
+  return "accepted";
+}
+
+/** The blocking question before a possible second copy goes out. */
+export const CONFIRM_RESEND = "This message may already have been sent. Check the Outbox before sending it again, or send anyway.\n\nOK sends it anyway. Cancel keeps the draft.";
+
+/** Before a draft edited after an unconfirmed send gets a new key, looks the
+ *  old key up again (once: that request is long over). "clear": the server
+ *  holds no such send, or one that provably did not go out, so a new
+ *  submission cannot duplicate it. "exists": it was queued or may have been
+ *  sent. "unknown": the lookup failed. */
+export async function checkEarlierSubmission(key: string): Promise<"clear" | "exists" | "unknown"> {
+  const found = await lookupSubmission(key, []);
+  if (found === "missing") return "clear";
+  if (found === "unknown") return "unknown";
+  return found.status === "cancelled" || found.status === "failed" ? "clear" : "exists";
 }
 
 /* ---- errors ---- */

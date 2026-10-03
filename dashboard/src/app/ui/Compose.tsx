@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
-import { accounts, attachmentBytes, beginDraftAttachmentRead, finishDraftAttachmentRead, reserveDraftAttachment, closeCompose, compose, cycleDraft, draftIndex, draftsUnsaved, draftStack, newDraft, pendingDraftReads, prepareDraftSend, retireDraft, sendingDrafts, showError, showToast, undoSeconds, updateDraft, updateDraftById, type ComposeState } from "../lib/store";
-import { sendMail, type SendAttachment } from "../lib/actions";
+import { accounts, attachmentBytes, beginDraftAttachmentRead, editedSinceUnconfirmed, finishDraftAttachmentRead, reserveDraftAttachment, closeCompose, compose, cycleDraft, draftIndex, draftsUnsaved, draftStack, newDraft, pendingDraftReads, prepareDraftSend, retireDraft, sendingDrafts, setUnconfirmedSend, showError, showToast, undoSeconds, updateDraft, updateDraftById, type ComposeState } from "../lib/store";
+import { CONFIRM_RESEND, checkEarlierSubmission, sendMailOutcome, type SendAttachment, type SendOutcome } from "../lib/actions";
 import { deleteDraft, generationCurrent, offlineGeneration, offlineOwner, offlineStorageSuspended } from "../lib/offline";
 
 const previewPolicy = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data: cid:; style-src \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'">';
@@ -137,7 +137,7 @@ function DraftForm({ seed }: { seed: ComposeState }) {
     if (!current() || retired.current || !to.trim() || sendingDrafts.value.has(seed.id) || (pendingDraftReads.value.get(seed.id) || 0) > 0 || sending.current) return;
     sending.current = true;
     sendingDrafts.value = new Set([...sendingDrafts.value, seed.id]);
-    let ok = false;
+    let outcome: SendOutcome = "kept";
     let submissionKey: string | null = null;
     try {
       const live = draftStack.value.find((d) => d.id === seed.id);
@@ -146,12 +146,22 @@ function DraftForm({ seed }: { seed: ComposeState }) {
       // Pin the default From choice into the draft before minting its key.
       // A later account-list reorder must not change an ambiguous retry.
       if (resolvedAccount !== seed.accountId) updateDraftById(seed.id, { accountId: resolvedAccount });
+      // An earlier send of this draft got no acknowledgment and was then
+      // edited, so this send would carry a new key: make sure the earlier
+      // one did not go out before allowing a possible second copy.
+      const earlier = editedSinceUnconfirmed(seed.id);
+      if (earlier) {
+        const verdict = await checkEarlierSubmission(earlier);
+        if (!current() || retired.current) return;
+        if (verdict !== "clear" && !window.confirm(CONFIRM_RESEND)) return;
+        setUnconfirmedSend(seed.id, undefined);
+      }
       const key = await prepareDraftSend(seed.id);
       if (!key || !current()) return;
       const submission = draftStack.value.find((d) => d.id === seed.id);
       if (!submission || submission.sendKey !== key) return;
       submissionKey = key;
-      ok = await sendMail({
+      outcome = await sendMailOutcome({
         to: submission.to.trim(), cc: submission.cc?.trim(), bcc: submission.bcc?.trim(), subject: submission.subject,
         text: submission.htmlMode ? "" : submission.body,
         html: submission.htmlMode ? submission.body : undefined,
@@ -163,11 +173,14 @@ function DraftForm({ seed }: { seed: ComposeState }) {
         replyToId: submission.replyToId,
         attachments: submission.attachments,
       }, key);
+      // Unconfirmed: keep the key so the draft's next send is checked or
+      // replayed. Any definite answer settles it.
+      if (current()) setUnconfirmedSend(seed.id, outcome === "unconfirmed" ? key : undefined);
     } finally {
       sending.current = false;
       const active = new Set(sendingDrafts.value); active.delete(seed.id); sendingDrafts.value = active;
     }
-    if (ok && current() && draftStack.value.find((d) => d.id === seed.id)?.sendKey === submissionKey) retireLocalDraft();
+    if (outcome === "accepted" && current() && draftStack.value.find((d) => d.id === seed.id)?.sendKey === submissionKey) retireLocalDraft();
   };
 
   const accountList = accounts.value;

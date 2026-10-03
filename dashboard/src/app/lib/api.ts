@@ -131,7 +131,7 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
   }
   const method = opts.method || (body ? "POST" : "GET");
   assertCurrent();
-  const privateOutbox = path === "/outbox" || path.startsWith("/outbox/");
+  const privateOutbox = path === "/outbox" || path.startsWith("/outbox/") || path.startsWith("/outbox?");
   if (protectedRoute && method === "GET" && !privateOutbox && !opts.fresh) {
     const cached = memoryResponses.get(memoryKey(owner, gen, snapshots + "\n" + path));
     if (cached && Date.now() - cached.savedAt < MEMORY_TTL) return copyValue(cached.value as T);
