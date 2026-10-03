@@ -69,6 +69,31 @@ const outboxSettled = `state IN ('submitted','failed','ambiguous','cancelled') A
 
 var errOutboxCapacity = errors.New("outbox capacity exhausted")
 var errOutboxReceiptLimit = errors.New("outbox retained-receipt limit reached")
+
+// errOutboxFenced: a newer build has migrated this database. This build must
+// neither accept nor claim outbox work, so two builds can never both own it.
+var errOutboxFenced = errors.New("database was migrated by a newer build; this build no longer owns outbound work")
+
+// The single-writer fence. Ownership of outbox rows follows the schema
+// version recorded in app_migrations: a build may admit or claim intents only
+// while no migration newer than the last one it knows has been applied. A
+// newer build raises the ledger when it migrates, which silences every older
+// build still running (blue/green overlap, a late rollback restart) at its
+// next admission or claim, atomically with that statement. It cannot reach a
+// build that predates the outbox: that code never reads this table. See
+// docs/durable-outbox.md for the deploy rule that covers it.
+func outboxSupportedSchema() int64 { return productMigrations[len(productMigrations)-1].Version }
+
+const outboxSchemaNewerSQL = `(SELECT COALESCE(MAX(version),0) FROM app_migrations)`
+
+func (a *App) outboxFenced(ctx context.Context) (bool, error) {
+	var newest int64
+	if err := a.db.QueryRowContext(ctx, `SELECT `+outboxSchemaNewerSQL).Scan(&newest); err != nil {
+		return false, err
+	}
+	return newest > outboxSupportedSchema(), nil
+}
+
 var errOutboxKeyConflict = errors.New("submission key reused")
 
 type outboxPayload struct {
@@ -124,6 +149,11 @@ func (a *App) acceptOutbox(w http.ResponseWriter, r *http.Request, uid, account,
 		writeProblem(w, 429, "Outbox Full", "wait for pending sends to finish or remove saved recoverable compositions before adding more")
 		return
 	}
+	if errors.Is(err, errOutboxFenced) {
+		w.Header().Set("Retry-After", "5")
+		writeProblem(w, 503, "Server Updating", "this server version is being replaced; the message was not queued, retry with the same submission key")
+		return
+	}
 	if errors.Is(err, errOutboxReceiptLimit) {
 		w.Header().Set("Retry-After", "3600")
 		writeProblem(w, 429, "Send Limit Reached", "too many sends are retained for this account; retained records expire 90 days after each send settles")
@@ -176,6 +206,13 @@ func (a *App) saveOutbox(ctx context.Context, uid, account, key, hash, id, ciphe
 	if !errors.Is(err, sql.ErrNoRows) {
 		return result, false, err
 	}
+	var newest int64
+	if err = tx.QueryRowContext(ctx, `SELECT `+outboxSchemaNewerSQL).Scan(&newest); err != nil {
+		return result, false, err
+	}
+	if newest > outboxSupportedSchema() {
+		return result, false, errOutboxFenced
+	}
 	live, bytes, ownerBytes, receipts, err := readOutboxUsage(ctx, tx, uid)
 	if err != nil {
 		return result, false, err
@@ -209,8 +246,14 @@ func (a *App) saveOutbox(ctx context.Context, uid, account, key, hash, id, ciphe
 	if n != 1 {
 		return result, false, sql.ErrNoRows
 	}
-	err = tx.Commit()
-	return result, false, err
+	if err = a.outboxPoint("accept:before-commit"); err != nil {
+		return result, false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return result, false, err
+	}
+	// The row is durable from here; an error models only a lost acknowledgment.
+	return result, false, a.outboxPoint("accept:after-commit")
 }
 
 type outboxQuerier interface {
@@ -238,6 +281,26 @@ const outboxPruneSQL = `DELETE FROM outbox_jobs WHERE id IN (
 const outboxPrunePayloadSQL = `UPDATE outbox_jobs SET payload_ciphertext='',sent_ciphertext='',payload_bytes=0 WHERE id IN (
  SELECT id FROM outbox_jobs WHERE payload_bytes > 0 AND ` + outboxSettled + ` AND updated_at < now()-make_interval(secs=>$1) ORDER BY updated_at LIMIT $2)`
 
+// outboxPoint marks a persistence or provider boundary. It is a no-op unless a
+// test installed outboxFault, which may return an error (to model a lost
+// acknowledgment) or panic (to model the process dying right there).
+func (a *App) outboxPoint(point string) error {
+	if a.outboxFault == nil {
+		return nil
+	}
+	return a.outboxFault(point)
+}
+
+// logFenced reports a passive build at most once a minute.
+func (a *App) logFenced() {
+	a.outboxFenceLog.Lock()
+	defer a.outboxFenceLog.Unlock()
+	if time.Since(a.outboxFenceLogged) > time.Minute {
+		a.outboxFenceLogged = time.Now()
+		a.log.Warn("outbox fenced: the database schema is newer than this build; not accepting or claiming outbound work")
+	}
+}
+
 func (a *App) startOutboxWorker() {
 	a.launch("durable-outbox", func(ctx context.Context) {
 		ticker := time.NewTicker(time.Second)
@@ -259,6 +322,12 @@ func (a *App) startOutboxWorker() {
 }
 
 func (a *App) processOutbox(ctx context.Context) error {
+	if fenced, err := a.outboxFenced(ctx); err != nil {
+		return err
+	} else if fenced {
+		a.logFenced()
+		return nil
+	}
 	// An expired claim is evidence of uncertainty, never permission to resend.
 	if _, err := a.db.ExecContext(ctx, `UPDATE outbox_jobs SET state='ambiguous',error_code='interrupted_submission',updated_at=now()
  WHERE state='submitting' AND started_at < now()-make_interval(secs=>$1)`, int(outboxClaimTimeout.Seconds())); err != nil {
@@ -294,7 +363,7 @@ func (a *App) claimOutbox(ctx context.Context) (outboxAttempt, string, string, e
 	var account, ciphertext string
 	err := a.db.QueryRowContext(ctx, `UPDATE outbox_jobs SET state='submitting',attempt_id=$1,started_at=now(),updated_at=now()
  WHERE id=(SELECT id FROM outbox_jobs WHERE state='pending' AND undo_until<=now() ORDER BY undo_until FOR UPDATE SKIP LOCKED LIMIT 1)
- AND state='pending' RETURNING id::text,user_id::text,account_id,payload_ciphertext`, job.Token).Scan(&job.ID, &job.UserID, &account, &ciphertext)
+ AND state='pending' AND `+outboxSchemaNewerSQL+` <= $2 RETURNING id::text,user_id::text,account_id,payload_ciphertext`, job.Token, outboxSupportedSchema()).Scan(&job.ID, &job.UserID, &account, &ciphertext)
 	return job, account, ciphertext, err
 }
 
@@ -333,6 +402,7 @@ func (a *App) deliverOutbox(ctx context.Context, job outboxAttempt, account, cip
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	ctx = context.WithValue(ctx, outboxContextKey{}, job)
+	_ = a.outboxPoint("claim:after")
 	deliver, _, ok := a.deliveryFor(ctx, mail.AccountID(account), payload.ReplyParent)
 	if !ok {
 		state, code = "failed", "account_unavailable"
@@ -342,7 +412,15 @@ func (a *App) deliverOutbox(ctx context.Context, job outboxAttempt, account, cip
 		state, code = "failed", "cancelled_before_submission"
 		return
 	}
+	_ = a.outboxPoint("deliver:before-submit")
 	if err = deliver(ctx, &payload.Outgoing); err != nil {
+		if mail.IsNotSubmitted(err) {
+			// The provider provably never accepted it: a failed entry the
+			// user can recover, not an alarming "may have been sent".
+			a.log.Warn("outbox submission refused before acceptance", "id", job.ID, "err", err)
+			state, code = "failed", "not_submitted"
+			return
+		}
 		a.log.Warn("outbox submission uncertain", "id", job.ID, "err", err)
 		return
 	}
@@ -426,9 +504,11 @@ func (a *App) processSentCopy(ctx context.Context) error {
 	if !ok {
 		return errors.New("provider does not support Sent filing")
 	}
+	_ = a.outboxPoint("filing:before-append")
 	if err = appender.Append(ctx, mail.MailboxID(box), []byte(raw)); err != nil {
 		return err
 	}
+	_ = a.outboxPoint("filing:after-append")
 	state, code = "filed", ""
 	if a.sched != nil {
 		a.sched.Wake(mail.AccountID(account))

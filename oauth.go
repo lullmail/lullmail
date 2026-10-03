@@ -323,10 +323,15 @@ func (a *App) oauthTokenAfterRejection(ctx context.Context, provider, account, a
 	return mail.Credential{Provider: mail.Provider(provider), Email: address, AccessToken: fresh.AccessToken}, nil
 }
 
+// Errors wrapped in mail.NotSubmittedError are known to precede provider
+// acceptance (no credential, local composition error, or an explicit 4xx
+// refusal), so the durable outbox records them as failed rather than
+// ambiguous. A 5xx or a transport error may follow acceptance and stays
+// unwrapped.
 func (a *App) sendOAuth(ctx context.Context, provider, account string, out *mail.Outgoing, replyParent string) error {
 	cred, err := a.Token(ctx, mail.AccountID(account))
 	if err != nil {
-		return err
+		return &mail.NotSubmittedError{Err: err}
 	}
 	if provider == "gmail" {
 		// Raw MIME via the engine renderer: identical multipart handling
@@ -336,7 +341,7 @@ func (a *App) sendOAuth(ctx context.Context, provider, account string, out *mail
 		// keeps it on the saved Sent copy.
 		raw, err := out.RenderWithBcc()
 		if err != nil {
-			return err
+			return &mail.NotSubmittedError{Err: err}
 		}
 		body, _ := json.Marshal(map[string]string{"raw": base64.RawURLEncoding.EncodeToString(raw)})
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://gmail.googleapis.com/gmail/v1/users/me/messages/send", bytes.NewReader(body))
@@ -349,7 +354,7 @@ func (a *App) sendOAuth(ctx context.Context, provider, account string, out *mail
 		defer res.Body.Close()
 		if res.StatusCode < 200 || res.StatusCode >= 300 {
 			data, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
-			return fmt.Errorf("gmail send status %d: %s", res.StatusCode, strings.TrimSpace(string(data)))
+			return oauthStatusError(res.StatusCode, fmt.Errorf("gmail send status %d: %s", res.StatusCode, strings.TrimSpace(string(data))))
 		}
 		return nil
 	}
@@ -370,7 +375,7 @@ func (a *App) sendOAuth(ctx context.Context, provider, account string, out *mail
 	}
 	files, err := graphAttachments(out.Attachments)
 	if err != nil {
-		return err
+		return &mail.NotSubmittedError{Err: err}
 	}
 	message := map[string]any{"subject": out.Subject, "body": map[string]string{"contentType": contentType, "content": content}, "toRecipients": graphRecipients(out.To), "ccRecipients": graphRecipients(out.Cc), "bccRecipients": graphRecipients(out.Bcc)}
 	if files != nil {
@@ -388,9 +393,18 @@ func (a *App) sendOAuth(ctx context.Context, provider, account string, out *mail
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
-		return fmt.Errorf("graph send status %d: %s", res.StatusCode, strings.TrimSpace(string(data)))
+		return oauthStatusError(res.StatusCode, fmt.Errorf("graph send status %d: %s", res.StatusCode, strings.TrimSpace(string(data))))
 	}
 	return nil
+}
+
+// oauthStatusError marks an explicit client-error refusal as not submitted.
+// Request-timeout and rate-limit answers are also refusals before any send.
+func oauthStatusError(status int, err error) error {
+	if status >= 400 && status < 500 {
+		return &mail.NotSubmittedError{Err: err}
+	}
+	return err
 }
 
 // graphAPIBase is a variable only so tests can point the Graph client at a

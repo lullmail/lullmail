@@ -181,7 +181,7 @@ func TestHandleSendEnvelopeCoversAdvertisedAttachmentTotals(t *testing.T) {
 						columns: []string{"address", "display_name"},
 						values:  [][]driver.Value{{"owner@example.com", "Owner"}},
 					}},
-					dbStep{kind: "exec"}, outboxEmpty(), outboxUsage(0, 0, 0), dbStep{kind: "exec"},
+					dbStep{kind: "exec"}, outboxEmpty(), outboxSchema(0), outboxUsage(0, 0, 0), dbStep{kind: "exec"},
 				)
 				return db
 			}(),
