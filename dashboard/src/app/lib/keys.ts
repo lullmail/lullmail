@@ -95,6 +95,8 @@ export function installKeys(): () => void {
     }
     if (ev.key === "Escape") {
       cancelJump();
+      // An open menu owns its own Escape; it closes itself, and nothing behind it unwinds.
+      if ((ev.target as HTMLElement | null)?.closest?.("[role='menu']")) return;
       if (palette.value) { palette.value = false; return; }
       if (shortcuts.value) { shortcuts.value = false; return; }
       if (snoozePickerRows.value.length) { snoozePickerRows.value = []; return; }

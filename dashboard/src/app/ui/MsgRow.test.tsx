@@ -226,6 +226,28 @@ describe("message keyboard selection and bulk scope", () => {
     expectSelected(1);
   });
 
+  it("an open menu owns Escape: neither the selection nor the reader unwinds behind it", () => {
+    layout.value = "classic";
+    reader.value = { ...reader.value, threadId: "visible", account: "account" };
+    click(row(1), { ctrlKey: true });
+    // The settings menu handles its own Escape; it is not a snooze menu and stops nothing.
+    const menu = document.createElement("div");
+    menu.setAttribute("role", "menu");
+    const item = document.createElement("button");
+    item.setAttribute("role", "menuitem");
+    menu.append(item);
+    host.append(menu);
+    key("Escape", {}, item);
+    expectSelected(1);
+    expect(reader.value.threadId).toBe("visible");
+    menu.remove();
+    key("Escape");
+    expectSelected();
+    expect(reader.value.threadId).toBe("visible");
+    key("Escape");
+    expect(reader.value.threadId).toBeNull();
+  });
+
   it("Ctrl+A on a sidebar link retains native page selection", () => {
     const link = document.createElement("a"); link.href = "/reading"; host.append(link);
     expect(key("a", { ctrlKey: true }, link).defaultPrevented).toBe(false);
