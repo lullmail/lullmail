@@ -3,7 +3,7 @@ module github.com/neutron-build/neutron/mail
 go 1.25.0
 
 require (
-	github.com/jackc/pgx/v5 v5.7.2
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/jhillyerd/enmime/v2 v2.4.1
 	golang.org/x/text v0.40.0
 	google.golang.org/api v0.291.0
