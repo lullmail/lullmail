@@ -53,7 +53,11 @@ function openAtCursor() {
 function replyToCursor() {
   const l = list.value;
   const row = l.kind === "rows" ? l.rows[cursor.value] : undefined;
-  const source = reader.value.messages[reader.value.messages.length - 1];
+  // Every verb acts on the highlighted row (see targetRows). The open thread's
+  // latest message is used only when it is that row's thread, or when the
+  // reader owns the page; after the cursor moves elsewhere, reply to the row.
+  const open = reader.value.messages[reader.value.messages.length - 1];
+  const source = open && (readerOwnsPage() || !row || row.thread_id === reader.value.threadId) ? open : undefined;
   if (source) {
     const who = splitFrom(source.from);
     openCompose({

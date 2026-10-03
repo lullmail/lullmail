@@ -3,7 +3,7 @@ import { render } from "preact";
 import { act } from "preact/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { installKeys } from "../lib/keys";
-import { checked, clearChecked, closeReader, cursor, layout, list, palette, reader, resetSelection, rowIdentity, setAccountFilter, setList, shortcuts, snoozePickerRows, targetRows, toast } from "../lib/store";
+import { checked, clearChecked, closeReader, closeCompose, compose, cursor, layout, list, palette, reader, resetSelection, rowIdentity, setAccountFilter, setList, shortcuts, snoozePickerRows, targetRows, toast } from "../lib/store";
 import type { Row } from "../lib/types";
 import { markDone, markRead, moveTo, openThread, pinThreads } from "../lib/actions";
 import { MsgList } from "./MsgRow";
@@ -392,5 +392,33 @@ describe("selection reconciliation", () => {
     expect(targetRows()).toEqual([]);
     expect(list.value.kind).toBe("none");
     act(() => setAccountFilter(""));
+  });
+});
+
+describe("reply follows the highlighted row", () => {
+  const open = (threadId: string) => {
+    reader.value = { ...reader.value, threadId, account: "account", messages: [
+      { id: "open-latest", account: "account", from: "Opened <opened@example.test>", subject: "Open subject", received_at: "2026-09-29T12:00:00Z" },
+    ] as never };
+  };
+  afterEach(() => { closeCompose(); });
+
+  it("replies to the cursor row once the cursor leaves the open thread (wide classic layout)", () => {
+    layout.value = "classic";
+    open("thread-0");
+    key("j"); key("j");
+    expect(cursor.value).toBe(1);
+    key("r");
+    expect(compose.value?.replyToId).toBe("1");
+    expect(compose.value?.to).toBe("sender@example.test");
+  });
+
+  it("replies to the open thread's latest message while the cursor is on that thread", () => {
+    layout.value = "classic";
+    open("thread-0");
+    key("j"); key("k");
+    expect(cursor.value).toBe(0);
+    key("r");
+    expect(compose.value?.replyToId).toBe("open-latest");
   });
 });
