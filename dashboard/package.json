@@ -10,6 +10,7 @@
     "test": "vitest run",
     "test:e2e": "node e2e/auth.mjs",
     "test:selection": "node e2e/selection.mjs",
+    "test:keybinds": "node e2e/keybinds.mjs",
     "test:visual": "node e2e/visual.mjs",
     "e2e:preview": "node e2e/preview.mjs"
   },
