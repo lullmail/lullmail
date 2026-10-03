@@ -157,6 +157,15 @@ func (a *App) acceptOutbox(w http.ResponseWriter, r *http.Request, uid, account,
 		writeProblem(w, 503, "Queue Unavailable", "composition could not be encrypted; the draft was not queued")
 		return
 	}
+	// Admission joins the account's gate so a deletion that has sealed it
+	// is not raced: the deletion waits for this commit and then counts the
+	// row, instead of cascading away a send it never saw.
+	release, ok := a.beginAccountUse(mail.AccountID(account))
+	if !ok {
+		writeProblem(w, 409, "Account Being Removed", "the sending account is being disconnected; the message was not queued")
+		return
+	}
+	defer release()
 	record, replay, err := a.saveOutbox(r.Context(), uid, account, key, hash, id, encrypted, outboxReservation(outgoing, encrypted))
 	if errors.Is(err, errOutboxKeyConflict) {
 		sendKeyConflict(w)
@@ -448,7 +457,16 @@ func (a *App) dispatchOutbox(ctx context.Context, s *outboxSlots) error {
 		if !ok {
 			return nil
 		}
-		job, account, ciphertext, err := a.claimOutboxExcept(ctx, busy)
+		if ctx.Err() != nil {
+			return nil
+		}
+		// A claim is never cut by the stop signal: a cancelled client can
+		// still see its UPDATE commit, which would strand the row in
+		// submitting until the sweep calls it ambiguous. A claimed job is
+		// always started, and the drain waits for it.
+		claimCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		job, account, ciphertext, err := a.claimOutboxExcept(claimCtx, busy)
+		cancel()
 		if err == nil {
 			s.start(a, account, func() { a.attemptOutbox(ctx, job, account, ciphertext) })
 			continue
@@ -456,7 +474,9 @@ func (a *App) dispatchOutbox(ctx context.Context, s *outboxSlots) error {
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		filing, err := a.claimSentCopy(ctx, "", busy)
+		claimCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		filing, err := a.claimSentCopy(claimCtx, "", busy)
+		cancel()
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}

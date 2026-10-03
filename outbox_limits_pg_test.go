@@ -383,6 +383,22 @@ func TestAccountDeletionGuardsOutbox(t *testing.T) {
 			t.Fatalf("delete=%d %s rows=%d", w.Code, w.Body.String(), e.rows("true"))
 		}
 	})
+	t.Run("a send is not accepted while the account is being deleted", func(t *testing.T) {
+		e := newOutboxEnv(t)
+		pr := e.newProc()
+		finish, ok := pr.app.beginAccountDeletion(context.Background(), mail.AccountID(e.mirror))
+		if !ok {
+			t.Fatal("deletion could not seal the account")
+		}
+		res := pr.send("sealed-key", "sealed")
+		if res.Code != http.StatusConflict || e.rows("true") != 0 {
+			t.Fatalf("send during deletion=%d %s rows=%d", res.Code, res.Body, e.rows("true"))
+		}
+		finish(false)
+		if res = pr.send("sealed-key", "sealed"); res.Code != 200 || e.rows("true") != 1 {
+			t.Fatalf("send after the deletion was abandoned=%d %s", res.Code, res.Body)
+		}
+	})
 	t.Run("a send to a vanished account is not retryable", func(t *testing.T) {
 		e := newOutboxEnv(t)
 		pr := e.newProc()
