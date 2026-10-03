@@ -23,7 +23,7 @@
     "preact-render-to-string": "^6.5.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.62.1",
+    "@playwright/test": "^1.63.0",
     "@preact/preset-vite": "^2.9.4",
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^30.0.1",
