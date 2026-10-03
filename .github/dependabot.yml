@@ -1,0 +1,22 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: gomod
+    directory: /mail-engine
+    schedule:
+      interval: weekly
+  - package-ecosystem: gomod
+    directory: /mcp
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /dashboard
+    schedule:
+      interval: weekly
