@@ -3,7 +3,7 @@ import { generationCurrent, newMutationKey, offlineGeneration, offlineOwner, off
 import { api } from "../lib/api";
 import { useLoad } from "../lib/useLoad";
 import { accountFilter, accountQS, checked, cursor, resetSelection, rowIdentity, setList } from "../lib/store";
-import { markDone, openThread, sendMail } from "../lib/actions";
+import { CONFIRM_RESEND, checkEarlierSubmission, markDone, openThread, sendMailOutcome } from "../lib/actions";
 import type { Briefing, BriefThread, Row, ScreenerSender } from "../lib/types";
 import { countOf, daysSince, fmtDate, relativeAge, splitFrom } from "../lib/fmt";
 import { Empty, ListSkeleton, LoadError, PageHead, SectionHead } from "../ui/bits";
@@ -23,6 +23,9 @@ export function InlineReply({ thread, onDone }: { thread: BriefThread; onDone: (
   const [sending, setSending] = useState(false);
   const sendingNow = useRef(false);
   const retry = useRef<{ body: string; key: string }>();
+  // A key whose send could not be confirmed; checked before an edited reply
+  // goes out under a new key.
+  const unconfirmed = useRef<string>();
   const gen = useRef(offlineGeneration()).current;
   const owner = useRef(offlineOwner()).current;
   const current = () => !offlineStorageSuspended() && generationCurrent(gen) && offlineOwner() === owner;
@@ -34,10 +37,17 @@ export function InlineReply({ thread, onDone }: { thread: BriefThread; onDone: (
     setSending(true);
     const input = { to: who.email, subject: thread.subject || "", text, replyToId: thread.message_id, accountId: thread.account };
     const body = JSON.stringify(input);
-    if (retry.current?.body !== body) retry.current = { body, key: newMutationKey() };
     try {
-      const ok = await sendMail(input, retry.current.key);
-      if (ok && current()) onDone();
+      if (unconfirmed.current && retry.current?.body !== body) {
+        const verdict = await checkEarlierSubmission(unconfirmed.current);
+        if (!current() || (verdict !== "clear" && !window.confirm(CONFIRM_RESEND))) return;
+        unconfirmed.current = undefined;
+      }
+      if (retry.current?.body !== body) retry.current = { body, key: newMutationKey() };
+      const key = retry.current.key;
+      const outcome = await sendMailOutcome(input, key);
+      unconfirmed.current = outcome === "unconfirmed" ? key : undefined;
+      if (outcome === "accepted" && current()) onDone();
     } finally {
       sendingNow.current = false;
       setSending(false);

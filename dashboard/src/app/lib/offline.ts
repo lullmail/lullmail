@@ -79,6 +79,8 @@ export interface DraftRecord {
   context?: string;
   /** Retry identity for this unchanged submission, never a delivery receipt. */
   sendKey?: string;
+  /** A submission key whose outcome could not be confirmed. */
+  unconfirmedKey?: string;
   attachments?: Array<{ filename: string; contentType: string; dataBase64: string }>;
 }
 

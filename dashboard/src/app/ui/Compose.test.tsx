@@ -5,9 +5,10 @@ import { act } from "preact/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Compose } from "./Compose";
 import { InlineReply } from "../views/TodayView";
+import { submissionLookup } from "../lib/actions";
 import { clearMemoryCache } from "../lib/api";
 import { clearOfflineData, loadDrafts, prepareOfflineOwner } from "../lib/offline";
-import { accounts, draftStack, openCompose, pendingDraftReads, resetPrivateState, toast, updateDraftById } from "../lib/store";
+import { accounts, draftStack, openCompose, pendingDraftReads, resetPrivateState, sendingDrafts, toast, updateDraftById } from "../lib/store";
 import type { BriefThread } from "../lib/types";
 
 const host = document.createElement("div");
@@ -16,7 +17,11 @@ const settle = async () => { await act(async () => { await wait(); }); };
 const button = (label: string) => [...host.querySelectorAll("button")].find((b) => b.textContent === label)!;
 const accepted = () => new Response(JSON.stringify({ queued: "q1", undo_seconds: 5 }));
 const seed = { to: "person@example.test", subject: "A private subject", body: "A private body" };
+const notFound = () => new Response(JSON.stringify({ title: "Not Found" }), { status: 404 });
+const entry = (status: string) => new Response(JSON.stringify({ id: "row-1", account_id: "product-a", status, filing_status: "not_started", created_at: new Date().toISOString(), undo_until: new Date().toISOString(), recoverable: true, saved_sent_copy: false }));
+// fetcher sees sends; lookups sees GET /api/outbox?key= submission lookups.
 let fetcher: ReturnType<typeof vi.fn>;
+let lookups: ReturnType<typeof vi.fn>;
 
 async function edit(selector: string, value: string) {
   await act(async () => {
@@ -28,7 +33,12 @@ async function edit(selector: string, value: string) {
 }
 
 async function clickSend() {
-  await act(async () => { button("Send").click(); await wait(35); });
+  await act(async () => {
+    button("Send").click();
+    await wait(35);
+    // A send that ends without an acknowledgment also runs its lookup.
+    for (let i = 0; i < 100 && sendingDrafts.value.size > 0; i++) await wait(20);
+  });
 }
 
 beforeEach(async () => {
@@ -37,7 +47,9 @@ beforeEach(async () => {
   clearMemoryCache();
   accounts.value = [{ id: "product-a", address: "a@example.test" }];
   fetcher = vi.fn().mockRejectedValue(new TypeError("acknowledgment lost"));
-  vi.stubGlobal("fetch", fetcher);
+  lookups = vi.fn().mockImplementation(async () => notFound());
+  vi.stubGlobal("fetch", (url: string, init: RequestInit) => (String(url).startsWith("/api/outbox?key=") ? (lookups as unknown as typeof fetch)(url, init) : (fetcher as unknown as typeof fetch)(url, init)));
+  submissionLookup.backoffMs = [];
 });
 afterEach(async () => {
   await act(async () => { render(null, host); });
@@ -104,6 +116,75 @@ describe("composer submission retries", () => {
     await clickSend();
     expect(fetcher.mock.calls[1][1].headers["Idempotency-Key"]).not.toBe(originalKey);
     expect(JSON.parse(fetcher.mock.calls[1][1].body).text).toBe("A deliberate new version");
+  });
+
+  it("treats a lost acknowledgment whose row exists as sent", async () => {
+    lookups.mockImplementation(async () => entry("submitted"));
+    openCompose(seed);
+    render(<Compose />, host);
+    await settle();
+    await clickSend();
+    expect(lookups).toHaveBeenCalledTimes(1);
+    expect(lookups.mock.calls[0][0]).toBe("/api/outbox?key=" + encodeURIComponent(fetcher.mock.calls[0][1].headers["Idempotency-Key"]));
+    expect(draftStack.value).toEqual([]);
+    expect(toast.value?.message).toBe("Message submitted");
+  });
+
+  it("keeps an unconfirmed send's key and re-sends it unchanged without asking", async () => {
+    const confirm = vi.spyOn(window, "confirm");
+    openCompose(seed);
+    render(<Compose />, host);
+    await settle();
+    await clickSend();
+    const key = fetcher.mock.calls[0][1].headers["Idempotency-Key"];
+    expect(toast.value?.message).toContain("could not be confirmed");
+    expect(draftStack.value[0].unconfirmedKey).toBe(key);
+    await act(async () => { await wait(300); }); // autosave debounce
+    expect((await loadDrafts())[0].unconfirmedKey).toBe(key);
+    fetcher.mockResolvedValue(new Response(JSON.stringify({ queued: "q1", undo_seconds: 0, status: "submitted" })));
+    await clickSend();
+    expect(fetcher.mock.calls[1][1].headers["Idempotency-Key"]).toBe(key);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(draftStack.value).toEqual([]);
+  });
+
+  it("asks before an edited draft could send a second copy of an unconfirmed send", async () => {
+    openCompose(seed);
+    render(<Compose />, host);
+    await settle();
+    await clickSend();
+    const key = fetcher.mock.calls[0][1].headers["Idempotency-Key"];
+    await edit("textarea.compose-body", "Edited after the lost acknowledgment");
+    // The earlier send did reach the server after all.
+    lookups.mockImplementation(async () => entry("pending"));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await clickSend();
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm.mock.calls[0][0]).toContain("This message may already have been sent");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(draftStack.value).toHaveLength(1);
+    expect(draftStack.value[0].unconfirmedKey).toBe(key);
+    // Sending anyway is a deliberate new submission under a new key.
+    confirm.mockReturnValue(true);
+    fetcher.mockResolvedValue(accepted());
+    await clickSend();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls[1][1].headers["Idempotency-Key"]).not.toBe(key);
+    expect(JSON.parse(fetcher.mock.calls[1][1].body).text).toBe("Edited after the lost acknowledgment");
+    expect(draftStack.value).toEqual([]);
+  });
+
+  it("asks too when the earlier send cannot be checked", async () => {
+    openCompose(seed);
+    render(<Compose />, host);
+    await settle();
+    await clickSend();
+    await edit("textarea.compose-body", "Edited while the server is unreachable");
+    lookups.mockRejectedValue(new TypeError("offline"));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await clickSend();
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
   it("guards button plus keyboard activation and a remount during an in-flight send", async () => {
@@ -195,6 +276,21 @@ describe("Today inline reply retries", () => {
     await clickSend();
     expect(fetcher.mock.calls[2][1].headers["Idempotency-Key"]).not.toBe(original.headers["Idempotency-Key"]);
     expect(onDone).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks before an edited reply could send a second copy of an unconfirmed one", async () => {
+    const onDone = vi.fn();
+    render(<InlineReply thread={thread} onDone={onDone} />, host);
+    await edit("textarea", "My reply");
+    await clickSend();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await edit("textarea", "My edited reply");
+    lookups.mockImplementation(async () => entry("submitted"));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await clickSend();
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(onDone).not.toHaveBeenCalled();
   });
 
   it("a stale mounted inline reply cannot send into the new session", async () => {

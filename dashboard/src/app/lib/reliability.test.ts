@@ -2,15 +2,15 @@
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, clearMemoryCache, StaleOwnerError } from "./api";
-import { sendMail, type SendInput } from "./actions";
+import { checkEarlierSubmission, sendMail, sendMailOutcome, submissionLookup, type SendInput } from "./actions";
 import {
   cacheResponse, cachedResponse, clearOfflineData, loadDrafts, offlineGeneration,
   offlineOwner, offlineStorageSuspended, prepareOfflineOwner, purgeAccountSnapshots,
   saveDraftFields, snapshotGeneration,
 } from "./offline";
 import {
-  closeCompose, composeOpen, draftStack, hydrateDrafts, openCompose, prepareDraftSend,
-  resetPrivateState, toast, updateDraft,
+  closeCompose, composeOpen, draftStack, editedSinceUnconfirmed, hydrateDrafts, openCompose, prepareDraftSend,
+  resetPrivateState, setUnconfirmedSend, toast, updateDraft,
 } from "./store";
 
 const owner = { installation_id: "inst", user_id: "owner-a", email: "a@example.test" };
@@ -18,6 +18,14 @@ const other = { installation_id: "inst", user_id: "owner-b", email: "b@example.t
 const input: SendInput = { to: "recipient@example.test", subject: "Private subject", text: "Private body" };
 const accepted = () => new Response(JSON.stringify({ queued: "q1", undo_seconds: 5 }));
 const settle = () => new Promise((resolve) => setTimeout(resolve, 300));
+const notFound = () => new Response(JSON.stringify({ title: "Not Found" }), { status: 404 });
+const entry = (status: string, undoMs = 0) => new Response(JSON.stringify({ id: "row-1", account_id: "a", status, filing_status: "not_started", created_at: new Date().toISOString(), undo_until: new Date(Date.now() + undoMs).toISOString(), recoverable: true, saved_sent_copy: false }));
+
+/** Routes submission lookups (GET /api/outbox?key=) to lookups, everything
+ *  else to sends, so each mock sees only its own requests. */
+function routeFetch(sends: ReturnType<typeof vi.fn>, lookups: ReturnType<typeof vi.fn>) {
+  vi.stubGlobal("fetch", (url: string, init: RequestInit) => (String(url).startsWith("/api/outbox?key=") ? (lookups as unknown as typeof fetch)(url, init) : (sends as unknown as typeof fetch)(url, init)));
+}
 
 async function cacheRows(): Promise<Array<{ key: string; owner: string; account: string; value: unknown }>> {
   return new Promise((resolve, reject) => {
@@ -36,6 +44,7 @@ beforeEach(async () => {
   await clearOfflineData();
   await prepareOfflineOwner(owner);
   clearMemoryCache();
+  submissionLookup.backoffMs = [];
 });
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -62,7 +71,7 @@ describe("send submission identity", () => {
     const id = draftStack.value[0].id;
     const firstKey = (await prepareDraftSend(id))!;
     const fetcher = vi.fn().mockRejectedValueOnce(new TypeError("lost acknowledgment")).mockResolvedValueOnce(accepted());
-    vi.stubGlobal("fetch", fetcher);
+    routeFetch(fetcher, vi.fn().mockImplementation(async () => notFound()));
     expect(await sendMail(input, firstKey)).toBe(false);
     closeCompose();
     openCompose();
@@ -274,7 +283,84 @@ describe("durable outbox recovery boundaries", () => {
     await settle();
     expect(await cachedResponse("/buckets/imbox")).toEqual([{ subject: "offline mail" }]);
     expect(await cachedResponse("/outbox/job")).toBeUndefined();
+    fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ id: "row", status: "pending" })));
+    await api("/outbox?key=k", { fresh: true });
+    await settle();
+    expect(await cachedResponse("/outbox?key=k")).toBeUndefined();
     fetcher.mockRejectedValue(new Error("offline"));
     await expect(api("/outbox/job")).rejects.toThrow("offline");
+  });
+});
+
+describe("unknown send outcomes are resolved, not reported as failures", () => {
+  it("treats a lost acknowledgment as queued when the key's row exists", async () => {
+    const lookups = vi.fn().mockImplementation(async () => entry("pending", 4000));
+    routeFetch(vi.fn().mockRejectedValue(new TypeError("lost acknowledgment")), lookups);
+    expect(await sendMailOutcome(input, "lost-pending")).toBe("accepted");
+    expect(lookups.mock.calls[0][0]).toBe("/api/outbox?key=lost-pending");
+    expect(toast.value?.message).toMatch(/^Sending in [34]s$/);
+    expect(toast.value?.undo).toBeDefined();
+  });
+  it("shows the real state of a row found after a 5xx", async () => {
+    routeFetch(vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: "acceptance could not be confirmed" }), { status: 503 })), vi.fn().mockImplementation(async () => entry("submitted")));
+    expect(await sendMailOutcome(input, "lost-submitted")).toBe("accepted");
+    expect(toast.value?.message).toBe("Message submitted");
+    routeFetch(vi.fn().mockRejectedValue(new TypeError("timeout")), vi.fn().mockImplementation(async () => entry("ambiguous")));
+    expect(await sendMailOutcome(input, "lost-ambiguous")).toBe("kept");
+    expect(toast.value?.message).toContain("may already have reached the recipient");
+  });
+  it("retries the lookup with backoff before giving up", async () => {
+    submissionLookup.backoffMs = [5, 5];
+    const lookups = vi.fn().mockRejectedValueOnce(new TypeError("still offline")).mockImplementationOnce(async () => notFound()).mockImplementation(async () => entry("pending", 4000));
+    routeFetch(vi.fn().mockRejectedValue(new TypeError("lost acknowledgment")), lookups);
+    expect(await sendMailOutcome(input, "late-commit")).toBe("accepted");
+    expect(lookups).toHaveBeenCalledTimes(3);
+  });
+  it("says the outcome could not be confirmed when no row is found", async () => {
+    submissionLookup.backoffMs = [1, 1];
+    const lookups = vi.fn().mockImplementation(async () => notFound());
+    routeFetch(vi.fn().mockRejectedValue(new TypeError("lost acknowledgment")), lookups);
+    expect(await sendMailOutcome(input, "never-arrived")).toBe("unconfirmed");
+    expect(lookups).toHaveBeenCalledTimes(3);
+    expect(toast.value?.tone).toBe("error");
+    expect(toast.value?.message).toContain("could not be confirmed");
+  });
+  it("does not look up a definite refusal", async () => {
+    const lookups = vi.fn();
+    routeFetch(vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: "you already have 4 sends waiting" }), { status: 429 })), lookups);
+    expect(await sendMailOutcome(input, "refused")).toBe("kept");
+    expect(lookups).not.toHaveBeenCalled();
+    expect(toast.value?.message).toContain("Could not send");
+  });
+  it("classifies an earlier submission before an edited draft is re-sent", async () => {
+    for (const [response, verdict] of [
+      [() => entry("pending", 4000), "exists"], [() => entry("submitted"), "exists"], [() => entry("ambiguous"), "exists"],
+      [() => entry("failed"), "clear"], [() => entry("cancelled"), "clear"], [() => notFound(), "clear"],
+    ] as const) {
+      routeFetch(vi.fn(), vi.fn().mockImplementation(async () => response()));
+      expect(await checkEarlierSubmission("earlier")).toBe(verdict);
+    }
+    routeFetch(vi.fn(), vi.fn().mockRejectedValue(new TypeError("offline")));
+    expect(await checkEarlierSubmission("earlier")).toBe("unknown");
+  });
+  it("keeps the unconfirmed key across edits and reloads, and flags only an edited draft", async () => {
+    openCompose({ to: input.to, subject: input.subject, body: input.text });
+    const id = draftStack.value[0].id;
+    const key = (await prepareDraftSend(id))!;
+    setUnconfirmedSend(id, key);
+    // Unchanged: the next send replays the same key, nothing to check.
+    expect(editedSinceUnconfirmed(id)).toBeUndefined();
+    expect(await prepareDraftSend(id)).toBe(key);
+    // Edited: a new key would be minted, so the old one must be checked.
+    updateDraft({ body: "Edited after the lost acknowledgment" });
+    expect(draftStack.value[0].sendKey).toBeUndefined();
+    expect(editedSinceUnconfirmed(id)).toBe(key);
+    await settle();
+    resetPrivateState();
+    await hydrateDrafts();
+    expect(draftStack.value[0].unconfirmedKey).toBe(key);
+    expect(editedSinceUnconfirmed(id)).toBe(key);
+    setUnconfirmedSend(id, undefined);
+    expect(editedSinceUnconfirmed(id)).toBeUndefined();
   });
 });

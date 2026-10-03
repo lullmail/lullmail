@@ -560,6 +560,10 @@ export interface ComposeState {
   context?: string;
   /** Reused only while this draft's send content is unchanged. */
   sendKey?: string;
+  /** A key whose send got no acknowledgment and could not be confirmed. It
+   *  survives edits (unlike sendKey), so a changed draft is checked against
+   *  it before a second copy can go out. */
+  unconfirmedKey?: string;
   /** Full attachment set, carried by undo-send so a restored draft is
    * complete rather than a hand-picked subset of fields (audit SEND-05).
    * Structural twin of actions.SendAttachment; typed inline to keep this
@@ -752,6 +756,20 @@ const sendFields: Array<keyof ComposeState> = ["to", "cc", "bcc", "subject", "bo
 function patchDraft(draft: ComposeState, patch: Partial<ComposeState>): ComposeState {
   const changed = sendFields.some((field) => field in patch && JSON.stringify(patch[field]) !== JSON.stringify(draft[field]));
   return { ...draft, ...patch, sendKey: changed ? undefined : (patch.sendKey ?? draft.sendKey) };
+}
+
+/** Records (key) or clears (undefined) the draft's unconfirmed send. */
+export function setUnconfirmedSend(id: string, key: string | undefined): void {
+  const draft = draftStack.value.find((d) => d.id === id);
+  if (draft && draft.unconfirmedKey !== key) updateDraftById(id, { unconfirmedKey: key });
+}
+
+/** The unconfirmed key that a send of this draft would NOT reuse: the draft
+ *  was edited since, so sending now mints a new key and could deliver a
+ *  second copy. Undefined when there is nothing to check. */
+export function editedSinceUnconfirmed(id: string): string | undefined {
+  const draft = draftStack.value.find((d) => d.id === id);
+  return draft?.unconfirmedKey && draft.sendKey !== draft.unconfirmedKey ? draft.unconfirmedKey : undefined;
 }
 
 export const sendingDrafts = signal<Set<string>>(new Set());
