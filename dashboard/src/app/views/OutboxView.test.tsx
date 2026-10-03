@@ -5,7 +5,7 @@ import { act } from "preact/test-utils";
 vi.mock("../lib/api", () => ({ api: vi.fn() }));
 vi.mock("../lib/store", () => ({ accounts: { value: [{ id: "account", address: "sender@example.test" }] }, openCompose: vi.fn(), setList: vi.fn(), showError: vi.fn(), showToast: vi.fn() }));
 import { api } from "../lib/api";
-import { openCompose, setList } from "../lib/store";
+import { openCompose, setList, showToast } from "../lib/store";
 import { OutboxView, type OutboxEntry } from "./OutboxView";
 let host: HTMLDivElement;
 const row = (status: OutboxEntry["status"]): OutboxEntry => ({ id: "job", account_id: "account", status, filing_status: "not_started", created_at: new Date().toISOString(), undo_until: new Date(Date.now() + 5000).toISOString(), recoverable: true, saved_sent_copy: false });
@@ -31,6 +31,29 @@ describe("durable outbox", () => {
     await click("Create a new draft from this copy");
     expect(openCompose).toHaveBeenCalledWith(expect.objectContaining({ cc: "cc@example.test", bcc: "bcc@example.test", htmlMode: true, accountId: "account", replyToId: "parent", attachments: [{ filename: "a.bin", contentType: "application/octet-stream", dataBase64: "AA==" }] }));
     expect(vi.mocked(api).mock.calls.every(([path]) => path !== "/send")).toBe(true);
+  });
+  it("warns on the new draft itself when it comes from an ambiguous send, and not otherwise", async () => {
+    const request = { to: "to@example.test", cc: "", bcc: "", subject: "Saved", text: "body", html: "", account_id: "account", reply_to_message_id: "" };
+    for (const status of ["ambiguous", "failed"] as const) {
+      vi.mocked(api).mockReset(); vi.mocked(showToast).mockClear();
+      vi.mocked(api).mockResolvedValueOnce([row(status)] as never);
+      await act(async () => render(h(OutboxView, {}), host)); await flush();
+      vi.mocked(api).mockResolvedValueOnce({ status, request } as never);
+      await click("Review saved composition"); await click("Create a new draft from this copy");
+      const warned = vi.mocked(showToast).mock.calls.some(([message]) => /outcome is unknown/.test(String(message)));
+      expect(warned).toBe(status === "ambiguous");
+      act(() => render(null, host));
+    }
+  });
+  it.each([
+    ["not_submitted", "provider refused it before accepting it"],
+    ["payload_key_unavailable", "restore the key"],
+    ["payload_corrupt", "integrity check"],
+  ])("tells a failed send apart by its recorded cause: %s", async (code, text) => {
+    vi.mocked(api).mockResolvedValue([{ ...row("failed"), error_code: code }] as never);
+    await act(async () => render(h(OutboxView, {}), host)); await flush();
+    expect(host.textContent).toContain(text);
+    expect(host.textContent).not.toContain("may already have sent");
   });
   it("does not remove a recovery copy when destructive confirmation is declined", async () => {
     vi.mocked(api).mockResolvedValue([row("failed")] as never);
