@@ -251,10 +251,12 @@ func TestFaultProcessKilledAroundSubmission(t *testing.T) {
 	}
 }
 
-// A graceful shutdown cancels the worker's context. Before the provider is
-// reached that is a visible failure; once the body is in flight it is uncertain.
+// A graceful shutdown cancels the worker's context. An attempt already claimed
+// is detached from it: it finishes, Sent filing included, within the drain
+// grace. Past the grace it is cancelled and ends by the usual rules: failed
+// before the body was on the wire, ambiguous once it was.
 func TestFaultGracefulShutdownDuringSubmission(t *testing.T) {
-	t.Run("before the connection", func(t *testing.T) {
+	t.Run("stopped right after the claim, finishes", func(t *testing.T) {
 		e := newOutboxEnv(t)
 		m := marker("shutdown-early")
 		pr := e.newProc()
@@ -268,11 +270,11 @@ func TestFaultGracefulShutdownDuringSubmission(t *testing.T) {
 		}
 		pr.pass()
 		v := e.job(id)
-		if v.State != "failed" || e.delivered(m) != 0 || !v.Payload {
-			t.Fatalf("%s delivered=%d", fmtState(v), e.delivered(m))
+		if v.State != "submitted" || v.Filing != "filed" || e.delivered(m) != 1 || e.filed(m) != 1 {
+			t.Fatalf("%s delivered=%d filed=%d", fmtState(v), e.delivered(m), e.filed(m))
 		}
 	})
-	t.Run("mid DATA", func(t *testing.T) {
+	t.Run("stopped mid DATA, finishes", func(t *testing.T) {
 		e := newOutboxEnv(t)
 		m := marker("shutdown-mid")
 		pr := e.newProc()
@@ -280,15 +282,65 @@ func TestFaultGracefulShutdownDuringSubmission(t *testing.T) {
 		e.makeDue()
 		e.smtp.SetHook(func(step string) faketransport.Action {
 			if step == "body" {
-				pr.cancel() // SIGTERM: contexts end, the database stays up for the final write
+				pr.cancel() // SIGTERM: the worker context ends, the attempt does not
 				time.Sleep(300 * time.Millisecond)
 			}
 			return cont
 		})
 		pr.pass()
 		v := e.job(id)
-		// The server saw the entire message after the cancel raced it, so the
-		// only honest answer is "unknown", never "not sent" and never "sent".
+		if v.State != "submitted" || v.Filing != "filed" || e.delivered(m) != 1 || e.filed(m) != 1 {
+			t.Fatalf("%s delivered=%d filed=%d", fmtState(v), e.delivered(m), e.filed(m))
+		}
+		e.smtp.SetHook(nil)
+		e.settle(3)
+		if e.delivered(m) != 1 {
+			t.Fatal("duplicated after shutdown")
+		}
+	})
+	t.Run("grace exhausted before the body", func(t *testing.T) {
+		e := newOutboxEnv(t)
+		m := marker("shutdown-late-early")
+		pr := e.newProc()
+		pr.app.outboxGrace = 100 * time.Millisecond
+		id := mustSend(t, pr, m, m)
+		e.makeDue()
+		pr.app.outboxFault = func(p string) error {
+			if p == "claim:after" {
+				pr.cancel()
+			}
+			return nil
+		}
+		e.smtp.SetHook(func(step string) faketransport.Action {
+			if step == "greeting" {
+				time.Sleep(600 * time.Millisecond)
+			}
+			return cont
+		})
+		pr.pass()
+		v := e.job(id)
+		if v.State != "failed" || v.Code != "not_submitted" || e.delivered(m) != 0 || !v.Payload {
+			t.Fatalf("%s delivered=%d", fmtState(v), e.delivered(m))
+		}
+	})
+	t.Run("grace exhausted mid DATA", func(t *testing.T) {
+		e := newOutboxEnv(t)
+		m := marker("shutdown-late-mid")
+		pr := e.newProc()
+		pr.app.outboxGrace = 100 * time.Millisecond
+		id := mustSend(t, pr, m, m)
+		e.makeDue()
+		e.smtp.SetHook(func(step string) faketransport.Action {
+			if step == "body" {
+				pr.cancel()
+				time.Sleep(600 * time.Millisecond)
+			}
+			return cont
+		})
+		pr.pass()
+		v := e.job(id)
+		// The body was on the wire when the grace ran out: the only honest
+		// answer is "unknown", never "not sent" and never "sent".
 		if v.State != "ambiguous" || !v.Payload {
 			t.Fatalf("%s delivered=%d", fmtState(v), e.delivered(m))
 		}
@@ -296,6 +348,23 @@ func TestFaultGracefulShutdownDuringSubmission(t *testing.T) {
 		e.settle(3)
 		if e.delivered(m) > 1 {
 			t.Fatal("duplicated after shutdown")
+		}
+	})
+	t.Run("nothing new is claimed once stopping", func(t *testing.T) {
+		e := newOutboxEnv(t)
+		m := marker("shutdown-unclaimed")
+		pr := e.newProc()
+		id := mustSend(t, pr, m, m)
+		e.makeDue()
+		pr.cancel()
+		pr.pass()
+		if v := e.job(id); v.State != "pending" || e.smtp.Connections() != 0 {
+			t.Fatalf("claimed after the stop: %s conns=%d", fmtState(v), e.smtp.Connections())
+		}
+		// The next process sends it once.
+		e.settle(2)
+		if v := e.job(id); v.State != "submitted" || e.delivered(m) != 1 {
+			t.Fatalf("%s delivered=%d", fmtState(v), e.delivered(m))
 		}
 	})
 }

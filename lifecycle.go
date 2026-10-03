@@ -157,7 +157,8 @@ func (a *App) startBackgroundTasks(ctx context.Context) {
 }
 
 // stopBackground is the bounded Shutdown: cancel every background context
-// (account gates derive from the same root, so provider I/O aborts), then
+// (account gates derive from the same root, so provider I/O aborts; outbox
+// attempts already in flight finish within their drain grace instead), then
 // join the in-flight work before the caller releases the pools.
 func (a *App) stopBackground(timeout time.Duration) bool {
 	a.tasksMu.Lock()

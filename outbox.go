@@ -74,6 +74,11 @@ const outboxOwnerMaxJobs = 4
 // and a stalled provider delays only its own account.
 const outboxWorkers = 4
 
+// outboxDrainGrace is how long attempts already in flight may keep running
+// after a graceful stop begins; the stop claims nothing new. It fits inside
+// shutdownBudget together with the outcome write that follows it.
+const outboxDrainGrace = 15 * time.Second
+
 // outboxSettled selects rows with no submission or filing in flight. Only
 // these are ever expired; pending work is never silently dropped.
 const outboxSettled = `state IN ('submitted','failed','ambiguous','cancelled') AND filing_state NOT IN ('pending','submitting')`
@@ -333,8 +338,9 @@ func (a *App) logFenced() {
 // itself does only short database work (sweep, prune, claim), so the
 // interrupted-claim sweep runs every tick however long a provider stalls;
 // provider attempts run beside it, bounded by outboxWorkers and one per
-// account. The loop waits for the attempts it started before it returns, so
-// the background join covers them.
+// account. When the server stops, the loop stops claiming at once, then waits
+// for the attempts it already started (bounded by outboxDrainGrace) so the
+// background join covers them.
 func (a *App) startOutboxWorker() {
 	a.launch("durable-outbox", a.runOutboxWorker)
 }
@@ -457,7 +463,11 @@ func (a *App) dispatchOutbox(ctx context.Context, s *outboxSlots) error {
 		if err != nil {
 			return err
 		}
-		s.start(a, filing.account, func() { _ = a.fileSentCopy(ctx, filing) })
+		s.start(a, filing.account, func() {
+			work, stop := a.outboxWork(ctx)
+			defer stop()
+			_ = a.fileSentCopy(work, filing)
+		})
 	}
 }
 
@@ -476,13 +486,37 @@ func (a *App) processOutbox(ctx context.Context) error {
 	return a.processSentCopy(ctx)
 }
 
-// attemptOutbox submits one claimed job and then files its Sent copy, as
-// one attempt.
+// outboxDetachedKey marks provider work that a graceful stop lets finish.
+type outboxDetachedKey struct{}
+
+// outboxWork detaches an attempt that has already been claimed from the
+// worker's cancellation. A graceful stop cancels ctx: from then on nothing new
+// is claimed, but the attempt keeps running for the drain grace and is
+// cancelled only after it, ending ambiguous or failed by the usual rules. The
+// marker also lets the account lease ignore the shutdown while still
+// honouring an account deletion (beginAccountWorkCtx).
+func (a *App) outboxWork(ctx context.Context) (context.Context, func()) {
+	grace := a.outboxGrace
+	if grace <= 0 {
+		grace = outboxDrainGrace
+	}
+	work, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(ctx, func() { time.AfterFunc(grace, cancel) })
+	return context.WithValue(work, outboxDetachedKey{}, true), func() {
+		stop()
+		cancel()
+	}
+}
+
+// attemptOutbox submits one claimed job and then files its Sent copy, both
+// as the same detached attempt.
 func (a *App) attemptOutbox(ctx context.Context, job outboxAttempt, account, ciphertext string) {
-	a.deliverOutbox(ctx, job, account, ciphertext)
-	filing, err := a.claimSentCopy(ctx, job.ID, []string{})
+	work, stop := a.outboxWork(ctx)
+	defer stop()
+	a.deliverOutbox(work, job, account, ciphertext)
+	filing, err := a.claimSentCopy(work, job.ID, []string{})
 	if err == nil {
-		_ = a.fileSentCopy(ctx, filing)
+		_ = a.fileSentCopy(work, filing)
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		a.log.Error("Sent-copy claim failed", "id", job.ID, "err", err)
 	}

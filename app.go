@@ -55,6 +55,8 @@ type App struct {
 	// outboxFault is nil in production. Tests set it to abort the process at
 	// a named persistence or provider boundary (see outboxPoint).
 	outboxFault func(point string) error
+	// outboxGrace overrides outboxDrainGrace; tests shorten it.
+	outboxGrace time.Duration
 }
 
 // accountLifecycle is one account's admission gate (audit OPS-05): an
@@ -72,7 +74,12 @@ type accountLifecycle struct {
 	drained chan struct{}
 	ctx     context.Context
 	cancel  context.CancelFunc
-	parent  *App
+	// sealCtx is cancelled by deletion only, never by the shutdown drain:
+	// an outbox attempt already in flight finishes through a graceful stop
+	// but still aborts when its account is deleted.
+	sealCtx    context.Context
+	sealCancel context.CancelFunc
+	parent     *App
 }
 
 func (a *App) accountState(acct mail.AccountID) *accountLifecycle {
@@ -84,7 +91,8 @@ func (a *App) accountState(acct mail.AccountID) *accountLifecycle {
 	state := a.accountStates[acct]
 	if state == nil {
 		ctx, cancel := context.WithCancel(a.bgRoot())
-		state = &accountLifecycle{ctx: ctx, cancel: cancel, parent: a}
+		sealCtx, sealCancel := context.WithCancel(context.Background())
+		state = &accountLifecycle{ctx: ctx, cancel: cancel, sealCtx: sealCtx, sealCancel: sealCancel, parent: a}
 		a.accountStates[acct] = state
 	}
 	return state
@@ -100,12 +108,19 @@ func (a *App) beginAccountUse(acct mail.AccountID) (func(), bool) {
 
 // beginAccountWork is beginAccountUse for operations that drive provider
 // I/O: the returned context carries the account's own cancellation, so a
-// deletion (or the shutdown drain) aborts the dial, fetch, or submission
-// instead of waiting it out. The context is captured under the state
+// deletion (or the shutdown drain) aborts the dial, fetch, or sync instead
+// of waiting it out. An outbox attempt already in flight is the exception to
+// the drain (see outboxWork); deletion still aborts it. The context is captured under the state
 // mutex — an unseal replaces it, and reading it after unlock could hand a
 // caller the canceled context of a deleted-and-resurrected account
 // (audit 5 LIFE-02).
 func (a *App) beginAccountWork(acct mail.AccountID) (context.Context, func(), bool) {
+	return a.beginAccountLease(acct, false)
+}
+
+// beginAccountLease admits one operation; detached selects the context that
+// only deletion cancels (see accountLifecycle.sealCtx).
+func (a *App) beginAccountLease(acct mail.AccountID, detached bool) (context.Context, func(), bool) {
 	state := a.accountState(acct)
 	state.mu.Lock()
 	if state.deleting {
@@ -114,6 +129,9 @@ func (a *App) beginAccountWork(acct mail.AccountID) (context.Context, func(), bo
 	}
 	state.active++
 	accountCtx := state.ctx
+	if detached {
+		accountCtx = state.sealCtx
+	}
 	state.mu.Unlock()
 	return accountCtx, func() {
 		state.mu.Lock()
@@ -190,6 +208,7 @@ func (s *accountLifecycle) seal() bool {
 		s.drained = nil
 	}
 	s.cancel()
+	s.sealCancel()
 	return true
 }
 
@@ -205,6 +224,7 @@ func (s *accountLifecycle) unseal() {
 	ctx, cancel := context.WithCancel(s.parent.bgRoot())
 	s.ctx = ctx
 	s.cancel = cancel
+	s.sealCtx, s.sealCancel = context.WithCancel(context.Background())
 }
 
 // currentDrain snapshots the seal's completion channel. Nil means the count
@@ -295,11 +315,14 @@ func (a *App) holdRequestAccount(r *http.Request) (context.Context, func(), bool
 // beginAccountWorkCtx couples a lease to BOTH the caller's context and
 // account cancellation. A nested use of the same account inherits its
 // already-joined context and does not increment the active count again.
+// An outbox attempt detached from the shutdown drain (outboxWork) joins
+// only the account's deletion, so the drain does not abort it here either.
 func (a *App) beginAccountWorkCtx(ctx context.Context, acct mail.AccountID) (context.Context, func(), bool) {
 	if accountLeaseHeld(ctx, acct) {
 		return ctx, func() {}, true
 	}
-	accountCtx, release, ok := a.beginAccountWork(acct)
+	detached, _ := ctx.Value(outboxDetachedKey{}).(bool)
+	accountCtx, release, ok := a.beginAccountLease(acct, detached)
 	if !ok {
 		return ctx, func() {}, false
 	}
