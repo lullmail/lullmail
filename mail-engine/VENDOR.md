@@ -5,13 +5,7 @@ Upstream: `~/Documents/Code Projects/Neutron/mail` (module
 `replace`. The module has no published version and deploy builds run on servers
 with no Neutron checkout, so the copy has to be in-tree.
 
-Synced: 2026-10-02, from Neutron cab1aeb4 (PR #61 backflowed every vendored fix; copy is byte-identical to upstream mail/ apart from this file).
-
-**Pending backflow (landed here first, 2026-10-02, durable outbox):** `send.go`
-and `send_test.go` add `NotSubmittedError` / `IsNotSubmitted` so a caller can
-tell an SMTP failure that provably precedes acceptance from an unknown outcome.
-Until these two files are applied to Neutron's `mail/` module the byte-identical
-statement above does not hold; do not re-vendor over them.
+Synced: 2026-10-03, from Neutron 888b01c7 (PR #63 backflowed `NotSubmittedError`; the engine files are byte-identical to upstream mail/ apart from this file, `README.md`, `imap/live_test.go` and the CI-only `scripts/` and `testdata/`, which are not vendored).
 
 ## Rule
 
