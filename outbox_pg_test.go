@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -21,11 +22,12 @@ func seedOutboxAccount(t *testing.T, p productPG) {
 func seedOutbox(t *testing.T, p productPG, key string) outboxRecord {
 	t.Helper()
 	payload, _ := json.Marshal(outboxPayload{Request: json.RawMessage(`{"to":"recipient@example.test","text":"synthetic"}`)})
-	cipher, err := sealSecret(p.cfg, string(payload))
+	id := uuid.NewString()
+	cipher, err := sealBound(p.cfg, "payload", p.uid, id, string(payload))
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, _, err := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", key, "hash", cipher, int64(len(cipher)))
+	r, _, err := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", key, "hash", id, cipher, int64(len(cipher)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +45,7 @@ func TestIntegrationOutboxConcurrentAcceptanceSurvivesRestart(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r, _, e := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "one-key", "hash", "encrypted-fixture", 20)
+			r, _, e := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "one-key", "hash", uuid.NewString(), "encrypted-fixture", 20)
 			if e != nil {
 				errs <- e
 				return
@@ -67,11 +69,11 @@ func TestIntegrationOutboxConcurrentAcceptanceSurvivesRestart(t *testing.T) {
 		}
 	}
 	fresh := &App{db: p.db, cfg: p.cfg, log: discardLogger()}
-	r, replay, err := fresh.saveOutbox(context.Background(), p.uid, "outbox-acct", "one-key", "hash", "not-used", 20)
+	r, replay, err := fresh.saveOutbox(context.Background(), p.uid, "outbox-acct", "one-key", "hash", uuid.NewString(), "not-used", 20)
 	if err != nil || !replay || r.ID != id {
 		t.Fatalf("restart replay=%+v %v %v", r, replay, err)
 	}
-	if _, _, err = fresh.saveOutbox(context.Background(), p.uid, "outbox-acct", "one-key", "different", "unused", 1); !errors.Is(err, errOutboxKeyConflict) {
+	if _, _, err = fresh.saveOutbox(context.Background(), p.uid, "outbox-acct", "one-key", "different", uuid.NewString(), "unused", 1); !errors.Is(err, errOutboxKeyConflict) {
 		t.Fatal("key conflict accepted", err)
 	}
 }
@@ -173,7 +175,7 @@ func TestIntegrationOutboxSMTPAcceptanceSeparatesFiling(t *testing.T) {
 	if state != "submitted" || filing != "pending" || original != "" || sent == string(raw) {
 		t.Fatalf("outcome=%s filing=%s original=%d sent=%d", state, filing, len(original), len(sent))
 	}
-	recovered, err := openSecret(p.cfg, sent)
+	recovered, err := openBound(p.cfg, "sent", p.uid, row.ID, sent)
 	if err != nil || recovered != string(raw) {
 		t.Fatal("Sent copy lost", err)
 	}
@@ -188,10 +190,10 @@ func TestIntegrationOutboxQuotaAndReplayAtCapacity(t *testing.T) {
 	for i := 0; i < sendMaxJobs; i++ {
 		seedOutbox(t, p, fmt.Sprint(i))
 	}
-	if _, _, err := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "overflow", "hash", "x", 1); !errors.Is(err, errOutboxCapacity) {
+	if _, _, err := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "overflow", "hash", uuid.NewString(), "x", 1); !errors.Is(err, errOutboxCapacity) {
 		t.Fatal("quota ignored", err)
 	}
-	if _, replay, err := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "0", "hash", "x", 1); err != nil || !replay {
+	if _, replay, err := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "0", "hash", uuid.NewString(), "x", 1); err != nil || !replay {
 		t.Fatal("full queue blocked receipt replay", err)
 	}
 }

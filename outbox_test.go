@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"github.com/neutron-build/neutron/mail"
 	"net/http"
 	"net/http/httptest"
@@ -82,7 +83,7 @@ func TestOutboxDurableAdmissionAndKeyReplay(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db, log := openOutboxSteps(t, tc.commitErr, tc.steps...)
 			a := &App{db: db}
-			rec, replay, err := a.saveOutbox(context.Background(), "owner", "mirror-1", "key", "hash", "ciphertext", 10)
+			rec, replay, err := a.saveOutbox(context.Background(), "owner", "mirror-1", "key", "hash", uuid.NewString(), "ciphertext", 10)
 			if (err == nil) != (tc.want == nil) || (err != nil && err.Error() != tc.want.Error()) {
 				t.Fatalf("error=%v want=%v", err, tc.want)
 			}
@@ -116,14 +117,14 @@ func TestOutboxLostCommitDoesNotAcknowledgeAcceptance(t *testing.T) {
 func TestOutboxRecoveryDoesNotCachePrivateComposition(t *testing.T) {
 	a := &App{cfg: &Config{SecretKey: "test"}, log: discardLogger()}
 	payload, _ := json.Marshal(outboxPayload{Request: json.RawMessage(`{"to":"dest@example.test","text":"private","attachments":[{"data_base64":"YWJj"}]}`)})
-	cipher, err := sealSecret(a.cfg, string(payload))
+	cipher, err := sealBound(a.cfg, "payload", "owner", "job", string(payload))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(cipher, "private") {
 		t.Fatal("plaintext persisted")
 	}
-	a.db = openStepDB(t, dbStep{kind: "query", rows: &testRows{columns: []string{"payload", "state", "account", "sent"}, values: [][]driver.Value{{cipher, "ambiguous", "public-account", ""}}}})
+	a.db = openStepDB(t, dbStep{kind: "query", rows: &testRows{columns: []string{"payload", "state", "account", "sent", "row"}, values: [][]driver.Value{{cipher, "ambiguous", "public-account", "", "job"}}}})
 	r := httptest.NewRequest("GET", "/api/outbox/id", nil)
 	r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, "owner"))
 	r.SetPathValue("id", "job")
@@ -161,7 +162,7 @@ func TestOutboxReservationCoversEncryptedQuotedPrintableMIME(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cipher, err := sealSecret(cfg, string(payload))
+	cipher, err := sealBound(cfg, "payload", "owner", "job", string(payload))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +170,7 @@ func TestOutboxReservationCoversEncryptedQuotedPrintableMIME(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sent, err := sealSecret(cfg, string(raw))
+	sent, err := sealBound(cfg, "sent", "owner", "job", string(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +198,7 @@ func TestOutboxCancelledLookupFailureIsNotReportedAsTooLate(t *testing.T) {
 func TestOutboxDiscardedPayloadDoesNotClaimProviderAcceptance(t *testing.T) {
 	for _, state := range []string{"failed", "cancelled", "ambiguous"} {
 		t.Run(state, func(t *testing.T) {
-			a := &App{db: openStepDB(t, dbStep{kind: "query", rows: &testRows{columns: []string{"payload", "state", "account", "sent"}, values: [][]driver.Value{{"", state, "public-account", ""}}}})}
+			a := &App{db: openStepDB(t, dbStep{kind: "query", rows: &testRows{columns: []string{"payload", "state", "account", "sent", "row"}, values: [][]driver.Value{{"", state, "public-account", "", "job"}}}})}
 			r := httptest.NewRequest(http.MethodGet, "/outbox/job", nil)
 			r.SetPathValue("id", "job")
 			r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, "owner"))
@@ -224,7 +225,7 @@ func TestOutboxChangedEncryptionKeyCannotExposeRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &App{cfg: &Config{SecretKey: "replacement"}, db: openStepDB(t, dbStep{kind: "query", rows: &testRows{columns: []string{"payload", "state", "account", "sent"}, values: [][]driver.Value{{cipher, "failed", "account", ""}}}})}
+	a := &App{cfg: &Config{SecretKey: "replacement"}, db: openStepDB(t, dbStep{kind: "query", rows: &testRows{columns: []string{"payload", "state", "account", "sent", "row"}, values: [][]driver.Value{{cipher, "failed", "account", "", "job"}}}})}
 	r := httptest.NewRequest(http.MethodGet, "/outbox/job", nil)
 	r.SetPathValue("id", "job")
 	r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, "owner"))
@@ -270,7 +271,7 @@ func (p *outboxAppendCancellationProbe) Append(ctx context.Context, box mail.Mai
 
 func TestOutboxSentFilingPreservesIntegratedAccountCancellation(t *testing.T) {
 	cfg := &Config{SecretKey: "test"}
-	sent, err := sealSecret(cfg, "Synthetic submitted MIME")
+	sent, err := sealBound(cfg, "sent", "owner-1", "job", "Synthetic submitted MIME")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +280,7 @@ func TestOutboxSentFilingPreservesIntegratedAccountCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	db, script := openOutboxSteps(t, nil,
-		dbStep{kind: "query", rows: &testRows{columns: []string{"id", "account", "sent"}, values: [][]driver.Value{{"job", "mirror-1", sent}}}},
+		dbStep{kind: "query", rows: &testRows{columns: []string{"id", "owner", "account", "sent"}, values: [][]driver.Value{{"job", "owner-1", "mirror-1", sent}}}},
 		dbStep{kind: "query", rows: &testRows{columns: []string{"mailbox"}, values: [][]driver.Value{{"sent-box"}}}},
 		dbStep{kind: "query", rows: &testRows{columns: []string{"owned"}, values: [][]driver.Value{{true}}}},
 		dbStep{kind: "query", rows: &testRows{columns: []string{"provider", "address", "username", "host", "port", "ciphertext"}, values: [][]driver.Value{{"imap", "sender@example.test", "sender", "synthetic.invalid", int64(993), credential}}}},
