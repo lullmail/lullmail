@@ -131,7 +131,8 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
   }
   const method = opts.method || (body ? "POST" : "GET");
   assertCurrent();
-  if (protectedRoute && method === "GET" && !opts.fresh) {
+  const privateOutbox = path === "/outbox" || path.startsWith("/outbox/");
+  if (protectedRoute && method === "GET" && !privateOutbox && !opts.fresh) {
     const cached = memoryResponses.get(memoryKey(owner, gen, snapshots + "\n" + path));
     if (cached && Date.now() - cached.savedAt < MEMORY_TTL) return copyValue(cached.value as T);
     if (cached) memoryResponses.delete(memoryKey(owner, gen, snapshots + "\n" + path));
@@ -141,7 +142,7 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
     res = await fetch("/api" + path, { method, headers, body, signal: opts.signal, credentials: "same-origin" });
   } catch (error) {
     if (opts.signal?.aborted) throw error;
-    if (protectedRoute && method === "GET") {
+    if (protectedRoute && method === "GET" && !privateOutbox) {
       const cached = await cachedResponse<T>(path, gen, snapshots);
       assertCurrent();
       if (cached !== undefined) return cached;
@@ -178,7 +179,7 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
   // before caching: returning it handed the previous owner's data to
   // whoever is on screen now (audit 5 OFF-02).
   assertCurrent();
-  if (protectedRoute && method === "GET") {
+  if (protectedRoute && method === "GET" && !privateOutbox) {
     memoryResponses.set(memoryKey(owner, gen, snapshots + "\n" + path), { savedAt: Date.now(), value: copyValue(value) });
     cacheResponse(path, value, gen, snapshots).catch(() => {});
   } else {

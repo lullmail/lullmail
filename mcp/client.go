@@ -112,6 +112,14 @@ func safeSegment(s string) (string, error) {
 }
 
 func (c *client) do(ctx context.Context, method, path string, body any, query url.Values) ([]byte, error) {
+	return c.doWithKey(ctx, method, path, body, query, "")
+}
+
+func (c *client) doWithKey(ctx context.Context, method, path string, body any, query url.Values, key string) ([]byte, error) {
+	if len(key) > 128 || strings.ContainsAny(key, "\r\n") {
+		return nil, fmt.Errorf("invalid submission key")
+	}
+
 	var reader io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
@@ -129,6 +137,9 @@ func (c *client) do(ctx context.Context, method, path string, body any, query ur
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
+	if key != "" {
+		req.Header.Set("Idempotency-Key", key)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

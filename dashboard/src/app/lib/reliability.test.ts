@@ -256,3 +256,25 @@ describe("live private-state teardown", () => {
     expect(await loadDrafts()).toEqual([]);
   });
 });
+
+describe("durable outbox recovery boundaries", () => {
+  it.each(["ambiguous", "failed", "cancelled"])("keeps a draft when a retained key reports %s", async (status) => {
+    openCompose({ to: input.to, subject: input.subject, body: input.text });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ queued: "old", undo_seconds: 0, durable: true, status }))));
+    expect(await sendMail(input, "retained-" + status)).toBe(false);
+    expect(draftStack.value).toHaveLength(1);
+    expect(toast.value?.undo).toBeUndefined();
+  });
+  it("stores normal no-store mailbox responses but never outbox recovery data", async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ subject: "offline mail" }]), { headers: { "Cache-Control": "no-store" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ request: { text: "sensitive outbox copy" } }), { headers: { "Cache-Control": "no-store" } }));
+    vi.stubGlobal("fetch", fetcher);
+    await api("/buckets/imbox", { fresh: true }); await api("/outbox/job", { fresh: true });
+    await settle();
+    expect(await cachedResponse("/buckets/imbox")).toEqual([{ subject: "offline mail" }]);
+    expect(await cachedResponse("/outbox/job")).toBeUndefined();
+    fetcher.mockRejectedValue(new Error("offline"));
+    await expect(api("/outbox/job")).rejects.toThrow("offline");
+  });
+});

@@ -128,6 +128,7 @@ var productMigrations = []productMigration{
 	{Version: 7, Name: "mutation response metadata", Statements: []string{
 		`ALTER TABLE api_mutations ADD COLUMN IF NOT EXISTS response_headers text NOT NULL DEFAULT '{}'`,
 	}},
+	{Version: 8, Name: "durable outbound submissions", Statements: outboxStatements},
 }
 
 // reconcileClaimStatements stamps account_reconcile_jobs with the claim

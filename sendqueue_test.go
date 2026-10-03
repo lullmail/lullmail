@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"encoding/base64"
 	"encoding/json"
@@ -166,20 +167,24 @@ func TestHandleSendEnvelopeCoversAdvertisedAttachmentTotals(t *testing.T) {
 			cfg:   cfg,
 			log:   discardLogger(),
 			sendq: newSendQueue(),
-			db: openStepDB(t,
-				dbStep{kind: "query", rows: &testRows{
-					columns: []string{"mirror_account_id", "provider"},
-					values:  [][]driver.Value{{"mirror-1", "imap"}},
-				}},
-				dbStep{kind: "query", rows: &testRows{
-					columns: []string{"provider", "address"},
-					values:  [][]driver.Value{{"imap", "owner@example.com"}},
-				}},
-				dbStep{kind: "query", rows: &testRows{
-					columns: []string{"address", "display_name"},
-					values:  [][]driver.Value{{"owner@example.com", "Owner"}},
-				}},
-			),
+			db: func() *sql.DB {
+				db, _ := openOutboxSteps(t, nil,
+					dbStep{kind: "query", rows: &testRows{
+						columns: []string{"mirror_account_id", "provider"},
+						values:  [][]driver.Value{{"mirror-1", "imap"}},
+					}},
+					dbStep{kind: "query", rows: &testRows{
+						columns: []string{"provider", "address"},
+						values:  [][]driver.Value{{"imap", "owner@example.com"}},
+					}},
+					dbStep{kind: "query", rows: &testRows{
+						columns: []string{"address", "display_name"},
+						values:  [][]driver.Value{{"owner@example.com", "Owner"}},
+					}},
+					dbStep{kind: "exec"}, outboxEmpty(), outboxUsage(0, 0, 0), dbStep{kind: "exec"},
+				)
+				return db
+			}(),
 		}
 	}
 	file := func(size int) sendAttachmentRequest {
@@ -442,42 +447,27 @@ func TestDecodeAttachmentsAcceptsZeroByteAttachment(t *testing.T) {
 // key is a 409 (audit 5 SEND-02). The step DB proves the retry never
 // reaches the database: only one acceptance's queries are staged.
 func TestHandleSendIdempotentAcceptance(t *testing.T) {
-	cfg := &Config{SecretKey: "0123456789abcdef0123456789abcdef"}
-	sendSteps := func() *App {
-		return &App{
-			cfg:   cfg,
-			log:   discardLogger(),
-			sendq: newSendQueue(),
-			db: openStepDB(t,
-				dbStep{kind: "query", rows: &testRows{
-					columns: []string{"mirror_account_id", "provider"},
-					values:  [][]driver.Value{{"mirror-1", "imap"}},
-				}},
-				dbStep{kind: "query", rows: &testRows{
-					columns: []string{"provider", "address"},
-					values:  [][]driver.Value{{"imap", "owner@example.com"}},
-				}},
-				dbStep{kind: "query", rows: &testRows{
-					columns: []string{"address", "display_name"},
-					values:  [][]driver.Value{{"owner@example.com", "Owner"}},
-				}},
-			),
-		}
+	body := []byte(`{"to":"dest@example.com","subject":"again","text":"hello"}`)
+	hash := mutationRequestHash("POST", "/api/send", "", body)
+	steps := []dbStep{outboxEmpty(),
+		{kind: "query", rows: &testRows{columns: []string{"mirror", "provider"}, values: [][]driver.Value{{"mirror-1", "imap"}}}},
+		{kind: "query", rows: &testRows{columns: []string{"provider", "address"}, values: [][]driver.Value{{"imap", "owner@example.com"}}}},
+		{kind: "query", rows: &testRows{columns: []string{"address", "name"}, values: [][]driver.Value{{"owner@example.com", "Owner"}}}},
 	}
-	post := func(a *App, key, text string) *httptest.ResponseRecorder {
-		body, _ := json.Marshal(map[string]any{"to": "dest@example.com", "subject": "again", "text": text})
-		r := httptest.NewRequest(http.MethodPost, "/api/send", bytes.NewReader(body))
-		r.Header.Set("Idempotency-Key", key)
+	steps = append(steps, outboxAdmissionSteps()...)
+	db, script := openOutboxSteps(t, nil, steps...)
+	a := &App{cfg: &Config{SecretKey: "test"}, db: db, log: discardLogger()}
+	post := func(body []byte) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", "/api/send", bytes.NewReader(body))
+		r.Header.Set("Idempotency-Key", "key")
 		r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, "owner-1"))
 		w := httptest.NewRecorder()
 		a.handleSend(w, r)
 		return w
 	}
-
-	a := sendSteps()
-	first := post(a, "key-1", "hello")
-	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"queued"`) {
-		t.Fatalf("first acceptance: status = %d body = %s", first.Code, first.Body.String())
+	first := post(body)
+	if first.Code != 200 {
+		t.Fatalf("first=%d %s", first.Code, first.Body.String())
 	}
 	var queued struct {
 		Queued string `json:"queued"`
@@ -485,27 +475,14 @@ func TestHandleSendIdempotentAcceptance(t *testing.T) {
 	if err := json.Unmarshal(first.Body.Bytes(), &queued); err != nil {
 		t.Fatal(err)
 	}
-
-	// Same key, same body, immediately: the recorded answer — same queued
-	// id — with NO new database work (the step DB has none staged).
-	retry := post(a, "key-1", "hello")
-	if retry.Code != http.StatusOK {
-		t.Fatalf("retry acceptance: status = %d body = %s", retry.Code, retry.Body.String())
+	script.steps = append(script.steps, outboxStored(queued.Queued, "pending", hash), outboxStored(queued.Queued, "pending", hash))
+	again := post(body)
+	if again.Code != 200 || !strings.Contains(again.Body.String(), queued.Queued) {
+		t.Fatalf("retry=%d %s", again.Code, again.Body.String())
 	}
-	var retried struct {
-		Queued string `json:"queued"`
-	}
-	if err := json.Unmarshal(retry.Body.Bytes(), &retried); err != nil {
-		t.Fatal(err)
-	}
-	if retried.Queued != queued.Queued {
-		t.Fatalf("retry queued id = %q, want the original %q", retried.Queued, queued.Queued)
-	}
-
-	// Same key, DIFFERENT body: a conflict, never a second submission.
-	conflict := post(a, "key-1", "different")
-	if conflict.Code != http.StatusConflict {
-		t.Fatalf("key reuse with different body: status = %d body = %s", conflict.Code, conflict.Body.String())
+	conflict := post([]byte(`{"to":"dest@example.com","subject":"different","text":"hello"}`))
+	if conflict.Code != 409 {
+		t.Fatalf("conflict=%d %s", conflict.Code, conflict.Body.String())
 	}
 }
 
@@ -787,29 +764,24 @@ func TestShutdownBeforeSubmissionRetainsCancelledReceipt(t *testing.T) {
 
 func TestHandleSendReceiptIsScopedToOwner(t *testing.T) {
 	body := []byte(`{"to":"dest@example.com","subject":"s","text":"hello"}`)
-	a := &App{
-		sendq: newSendQueue(),
-		log:   discardLogger(),
-		db:    openStepDB(t, dbStep{kind: "query", rows: &testRows{columns: []string{"mirror_account_id", "provider"}}}),
-	}
-	a.sendq.receipts["owner-1\x00shared-key"] = sendReceipt{
-		id: "already-submitted", reqHash: mutationRequestHash("POST", "/api/send", "", body),
-		outcome: sendSubmitted, expiresAt: time.Now().Add(sendReceiptTTL),
-	}
+	hash := mutationRequestHash("POST", "/api/send", "", body)
+	db, script := openOutboxSteps(t, nil, outboxStored("already-submitted", "submitted", hash), outboxEmpty(), dbStep{kind: "query", rows: &testRows{columns: []string{"mirror", "provider"}}})
+	a := &App{db: db, log: discardLogger()}
 	for _, tc := range []struct {
-		owner  string
-		status int
-	}{{"owner-1", http.StatusOK}, {"owner-2", http.StatusPreconditionFailed}} {
+		owner string
+		code  int
+	}{{"owner-1", 200}, {"owner-2", 412}} {
 		r := httptest.NewRequest("POST", "/api/send", bytes.NewReader(body))
-		r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, tc.owner))
 		r.Header.Set("Idempotency-Key", "shared-key")
+		r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, tc.owner))
 		w := httptest.NewRecorder()
 		a.handleSend(w, r)
-		if w.Code != tc.status {
-			t.Fatalf("owner %s: %d %s", tc.owner, w.Code, w.Body.String())
+		if w.Code != tc.code {
+			t.Fatalf("%s: %d %s", tc.owner, w.Code, w.Body.String())
 		}
-		if tc.owner == "owner-2" && w.Header().Get("X-Idempotent-Replay") != "" {
-			t.Fatal("new owner replayed previous owner's receipt")
-		}
+	}
+	log := script.log()
+	if log[0].args[0] != "owner-1" || log[1].args[0] != "owner-2" {
+		t.Fatal("receipt lookup escaped owner scope")
 	}
 }

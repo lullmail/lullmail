@@ -20,6 +20,7 @@ interface Item {
 
 const JUMPS: [string, string][] = [
   ["Today", "/today"],
+  ["Outbox", "/outbox"],
   ["Board", "/board"],
   ["Calendar", "/calendar"],
   ["Notes", "/notes"],

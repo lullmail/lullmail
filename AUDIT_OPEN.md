@@ -193,6 +193,23 @@ Contained fixes and regression coverage are prepared for these confirmed gaps:
 
 Product, engine and MCP compilation, non-PostgreSQL tests/race checks and vet now pass. PostgreSQL 17 integration execution remains a verification gate. See [reliability boundaries and outbox proposal](docs/reliability-boundaries.md) for contract limits and required checks.
 
+## Isolated durable-outbox candidate review (2026-10-02)
+
+The separately prepared architectural candidate remains outside the default
+hardening patch and does not close the standing SEND-01/SEND-03 deferral.
+Its review corrected three reproduced candidate defects: encrypted Sent-copy
+MIME could exceed its admission reservation after quoted-printable line folding;
+cancellation receipt lookup errors incorrectly answered Too Late; and removed
+failed/cancelled/ambiguous payloads incorrectly claimed provider acceptance.
+The quota now reserves encoding headroom and enforces the reserved-byte bound on
+Sent replacement. Regression tests also cover missing/changed encryption keys.
+
+These offline/unit checks do not validate the new PostgreSQL migration, locks,
+claims, cascade teardown or crash recovery. The candidate has been reconciled onto a separate frozen copy of the newer
+lifecycle/offline hardening. Real PostgreSQL, process-kill and browser recovery
+checks remain required before any rollout. See
+`docs/durable-outbox.md` for its separate contract and release gates.
+
 Standing decision: **SEND-01 = SEND-03 (pass 6) = lullmail-10 below.** The
 durable-outbox finding appears in both later reports; it is the same item
 as this register's one recorded product deferral, and the deferral stands.
