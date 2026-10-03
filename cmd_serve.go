@@ -96,19 +96,24 @@ func serve() {
 
 	// SIGTERM/SIGINT drain in-flight requests and stop the background
 	// workers before the process exits, so a deploy or container stop never
-	// cuts a request or a sync mid-flight. The drain is bounded: requests
-	// that outlive it are dropped rather than blocking shutdown forever.
+	// cuts a request or a sync mid-flight. The signal cancels the background
+	// root at once: syncs abort, and the outbox stops claiming but lets the
+	// submissions it already started finish (outboxDrainGrace). The whole
+	// drain, HTTP and background together, is bounded by shutdownBudget so
+	// it ends before the supervisor's stop timeout sends SIGKILL.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if app != nil {
 		app.startBackground(ctx)
 	}
+	var deadline time.Time
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
 		<-ctx.Done()
+		deadline = time.Now().Add(shutdownBudget)
 		log.Printf("lullmail shutting down (%v), draining HTTP", ctx.Err())
-		drainCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		drainCtx, cancel := context.WithTimeout(context.Background(), min(httpDrainBudget, shutdownBudget))
 		defer cancel()
 		if err := srv.Shutdown(drainCtx); err != nil {
 			log.Printf("shutdown: HTTP drain incomplete: %v", err)
@@ -122,19 +127,30 @@ func serve() {
 	}
 	// The listener is closed and the drain goroutine owns the remaining
 	// in-flight budget; wait it out, then join the background work before
-	// releasing the pools: cancel every launch context (account gates
-	// derive from the same root, so provider I/O aborts) and give the
-	// in-flight operations a bounded window to land their writeback (audit
-	// OPS-04 — pools used to close underneath running syncs).
+	// releasing the pools (audit OPS-04 — pools used to close underneath
+	// running syncs). Whatever is still running at the deadline keeps its
+	// recorded state: an unfinished submission is swept to ambiguous by the
+	// next process.
 	<-drained
 	if app != nil {
-		if !app.stopBackground(30 * time.Second) {
-			log.Printf("shutdown: background drain incomplete after 30s; closing pools anyway")
+		if !app.stopBackground(time.Until(deadline)) {
+			log.Printf("shutdown: background drain incomplete after %s; closing pools anyway", shutdownBudget)
 		}
 		app.db.Close()
 		app.store.Close()
 	}
+	log.Printf("lullmail stopped")
 }
+
+// shutdownBudget bounds the whole graceful stop. It must stay below the
+// deployment's stop timeout (Teploy stop_timeout: 30 in the infra config),
+// after which the container is killed. The outbox drain grace plus its
+// outcome write (5s) fits inside it.
+const shutdownBudget = 25 * time.Second
+
+// httpDrainBudget bounds the HTTP part, which runs alongside the background
+// drain.
+const httpDrainBudget = 10 * time.Second
 
 // handleHealth is the deploy liveness probe. Always 200 on purpose: health
 // checks should restart on process death, not on a database blip — the API

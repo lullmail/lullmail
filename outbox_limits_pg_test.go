@@ -1,7 +1,7 @@
 package main
 
-// The concurrent outbox worker, against real PostgreSQL and the loopback
-// provider fakes.
+// The concurrent outbox worker and its graceful drain, against real
+// PostgreSQL and the loopback provider fakes.
 
 import (
 	"bytes"
@@ -215,4 +215,67 @@ func TestOutboxWorkerConcurrencyIsBounded(t *testing.T) {
 	if n, waiting := e.rows(`state='submitting'`), e.rows(`state='pending'`); n != outboxWorkers || waiting != 1 {
 		t.Fatalf("%d attempts in flight and %d waiting, want %d and 1", n, waiting, outboxWorkers)
 	}
+}
+
+// The production loop on a graceful stop: it claims nothing more, lets the
+// attempt in flight finish, files its Sent copy, and only then returns.
+func TestOutboxWorkerDrainsInFlightOnStop(t *testing.T) {
+	t.Run("finishes within the grace", func(t *testing.T) {
+		e := newOutboxEnv(t)
+		pr := e.newProc()
+		hold := newStall(e.smtp, "end")
+		defer hold.open()
+		m := marker("drain")
+		later := marker("drain-later")
+		id := mustSend(t, pr, m, m)
+		e.makeDue()
+		stop, exited := pr.runWorker()
+		<-hold.reached
+		laterID := mustSend(t, pr, later, later)
+		e.makeDue()
+		stop()
+		time.Sleep(300 * time.Millisecond)
+		select {
+		case <-exited:
+			t.Fatal("the worker returned with an attempt in flight")
+		default:
+		}
+		hold.open()
+		select {
+		case <-exited:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the worker did not return after its attempt finished")
+		}
+		if v := e.job(id); v.State != "submitted" || v.Filing != "filed" || e.delivered(m) != 1 || e.filed(m) != 1 {
+			t.Fatalf("%s delivered=%d filed=%d", fmtState(v), e.delivered(m), e.filed(m))
+		}
+		if v := e.job(laterID); v.State != "pending" {
+			t.Fatalf("claimed after the stop: %s", fmtState(v))
+		}
+	})
+	t.Run("cancelled at the grace", func(t *testing.T) {
+		e := newOutboxEnv(t)
+		pr := e.newProc()
+		pr.app.outboxGrace = 300 * time.Millisecond
+		hold := newStall(e.smtp, "end")
+		defer hold.open()
+		m := marker("drain-late")
+		id := mustSend(t, pr, m, m)
+		e.makeDue()
+		stop, exited := pr.runWorker()
+		<-hold.reached
+		stopped := time.Now()
+		stop()
+		select {
+		case <-exited:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the worker outlived its grace")
+		}
+		if took := time.Since(stopped); took > 6*time.Second {
+			t.Fatalf("the drain took %s", took)
+		}
+		if v := e.job(id); v.State != "ambiguous" || !v.Payload {
+			t.Fatalf("%s", fmtState(v))
+		}
+	})
 }
