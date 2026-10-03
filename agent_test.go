@@ -56,3 +56,21 @@ func TestAgentTokenEntersThroughPrefix(t *testing.T) {
 }
 
 var _ = http.StatusOK
+
+func TestAgentMayUndoOnlyCancelsBySingleSegment(t *testing.T) {
+	for _, c := range []struct {
+		method, path string
+		want         bool
+	}{
+		{"DELETE", "/outbox/job", true},
+		{"GET", "/outbox/job", false},
+		{"DELETE", "/outbox/job/payload", false},
+		{"DELETE", "/outbox/", false},
+		{"DELETE", "/outbox/../security", false},
+		{"DELETE", "/security/sessions", false},
+	} {
+		if got := agentMayUndo(c.method, c.path); got != c.want {
+			t.Fatalf("agentMayUndo(%s %q) = %v, want %v", c.method, c.path, got, c.want)
+		}
+	}
+}

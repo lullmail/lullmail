@@ -228,7 +228,7 @@ func TestOutboxMissingEncryptionKeyRefusesAcceptance(t *testing.T) {
 }
 
 func TestOutboxChangedEncryptionKeyCannotExposeRecovery(t *testing.T) {
-	cipher, err := sealSecret(&Config{SecretKey: "original"}, `{"request":{"text":"private original content"}}`)
+	cipher, err := sealBound(&Config{SecretKey: "original"}, "payload", "owner", "job", `{"request":{"text":"private original content"}}`)
 	if err != nil {
 		t.Fatal(err)
 	}

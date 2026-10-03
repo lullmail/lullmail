@@ -72,7 +72,7 @@ Admission is serialized by a PostgreSQL advisory lock and checks:
 
 | Bound | Value | Scope |
 | --- | --- | --- |
-| active sends (`pending` + `submitting`) | 8 | process-wide |
+| active sends (`pending` + `submitting`) | 8 | process-wide, shared by all owners |
 | private-payload reservation | 512 MiB | process-wide |
 | private-payload reservation | 256 MiB | per owner |
 | retained receipts | 50,000 | per owner |
@@ -117,8 +117,9 @@ Saved compositions and Sent copies are sealed as
 with the purpose (`payload` or `sent`), owner id and row id as additional data.
 A ciphertext copied into another row, owner or column fails authentication.
 `keyID` is a fingerprint of `SECRET_KEY` (never the key), so a missing or
-changed key is distinguishable from damage. Data in the earlier unversioned,
-unbound format is still read, without the binding check.
+changed key is distinguishable from damage. The unversioned format used for
+account credentials is refused here, so a credential ciphertext copied into an
+outbox row never opens.
 
 If the key is missing or has changed, the send ends `failed` with
 `payload_key_unavailable` and keeps its ciphertext. Nothing is sent, nothing is

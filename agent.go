@@ -84,6 +84,14 @@ func agentAllowedPath(path string) bool {
 	return false
 }
 
+// agentMayUndo reports whether the request is DELETE /outbox/{id}, which only
+// cancels a send still inside its undo window. The same path with GET serves
+// the decrypted composition and stays session-only.
+func agentMayUndo(method, path string) bool {
+	id, ok := strings.CutPrefix(path, "/outbox/")
+	return method == http.MethodDelete && ok && id != "" && !strings.Contains(id, "/") && !strings.Contains(path, "..")
+}
+
 // authenticateAgent resolves an "Authorization: Bearer lull_..." (or legacy
 // es_...) token to its owner, updating last_used_at at most once a minute so
 // hot polling loops do not turn into write storms.
@@ -125,7 +133,7 @@ func (a *App) requireAgent(next http.Handler) http.Handler {
 			writeProblem(w, http.StatusUnauthorized, "Unauthorized", "agent token not recognized")
 			return
 		}
-		if !agentAllowedPath(strings.TrimPrefix(r.URL.Path, "/api")) {
+		if path := strings.TrimPrefix(r.URL.Path, "/api"); !agentAllowedPath(path) && !agentMayUndo(r.Method, path) {
 			writeProblem(w, http.StatusForbidden, "Forbidden", "agent tokens cannot reach this surface")
 			return
 		}
