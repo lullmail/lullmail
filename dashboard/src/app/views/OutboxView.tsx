@@ -72,7 +72,7 @@ export function OutboxView() {
   };
   return <section class="settings-section">
     <h1>Outbox</h1>
-    <p>The server saves accepted sends before provider submission. “Submitted” means the provider accepted the message, not that a recipient received it. Saved compositions are removed 30 days after a send settles and records of outcomes after 90 days; disconnecting an account removes its outbox.</p>
+    <p>The server saves accepted sends before provider submission. “Submitted” means the provider accepted the message, not that a recipient received it. Saved compositions are removed 30 days after a send settles and records of outcomes after 90 days; disconnecting an account removes its entries here (export your personal data first to keep them), and is refused while one of its sends is still waiting.</p>
     {loading && <p role="status">Loading saved sends…</p>}
     {error && <p role="alert">{error}</p>}
     {!loading && !error && rows.length === 0 && <p>No saved sends</p>}
