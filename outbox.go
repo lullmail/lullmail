@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -67,6 +68,11 @@ const outboxLockKey int64 = 7812634095511117
 // outboxOwnerMaxJobs is one owner's share of the process-wide active-send
 // bound (sendMaxJobs), so a single owner can never fill it for everyone.
 const outboxOwnerMaxJobs = 4
+
+// outboxWorkers bounds concurrent provider attempts in one process. At most
+// one attempt per account runs at a time: one account's sends stay in order,
+// and a stalled provider delays only its own account.
+const outboxWorkers = 4
 
 // outboxSettled selects rows with no submission or filing in flight. Only
 // these are ever expired; pending work is never silently dropped.
@@ -323,69 +329,178 @@ func (a *App) logFenced() {
 	}
 }
 
+// startOutboxWorker runs the outbox loop as one background unit. The loop
+// itself does only short database work (sweep, prune, claim), so the
+// interrupted-claim sweep runs every tick however long a provider stalls;
+// provider attempts run beside it, bounded by outboxWorkers and one per
+// account. The loop waits for the attempts it started before it returns, so
+// the background join covers them.
 func (a *App) startOutboxWorker() {
-	a.launch("durable-outbox", func(ctx context.Context) {
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-		for {
-			if ctx.Err() != nil {
-				return
-			}
-			if err := a.processOutbox(ctx); err != nil && ctx.Err() == nil {
-				a.log.Error("outbox pass failed", "err", err)
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	})
+	a.launch("durable-outbox", a.runOutboxWorker)
 }
 
-func (a *App) processOutbox(ctx context.Context) error {
+func (a *App) runOutboxWorker(ctx context.Context) {
+	s := &outboxSlots{busy: map[string]bool{}, done: make(chan struct{}, outboxWorkers)}
+	defer s.wg.Wait()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for ctx.Err() == nil {
+		if err := a.dispatchOutbox(ctx, s); err != nil && ctx.Err() == nil {
+			a.log.Error("outbox pass failed", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+		case <-ticker.C:
+		case <-s.done:
+		}
+	}
+}
+
+// outboxSlots tracks this process's attempts in flight, by account.
+type outboxSlots struct {
+	mu   sync.Mutex
+	busy map[string]bool
+	wg   sync.WaitGroup
+	done chan struct{}
+}
+
+// free reports whether another attempt may start, and the accounts that
+// already have one (never nil: a NULL array would exclude every row).
+func (s *outboxSlots) free() (bool, []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	busy := make([]string, 0, len(s.busy))
+	for account := range s.busy {
+		busy = append(busy, account)
+	}
+	return len(busy) < outboxWorkers, busy
+}
+
+// start runs one attempt for account. The caller has just claimed it.
+func (s *outboxSlots) start(a *App, account string, attempt func()) {
+	s.mu.Lock()
+	s.busy[account] = true
+	s.mu.Unlock()
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		defer func() {
+			if p := recover(); p != nil {
+				a.log.Error("outbox attempt panicked", "account", account, "panic", p)
+			}
+			s.mu.Lock()
+			delete(s.busy, account)
+			s.mu.Unlock()
+			select {
+			case s.done <- struct{}{}:
+			default:
+			}
+		}()
+		attempt()
+	}()
+}
+
+// sweepOutbox runs the statements that need no provider: interrupted claims
+// and filings become ambiguous, and retention prunes in bounded batches. It
+// reports false when this build is fenced and must not claim.
+func (a *App) sweepOutbox(ctx context.Context) (bool, error) {
 	if fenced, err := a.outboxFenced(ctx); err != nil {
-		return err
+		return false, err
 	} else if fenced {
 		a.logFenced()
-		return nil
+		return false, nil
 	}
 	// An expired claim is evidence of uncertainty, never permission to resend.
 	if _, err := a.db.ExecContext(ctx, `UPDATE outbox_jobs SET state='ambiguous',error_code='interrupted_submission',updated_at=now()
  WHERE state='submitting' AND started_at < now()-make_interval(secs=>$1)`, int(outboxClaimTimeout.Seconds())); err != nil {
-		return err
+		return false, err
 	}
 	if _, err := a.db.ExecContext(ctx, `UPDATE outbox_jobs SET filing_state='ambiguous',error_code='interrupted_filing',updated_at=now()
  WHERE filing_state='submitting' AND updated_at < now()-make_interval(secs=>$1)`, int(outboxClaimTimeout.Seconds())); err != nil {
-		return err
+		return false, err
 	}
 	// Pending jobs are never expired. Private bytes and receipts retire on
 	// their own clocks (see outboxPayloadRetention); account/owner deletion
 	// cascades immediately. Payloads go first so receipts outlive them.
 	if _, err := a.db.ExecContext(ctx, outboxPrunePayloadSQL, int(outboxPayloadRetention.Seconds()), outboxPruneBatch); err != nil {
-		return err
+		return false, err
 	}
 	if _, err := a.db.ExecContext(ctx, outboxPruneSQL, int(outboxReceiptRetention.Seconds()), outboxPruneBatch); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// dispatchOutbox sweeps, then claims due submissions and leftover Sent
+// filings for accounts with nothing in flight here, until the slots are full.
+func (a *App) dispatchOutbox(ctx context.Context, s *outboxSlots) error {
+	if ok, err := a.sweepOutbox(ctx); err != nil || !ok {
+		return err
+	}
+	for {
+		ok, busy := s.free()
+		if !ok {
+			return nil
+		}
+		job, account, ciphertext, err := a.claimOutboxExcept(ctx, busy)
+		if err == nil {
+			s.start(a, account, func() { a.attemptOutbox(ctx, job, account, ciphertext) })
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		filing, err := a.claimSentCopy(ctx, "", busy)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		s.start(a, filing.account, func() { _ = a.fileSentCopy(ctx, filing) })
+	}
+}
+
+// processOutbox is one synchronous pass: sweep, claim and attempt one
+// submission (with its Sent filing), then file one leftover Sent copy.
+func (a *App) processOutbox(ctx context.Context) error {
+	if ok, err := a.sweepOutbox(ctx); err != nil || !ok {
 		return err
 	}
 	job, account, ciphertext, err := a.claimOutbox(ctx)
-
 	if err == nil {
-		a.deliverOutbox(ctx, job, account, ciphertext)
+		a.attemptOutbox(ctx, job, account, ciphertext)
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	return a.processSentCopy(ctx)
 }
 
+// attemptOutbox submits one claimed job and then files its Sent copy, as
+// one attempt.
+func (a *App) attemptOutbox(ctx context.Context, job outboxAttempt, account, ciphertext string) {
+	a.deliverOutbox(ctx, job, account, ciphertext)
+	filing, err := a.claimSentCopy(ctx, job.ID, []string{})
+	if err == nil {
+		_ = a.fileSentCopy(ctx, filing)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		a.log.Error("Sent-copy claim failed", "id", job.ID, "err", err)
+	}
+}
+
 // Claim and cancellation compete on the same row transition. SKIP LOCKED
 // allows several workers without ever assigning one submission twice.
 func (a *App) claimOutbox(ctx context.Context) (outboxAttempt, string, string, error) {
+	return a.claimOutboxExcept(ctx, []string{})
+}
+
+// claimOutboxExcept claims the oldest due job whose account is not in busy.
+func (a *App) claimOutboxExcept(ctx context.Context, busy []string) (outboxAttempt, string, string, error) {
 	job := outboxAttempt{Token: uuid.NewString()}
 	var account, ciphertext string
 	err := a.db.QueryRowContext(ctx, `UPDATE outbox_jobs SET state='submitting',attempt_id=$1,started_at=now(),updated_at=now()
- WHERE id=(SELECT id FROM outbox_jobs WHERE state='pending' AND undo_until<=now() ORDER BY undo_until FOR UPDATE SKIP LOCKED LIMIT 1)
- AND state='pending' AND `+outboxSchemaNewerSQL+` <= $2 RETURNING id::text,user_id::text,account_id,payload_ciphertext`, job.Token, outboxSupportedSchema()).Scan(&job.ID, &job.UserID, &account, &ciphertext)
+ WHERE id=(SELECT id FROM outbox_jobs WHERE state='pending' AND undo_until<=now() AND account_id <> ALL($3::text[]) ORDER BY undo_until FOR UPDATE SKIP LOCKED LIMIT 1)
+ AND state='pending' AND `+outboxSchemaNewerSQL+` <= $2 RETURNING id::text,user_id::text,account_id,payload_ciphertext`, job.Token, outboxSupportedSchema(), busy).Scan(&job.ID, &job.UserID, &account, &ciphertext)
 	return job, account, ciphertext, err
 }
 
@@ -473,17 +588,32 @@ func (a *App) recordOutboxAccepted(job outboxAttempt, raw []byte) error {
 	return nil
 }
 
+// processSentCopy claims and files any one Sent copy that is waiting.
 func (a *App) processSentCopy(ctx context.Context) error {
-	var id, owner, account, ciphertext string
-	err := a.db.QueryRowContext(ctx, `UPDATE outbox_jobs SET filing_state='submitting',updated_at=now()
- WHERE id=(SELECT id FROM outbox_jobs WHERE state='submitted' AND filing_state='pending' ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
- AND filing_state='pending' RETURNING id::text,user_id::text,account_id,sent_ciphertext`).Scan(&id, &owner, &account, &ciphertext)
+	filing, err := a.claimSentCopy(ctx, "", []string{})
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
+	return a.fileSentCopy(ctx, filing)
+}
+
+type sentCopyClaim struct{ id, owner, account, ciphertext string }
+
+// claimSentCopy claims the filing of row id, or ("") of the oldest waiting
+// row whose account is not in busy.
+func (a *App) claimSentCopy(ctx context.Context, id string, busy []string) (sentCopyClaim, error) {
+	var c sentCopyClaim
+	err := a.db.QueryRowContext(ctx, `UPDATE outbox_jobs SET filing_state='submitting',updated_at=now()
+ WHERE id=(SELECT id FROM outbox_jobs WHERE state='submitted' AND filing_state='pending' AND ($1='' OR id::text=$1) AND account_id <> ALL($2::text[]) ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
+ AND filing_state='pending' RETURNING id::text,user_id::text,account_id,sent_ciphertext`, id, busy).Scan(&c.id, &c.owner, &c.account, &c.ciphertext)
+	return c, err
+}
+
+func (a *App) fileSentCopy(ctx context.Context, c sentCopyClaim) error {
+	id, owner, account, ciphertext := c.id, c.owner, c.account, c.ciphertext
 	state, code := "ambiguous", "sent_copy_unconfirmed"
 	defer func() {
 		if recover() != nil {
@@ -505,14 +635,11 @@ func (a *App) processSentCopy(ctx context.Context) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	accountCtx, release, ok := a.beginAccountWork(mail.AccountID(account))
+	ctx, release, ok := a.beginAccountWorkCtx(ctx, mail.AccountID(account))
 	if !ok {
 		return errors.New("account closing")
 	}
 	defer release()
-	ctx, stop := joinAccountContext(ctx, accountCtx)
-	defer stop()
-	ctx = context.WithValue(ctx, accountGateKey{}, mail.AccountID(account))
 	var box string
 	if err = a.db.QueryRowContext(ctx, `SELECT id FROM mail_mailboxes WHERE account_id=$1 AND role='sent' LIMIT 1`, account).Scan(&box); err != nil {
 		return err
