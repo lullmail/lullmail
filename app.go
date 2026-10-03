@@ -55,9 +55,6 @@ type App struct {
 	// outboxFault is nil in production. Tests set it to abort the process at
 	// a named persistence or provider boundary (see outboxPoint).
 	outboxFault func(point string) error
-	// smtpPlaintext lets tests submit to a loopback SMTP server. The engine
-	// still refuses plaintext to any non-loopback peer.
-	smtpPlaintext bool
 }
 
 // accountLifecycle is one account's admission gate (audit OPS-05): an
@@ -549,10 +546,13 @@ func (a *App) SMTPFor(ctx context.Context, acct mail.AccountID) (*mail.Sender, m
 	// anything the server handed out.
 	from := mail.Address{Email: address, Name: displayName}
 	return mail.NewSender(mail.SMTPConfig{
-		Host:      smtpHost,
-		Port:      smtpPort,
-		Username:  username,
-		Password:  password,
-		Plaintext: a.smtpPlaintext,
+		Host:     smtpHost,
+		Port:     smtpPort,
+		Username: username,
+		Password: password,
+		// Same rule as loopback IMAP (resolver.go): a loopback submission
+		// host may skip TLS so local and self-hosted test servers work. The
+		// engine refuses plaintext to any non-loopback peer regardless.
+		Plaintext: isLoopbackHost(smtpHost),
 	}), from, true
 }
