@@ -11,7 +11,7 @@ func TestAgentScopeFence(t *testing.T) {
 		"/accounts", "/accounts/x/sync", "/screener",
 		"/screener/decide", "/screener/undecide", "/counts", "/briefing",
 		"/threads/t1", "/messages/m1/action", "/send", "/buckets/imbox",
-		"/notes", "/notes/x", "/board", "/board/pin", "/people", "/personal/export",
+		"/notes", "/notes/x", "/board", "/board/pin", "/people", "/personal/export", "/outbox",
 	}
 	for _, path := range allowed {
 		if !agentAllowedPath(path) {
@@ -24,6 +24,7 @@ func TestAgentScopeFence(t *testing.T) {
 		"/security/password", "/account", "/push", "/oauth/gmail/start",
 		"/board/../security", "/accounts/x/export",
 		"/mail/v1/accounts", "/mail/v1/accounts/a/search",
+		"/outbox/job", "/outbox/job/payload",
 	}
 	for _, path := range blocked {
 		if agentAllowedPath(path) {

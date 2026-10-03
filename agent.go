@@ -30,27 +30,28 @@ func isAgentToken(raw string) bool {
 // session-only: a leaked agent token must not be able to mint siblings or
 // lock the owner out.
 var agentAllowed = map[string]bool{
-	"/accounts":        true, // list/connect
-	"/accounts/":       true, // item routes: sync, retention, delete
-	"/screener":        true,
-	"/screener/":       true, // decide + undecide (the MCP adapter's screener_decide)
-	"/counts":          true,
-	"/search":          true,
-	"/briefing":        true,
-	"/board":           true,
-	"/board/":          true, // pin, unpin, cards
-	"/notes":           true,
-	"/notes/":          true, // item update/delete
-	"/people":          true,
-	"/recent":          true,
-	"/folder":          true,
-	"/mailboxes":       true,
-	"/buckets/":        true,
-	"/threads/":        true,
-	"/messages/":       true,
-	"/send":            true,
+	"/accounts":  true, // list/connect
+	"/accounts/": true, // item routes: sync, retention, delete
+	"/screener":  true,
+	"/screener/": true, // decide + undecide (the MCP adapter's screener_decide)
+	"/counts":    true,
+	"/search":    true,
+	"/briefing":  true,
+	"/board":     true,
+	"/board/":    true, // pin, unpin, cards
+	"/notes":     true,
+	"/notes/":    true, // item update/delete
+	"/people":    true,
+	"/recent":    true,
+	"/folder":    true,
+	"/mailboxes": true,
+	"/buckets/":  true,
+	"/threads/":  true,
+	"/messages/": true,
+	"/send":      true,
+	// Outcomes only. /outbox/{id} serves the decrypted composition, its Sent
+	// copy and its destruction, so like the mailbox archive it is session-only.
 	"/outbox":          true,
-	"/outbox/":         true,
 	"/classify":        true,
 	"/personal/export": true,
 	// The raw /mail/ engine surface is deliberately NOT agent-reachable:

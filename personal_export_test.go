@@ -26,6 +26,7 @@ func TestPersonalExportKeepsBoardAccountIdentity(t *testing.T) {
 					{"card-3", "", "", "Manual", "", nil, created},
 				},
 			}},
+			dbStep{kind: "query", rows: emptyRows("id")}, // saved outbox compositions: none
 		),
 	}
 	w := httptest.NewRecorder()
