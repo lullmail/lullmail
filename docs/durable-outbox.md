@@ -203,15 +203,7 @@ Lullmail on infra-home deploys with Teploy `ingress: host`
 (`/Users/tyler/Documents/infra/lullmail/teploy.yml`): the container publishes a
 fixed host port, so Teploy recreates it instead of running blue/green. It stops
 the old container (SIGTERM, `stop_timeout: 30`), then starts the new one on the
-same port.
-
-On SIGTERM or SIGINT the server stops claiming outbox work at once and drains
-within a 25-second budget (`shutdownBudget` in `cmd_serve.go`), HTTP (at most
-10 s) and background work together, so it exits before the 30-second stop
-timeout ends in SIGKILL. Keep `stop_timeout` above 25 s. Outbox attempts that
-were already claimed are detached from the signal and may finish, Sent filing
-included, for up to 15 seconds (`outboxDrainGrace`); after that they are
-cancelled and end by the usual rules. The new container's `serve` runs the engine and product migrations
+same port. The new container's `serve` runs the engine and product migrations
 before it listens. There is therefore no moment at which the pre-outbox build and
 this one both run, and the fence is not needed for the first deployment. Keep it
 that way:
@@ -248,6 +240,14 @@ that way:
    cancel every `pending` and `submitting` row that predates the restore point
    (or all of them) and tell users to check Sent. The same applies to promoting
    a replica that was behind.
+
+On SIGTERM or SIGINT the server stops claiming outbox work at once and drains
+within a 25-second budget (`shutdownBudget` in `cmd_serve.go`), HTTP (at most
+10 s) and background work together, so it exits before the 30-second stop
+timeout ends in SIGKILL. Keep `stop_timeout` above 25 s. Outbox attempts that
+were already claimed are detached from the signal and may finish, Sent filing
+included, for up to 15 seconds (`outboxDrainGrace`); after that they are
+cancelled and end by the usual rules.
 
 Migration 8 is not yet released; its statements were revised during review. A
 database that applied the earlier draft of migration 8 (only test databases)
@@ -328,6 +328,9 @@ All of these run against PostgreSQL 17 and real sockets, not scripted drivers:
   in order; at most 4 at once), its graceful drain (finishes within the grace,
   ambiguous past it, nothing claimed after the stop), the `?key=` lookup
   (owner scope, 404, no composition fields) and the account-deletion guard.
+- `dashboard/e2e/outbox.mjs` S7: a lost acknowledgment in a real browser is
+  resolved by the key lookup and shown as queued (one delivery); an
+  unconfirmable send that is then edited asks before a second copy.
 - `outbox_chaos_pg_test.go`: seeded random walks over the same fault space
   (`LULL_CHAOS_SEEDS`, `LULL_CHAOS_ROUNDS`).
 - `outbox_migration_pg_test.go`: 7 to 8, idempotent rerun, checksum refusal,
