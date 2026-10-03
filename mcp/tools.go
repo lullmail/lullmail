@@ -192,7 +192,7 @@ func registerTools(s *mcp.Server, c *client) {
 		return text(c.doWithKey(ctx, "POST", "/send", payload, nil, args.SubmissionKey))
 	})
 
-	mcp.AddTool(s, &mcp.Tool{Name: "outbox_list", Description: "List durable outbound states, retained for 30 days. Submitted means provider acceptance, not recipient delivery. Ambiguous sends may already have reached the recipient and must never be automatically re-sent. Use the dashboard Outbox to recover saved composition or download unfiled Sent copies."}, func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "outbox_list", Description: "List durable outbound states (outcomes are kept for 90 days; saved compositions are removed 30 days after a send settles). Submitted means provider acceptance, not recipient delivery. Ambiguous sends may already have reached the recipient and must never be automatically re-sent. Use the dashboard Outbox to recover saved composition or download unfiled Sent copies."}, func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
 		return text(c.get(ctx, "/outbox", nil))
 	})
 
