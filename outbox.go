@@ -76,7 +76,7 @@ type outboxPayload struct {
 	Request     json.RawMessage `json:"request"`
 	ReplyParent string          `json:"reply_parent"`
 }
-type outboxAttempt struct{ ID, Token string }
+type outboxAttempt struct{ ID, Token, UserID string }
 type outboxContextKey struct{}
 
 type outboxRecord struct {
@@ -106,12 +106,15 @@ func (a *App) acceptOutbox(w http.ResponseWriter, r *http.Request, uid, account,
 		writeProblem(w, 500, "Queue Failed", "composition could not be saved")
 		return
 	}
-	encrypted, err := sealSecret(a.cfg, string(payload))
+	// The row id is chosen first because it is part of what the ciphertext is
+	// bound to. A replay discards this blob and answers with the original row.
+	id := uuid.NewString()
+	encrypted, err := sealBound(a.cfg, "payload", uid, id, string(payload))
 	if err != nil {
 		writeProblem(w, 503, "Queue Unavailable", "composition could not be encrypted; the draft was not queued")
 		return
 	}
-	record, replay, err := a.saveOutbox(r.Context(), uid, account, key, hash, encrypted, outboxReservation(outgoing, encrypted))
+	record, replay, err := a.saveOutbox(r.Context(), uid, account, key, hash, id, encrypted, outboxReservation(outgoing, encrypted))
 	if errors.Is(err, errOutboxKeyConflict) {
 		sendKeyConflict(w)
 		return
@@ -152,7 +155,7 @@ func outboxReservation(outgoing *mail.Outgoing, ciphertext string) int64 {
 
 // The same transaction checks the key, global private-payload quota, account
 // ownership and publication. A commit error is safely resolved by same-key retry.
-func (a *App) saveOutbox(ctx context.Context, uid, account, key, hash, ciphertext string, size int64) (outboxRecord, bool, error) {
+func (a *App) saveOutbox(ctx context.Context, uid, account, key, hash, id, ciphertext string, size int64) (outboxRecord, bool, error) {
 	var result outboxRecord
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -193,7 +196,7 @@ func (a *App) saveOutbox(ctx context.Context, uid, account, key, hash, ciphertex
 	if live >= sendMaxJobs || size < 0 || size > outboxMaxBytes || bytes > outboxMaxBytes-size || ownerBytes > outboxOwnerMaxBytes-size {
 		return result, false, errOutboxCapacity
 	}
-	result = outboxRecord{ID: uuid.NewString(), AccountID: account, State: "pending", UndoUntil: time.Now().UTC().Add(undoWindow)}
+	result = outboxRecord{ID: id, AccountID: account, State: "pending", UndoUntil: time.Now().UTC().Add(undoWindow)}
 	res, err := tx.ExecContext(ctx, `INSERT INTO outbox_jobs(id,user_id,account_id,submission_key,request_hash,state,payload_ciphertext,payload_bytes,undo_until)
  SELECT $1,$2,$3,$4,$5,'pending',$6,$7,$8 FROM email_accounts WHERE user_id=$2 AND mirror_account_id=$3`, result.ID, uid, account, key, hash, ciphertext, size, result.UndoUntil)
 	if err != nil {
@@ -291,7 +294,7 @@ func (a *App) claimOutbox(ctx context.Context) (outboxAttempt, string, string, e
 	var account, ciphertext string
 	err := a.db.QueryRowContext(ctx, `UPDATE outbox_jobs SET state='submitting',attempt_id=$1,started_at=now(),updated_at=now()
  WHERE id=(SELECT id FROM outbox_jobs WHERE state='pending' AND undo_until<=now() ORDER BY undo_until FOR UPDATE SKIP LOCKED LIMIT 1)
- AND state='pending' RETURNING id::text,account_id,payload_ciphertext`, job.Token).Scan(&job.ID, &account, &ciphertext)
+ AND state='pending' RETURNING id::text,user_id::text,account_id,payload_ciphertext`, job.Token).Scan(&job.ID, &job.UserID, &account, &ciphertext)
 	return job, account, ciphertext, err
 }
 
@@ -313,9 +316,13 @@ func (a *App) deliverOutbox(ctx context.Context, job outboxAttempt, account, cip
 			a.log.Error("outbox outcome save failed", "id", job.ID, "err", err)
 		}
 	}()
-	plaintext, err := openSecret(a.cfg, ciphertext)
+	// Nothing has reached a provider yet, so a composition that cannot be
+	// opened ends as a visible failure that keeps its ciphertext: restoring
+	// the key makes it recoverable. It is never sent, and never retried.
+	plaintext, err := openBound(a.cfg, "payload", job.UserID, job.ID, ciphertext)
 	if err != nil {
-		state, code = "failed", "payload_unavailable"
+		state, code = "failed", outboxSealCode(err)
+		a.log.Error("outbox composition cannot be opened; not sent", "id", job.ID, "code", code)
 		return
 	}
 	var payload outboxPayload
@@ -345,7 +352,7 @@ func (a *App) deliverOutbox(ctx context.Context, job outboxAttempt, account, cip
 // SMTP transport acceptance and the exact Sent-copy bytes commit together.
 // A failed commit stays ambiguous, with the original recoverable composition.
 func (a *App) recordOutboxAccepted(job outboxAttempt, raw []byte) error {
-	cipher, err := sealSecret(a.cfg, string(raw))
+	cipher, err := sealBound(a.cfg, "sent", job.UserID, job.ID, string(raw))
 	if err != nil {
 		return err
 	}
@@ -367,10 +374,10 @@ func (a *App) recordOutboxAccepted(job outboxAttempt, raw []byte) error {
 }
 
 func (a *App) processSentCopy(ctx context.Context) error {
-	var id, account, ciphertext string
+	var id, owner, account, ciphertext string
 	err := a.db.QueryRowContext(ctx, `UPDATE outbox_jobs SET filing_state='submitting',updated_at=now()
  WHERE id=(SELECT id FROM outbox_jobs WHERE state='submitted' AND filing_state='pending' ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
- AND filing_state='pending' RETURNING id::text,account_id,sent_ciphertext`).Scan(&id, &account, &ciphertext)
+ AND filing_state='pending' RETURNING id::text,user_id::text,account_id,sent_ciphertext`).Scan(&id, &owner, &account, &ciphertext)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -389,8 +396,11 @@ func (a *App) processSentCopy(ctx context.Context) error {
 			a.log.Error("Sent-copy outcome save failed", "id", id, "err", e)
 		}
 	}()
-	raw, err := openSecret(a.cfg, ciphertext)
+	raw, err := openBound(a.cfg, "sent", owner, id, ciphertext)
 	if err != nil {
+		// No append was attempted. The filing stays unconfirmed, and the saved
+		// copy remains downloadable once the key is restored.
+		code = "sent_copy_" + outboxSealCode(err)
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -424,6 +434,23 @@ func (a *App) processSentCopy(ctx context.Context) error {
 		a.sched.Wake(mail.AccountID(account))
 	}
 	return nil
+}
+
+// outboxSealCode names why sealed data could not be opened. The two causes
+// have different remedies, so the stored code keeps them apart.
+func outboxSealCode(err error) string {
+	if errors.Is(err, errSealedInvalid) {
+		return "payload_corrupt"
+	}
+	return "payload_key_unavailable"
+}
+
+func writeSealProblem(w http.ResponseWriter, err error, what string) {
+	if errors.Is(err, errSealedInvalid) {
+		writeProblem(w, 500, "Recovery Unavailable", what+" failed authentication; it is damaged or does not belong to this entry")
+		return
+	}
+	writeProblem(w, 503, "Recovery Unavailable", what+" cannot be opened with the current SECRET_KEY; restore the key it was saved with and try again")
 }
 
 func (a *App) cancelOutbox(w http.ResponseWriter, r *http.Request) {
@@ -497,17 +524,17 @@ func (a *App) handleOutboxDetail(w http.ResponseWriter, r *http.Request) {
 		writeLookupProblem(w, err, "owner")
 		return
 	}
-	var cipher, state, account, sent string
-	err = a.db.QueryRowContext(r.Context(), `SELECT j.payload_ciphertext,j.state,ea.id::text,j.sent_ciphertext FROM outbox_jobs j JOIN email_accounts ea ON ea.mirror_account_id=j.account_id AND ea.user_id=j.user_id WHERE j.user_id=$1 AND j.id::text=$2`, uid, r.PathValue("id")).Scan(&cipher, &state, &account, &sent)
+	var cipher, state, account, sent, row string
+	err = a.db.QueryRowContext(r.Context(), `SELECT j.payload_ciphertext,j.state,ea.id::text,j.sent_ciphertext,j.id::text FROM outbox_jobs j JOIN email_accounts ea ON ea.mirror_account_id=j.account_id AND ea.user_id=j.user_id WHERE j.user_id=$1 AND j.id::text=$2`, uid, r.PathValue("id")).Scan(&cipher, &state, &account, &sent, &row)
 	if err != nil {
 		writeLookupProblem(w, err, "outbox entry")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	if r.URL.Query().Get("format") == "eml" && sent != "" {
-		raw, e := openSecret(a.cfg, sent)
+		raw, e := openBound(a.cfg, "sent", uid, row, sent)
 		if e != nil {
-			writeProblem(w, 503, "Recovery Unavailable", "saved Sent copy could not be decrypted")
+			writeSealProblem(w, e, "saved Sent copy")
 			return
 		}
 		w.Header().Set("Content-Type", "message/rfc822")
@@ -519,9 +546,9 @@ func (a *App) handleOutboxDetail(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 410, "Composition Retired", "no recoverable composition remains for this entry; its recorded status is "+state)
 		return
 	}
-	raw, err := openSecret(a.cfg, cipher)
+	raw, err := openBound(a.cfg, "payload", uid, row, cipher)
 	if err != nil {
-		writeProblem(w, 503, "Recovery Unavailable", "saved composition could not be decrypted")
+		writeSealProblem(w, err, "saved composition")
 		return
 	}
 	var payload outboxPayload

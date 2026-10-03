@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"testing"
 )
 
@@ -36,12 +37,12 @@ func TestIntegrationOutboxReceiptsOfOneOwnerNeverBlockAnother(t *testing.T) {
 	other, otherAcct := secondOwner(t, p, "heavy@example.test")
 	bulkReceipts(t, p, other, otherAcct, "heavy-", "submitted", "1 day", outboxOwnerReceiptLimit)
 	// The heavy owner is refused with the receipt-specific error...
-	_, _, err := p.app.saveOutbox(context.Background(), other, otherAcct, "one-more", "h", "x", 1)
+	_, _, err := p.app.saveOutbox(context.Background(), other, otherAcct, "one-more", "h", uuid.NewString(), "x", 1)
 	if !errors.Is(err, errOutboxReceiptLimit) {
 		t.Fatalf("heavy owner at the cap: %v", err)
 	}
 	// ...but an unrelated owner is not affected at all.
-	if _, _, err = p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "healthy", "h", "x", 1); err != nil {
+	if _, _, err = p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "healthy", "h", uuid.NewString(), "x", 1); err != nil {
 		t.Fatalf("healthy owner wedged by another owner's receipts: %v", err)
 	}
 }
@@ -52,7 +53,7 @@ func TestIntegrationOutboxExpiredReceiptsAreReclaimedAtAdmission(t *testing.T) {
 	// Half the cap is past the receipt window, half is still inside it.
 	bulkReceipts(t, p, p.uid, "outbox-acct", "old-", "submitted", "91 days", outboxOwnerReceiptLimit/2)
 	bulkReceipts(t, p, p.uid, "outbox-acct", "new-", "submitted", "1 day", outboxOwnerReceiptLimit-outboxOwnerReceiptLimit/2)
-	if _, _, err := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "fresh", "h", "x", 1); err != nil {
+	if _, _, err := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "fresh", "h", uuid.NewString(), "x", 1); err != nil {
 		t.Fatalf("send refused although expired receipts could be reclaimed: %v", err)
 	}
 	var old, recent int
@@ -65,10 +66,10 @@ func TestIntegrationOutboxExpiredReceiptsAreReclaimedAtAdmission(t *testing.T) {
 	q := newProductPG(t)
 	seedOutboxAccount(t, q)
 	bulkReceipts(t, q, q.uid, "outbox-acct", "live-", "submitted", "1 day", outboxOwnerReceiptLimit)
-	if _, _, err := q.app.saveOutbox(context.Background(), q.uid, "outbox-acct", "fresh", "h", "x", 1); !errors.Is(err, errOutboxReceiptLimit) {
+	if _, _, err := q.app.saveOutbox(context.Background(), q.uid, "outbox-acct", "fresh", "h", uuid.NewString(), "x", 1); !errors.Is(err, errOutboxReceiptLimit) {
 		t.Fatalf("in-window receipts were evicted or ignored: %v", err)
 	}
-	if _, replay, err := q.app.saveOutbox(context.Background(), q.uid, "outbox-acct", "live-7", "h", "x", 1); err != nil || !replay {
+	if _, replay, err := q.app.saveOutbox(context.Background(), q.uid, "outbox-acct", "live-7", "h", uuid.NewString(), "x", 1); err != nil || !replay {
 		t.Fatalf("a retained receipt must still replay at the cap: replay=%v err=%v", replay, err)
 	}
 }
@@ -104,7 +105,7 @@ func TestIntegrationOutboxPayloadRetiresBeforeReceipt(t *testing.T) {
 	if ok, payload := state(staleFailed); !ok || payload != "" {
 		t.Fatalf("31-day-old payload must be cleared but its receipt kept: found=%v payload=%q", ok, payload)
 	}
-	if _, replay, err := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "stale-failed", "hash", "x", 1); err != nil || !replay {
+	if _, replay, err := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "stale-failed", "hash", uuid.NewString(), "x", 1); err != nil || !replay {
 		t.Fatalf("receipt of a cleared payload must still replay: replay=%v err=%v", replay, err)
 	}
 	if ok, payload := state(freshAmbiguous); !ok || payload == "" {
@@ -134,20 +135,20 @@ func TestIntegrationOutboxOwnerByteShareAndRelease(t *testing.T) {
 	seedOutboxAccount(t, p)
 	other, otherAcct := secondOwner(t, p, "bytes@example.test")
 	// One owner fills its share with a stopped composition.
-	if _, _, err := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "big", "h", "x", outboxOwnerMaxBytes); err != nil {
+	if _, _, err := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "big", "h", uuid.NewString(), "x", outboxOwnerMaxBytes); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "more", "h", "x", 1); !errors.Is(err, errOutboxCapacity) {
+	if _, _, err := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "more", "h", uuid.NewString(), "x", 1); !errors.Is(err, errOutboxCapacity) {
 		t.Fatalf("owner exceeded its share: %v", err)
 	}
-	if _, _, err := p.app.saveOutbox(context.Background(), other, otherAcct, "elsewhere", "h", "x", 1<<20); err != nil {
+	if _, _, err := p.app.saveOutbox(context.Background(), other, otherAcct, "elsewhere", "h", uuid.NewString(), "x", 1<<20); err != nil {
 		t.Fatalf("one owner's share starved another: %v", err)
 	}
 	// Cancelling releases the send reservation down to the stored ciphertext.
 	if _, err := p.db.Exec(`UPDATE outbox_jobs SET state='cancelled',payload_ciphertext='stored',payload_bytes=octet_length('stored') WHERE submission_key='big'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "after", "h", "x", 1<<20); err != nil {
+	if _, _, err := p.app.saveOutbox(context.Background(), p.uid, "outbox-acct", "after", "h", uuid.NewString(), "x", 1<<20); err != nil {
 		t.Fatalf("released bytes were not reusable: %v", err)
 	}
 }
