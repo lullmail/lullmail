@@ -347,7 +347,7 @@ func (a *App) sendOAuth(ctx context.Context, provider, account string, out *mail
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://gmail.googleapis.com/gmail/v1/users/me/messages/send", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+cred.AccessToken)
-		res, err := http.DefaultClient.Do(req)
+		res, err := providerHTTP.Do(req)
 		if err != nil {
 			return err
 		}
@@ -373,20 +373,23 @@ func (a *App) sendOAuth(ctx context.Context, provider, account string, out *mail
 	if out.HTML != "" {
 		contentType, content = "HTML", out.HTML
 	}
-	files, err := graphAttachments(out.Attachments)
+	inline, oversize, err := graphAttachments(out.Attachments)
 	if err != nil {
 		return &mail.NotSubmittedError{Err: err}
 	}
+	if len(oversize) > 0 {
+		return a.graphDraftSend(ctx, cred, out, inline, oversize)
+	}
 	message := map[string]any{"subject": out.Subject, "body": map[string]string{"contentType": contentType, "content": content}, "toRecipients": graphRecipients(out.To), "ccRecipients": graphRecipients(out.Cc), "bccRecipients": graphRecipients(out.Bcc)}
-	if files != nil {
-		message["attachments"] = files
+	if inline != nil {
+		message["attachments"] = inline
 	}
 	payload := map[string]any{"message": message, "saveToSentItems": true}
 	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, graphAPIBase+"/me/sendMail", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+cred.AccessToken)
-	res, err := http.DefaultClient.Do(req)
+	res, err := providerHTTP.Do(req)
 	if err != nil {
 		return err
 	}
@@ -406,6 +409,24 @@ func oauthStatusError(status int, err error) error {
 	}
 	return err
 }
+
+// providerHTTP is the one client for the fixed-origin provider APIs (Gmail,
+// Graph). Centralizing it makes transport hygiene explicit — pooling,
+// handshake and header timeouts as an outer ceiling — where http.DefaultClient
+// carried none of it; every request still supplies its own context deadline,
+// which remains the primary timeout. The variable mirrors graphAPIBase so
+// tests can point the transport at a fake service. Redirect and egress
+// policy for configurable hosts is deliberately not encoded here (open item
+// OPS-09: user-selected private mail servers are a feature, so a blanket
+// ban would be wrong).
+var providerHTTP = &http.Client{Transport: &http.Transport{
+	Proxy:                 http.ProxyFromEnvironment,
+	MaxIdleConns:          100,
+	MaxIdleConnsPerHost:   10,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ResponseHeaderTimeout: 30 * time.Second,
+}}
 
 // graphAPIBase is a variable only so tests can point the Graph client at a
 // fake service; production always talks to the real endpoint.
@@ -448,13 +469,18 @@ func (a *App) graphReplySend(ctx context.Context, cred mail.Credential, out *mai
 	if err := graphCall(ctx, cred, http.MethodPatch, draftPath, patch, nil); err != nil {
 		return cleanup(err)
 	}
-	files, err := graphAttachments(out.Attachments)
+	inline, oversize, err := graphAttachments(out.Attachments)
 	if err != nil {
-		return cleanup(err)
+		return cleanup(&mail.NotSubmittedError{Err: err})
 	}
-	for _, file := range files {
+	for _, file := range inline {
 		if err := graphCall(ctx, cred, http.MethodPost, draftPath+"/attachments", file, nil); err != nil {
 			return cleanup(err)
+		}
+	}
+	for _, att := range oversize {
+		if err := graphUploadAttachment(ctx, cred, draftPath, att); err != nil {
+			return cleanup(&mail.NotSubmittedError{Err: err})
 		}
 	}
 	if err := graphCall(ctx, cred, http.MethodPost, draftPath+"/send", nil, nil); err != nil {
@@ -485,7 +511,7 @@ func graphCall(ctx context.Context, cred mail.Credential, method, endpoint strin
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Authorization", "Bearer "+cred.AccessToken)
-	res, err := http.DefaultClient.Do(req)
+	res, err := providerHTTP.Do(req)
 	if err != nil {
 		return err
 	}
@@ -501,40 +527,139 @@ func graphCall(ctx context.Context, cred mail.Credential, method, endpoint strin
 }
 
 // Graph's regular attachments cap at 3 MB per file; beyond that the whole
-// request is rejected with a 413. Refuse here, before anything is sent,
-// rather than shipping a message whose attachments were dropped or letting
-// Graph fail it opaquely.
+// request is rejected with a 413. Files above that cap (the product's send
+// admission allows up to 15 MiB) ride upload sessions on a draft message
+// instead of being refused, so they come back separately here; the 25 MB
+// total cap spans both kinds.
 const (
 	graphAttachmentMax    = 3 << 20
 	graphAttachmentMaxSum = 25 << 20
+	// Upload-session chunks must be a multiple of 320 KiB except the last.
+	graphUploadChunk = 5 * 320 << 10
 )
 
 // graphAttachments serializes engine attachments into Graph fileAttachment
-// entries, mirroring what the SMTP renderer carries.
-func graphAttachments(atts []mail.Attachment) ([]map[string]any, error) {
+// entries, mirroring what the SMTP renderer carries. Entries above the
+// inline cap are returned in the second value for upload sessions.
+func graphAttachments(atts []mail.Attachment) (inline []map[string]any, sessions []mail.Attachment, err error) {
 	if len(atts) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	out := make([]map[string]any, 0, len(atts))
+	inline = make([]map[string]any, 0, len(atts))
 	var total int
-	for i, att := range atts {
-		if len(att.Data) > graphAttachmentMax {
-			return nil, fmt.Errorf("attachment %d (%q) exceeds the 3 MB per-file limit for Microsoft accounts", i+1, att.Filename)
-		}
+	for _, att := range atts {
 		total += len(att.Data)
 		if total > graphAttachmentMaxSum {
-			return nil, fmt.Errorf("attachments exceed the 25 MB total limit for Microsoft accounts")
+			return nil, nil, fmt.Errorf("attachments exceed the 25 MB total limit for Microsoft accounts")
 		}
 		contentType := att.ContentType
 		if contentType == "" {
 			contentType = "application/octet-stream"
 		}
-		out = append(out, map[string]any{
+		if len(att.Data) > graphAttachmentMax {
+			sessions = append(sessions, mail.Attachment{Filename: att.Filename, ContentType: contentType, Data: att.Data})
+			continue
+		}
+		inline = append(inline, map[string]any{
 			"@odata.type":  "#microsoft.graph.fileAttachment",
 			"name":         att.Filename,
 			"contentType":  contentType,
 			"contentBytes": base64.StdEncoding.EncodeToString(att.Data),
 		})
 	}
-	return out, nil
+	return inline, sessions, nil
+}
+
+// graphUploadAttachment streams one oversize attachment into a draft
+// through a Graph upload session. The uploadUrl is pre-authenticated, so
+// the bearer token must not ride along on the chunk PUTs.
+func graphUploadAttachment(ctx context.Context, cred mail.Credential, draftPath string, att mail.Attachment) error {
+	var session struct {
+		UploadURL string `json:"uploadUrl"`
+	}
+	if err := graphCall(ctx, cred, http.MethodPost, draftPath+"/attachments/createUploadSession", map[string]any{
+		"AttachmentItem": map[string]any{
+			"attachmentType": "file",
+			"name":           att.Filename,
+			"size":           len(att.Data),
+			"contentType":    att.ContentType,
+		},
+	}, &session); err != nil {
+		return err
+	}
+	if session.UploadURL == "" {
+		return fmt.Errorf("graph upload session for %q returned no upload url", att.Filename)
+	}
+	for offset := 0; offset < len(att.Data); {
+		end := min(offset+graphUploadChunk, len(att.Data))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, session.UploadURL, bytes.NewReader(att.Data[offset:end]))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, end-1, len(att.Data)))
+		res, err := providerHTTP.Do(req)
+		if err != nil {
+			return err
+		}
+		if res.StatusCode < 200 || res.StatusCode >= 300 {
+			data, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
+			res.Body.Close()
+			return fmt.Errorf("graph upload %q status %d: %s", att.Filename, res.StatusCode, strings.TrimSpace(string(data)))
+		}
+		io.Copy(io.Discard, io.LimitReader(res.Body, 2048))
+		res.Body.Close()
+		offset = end
+	}
+	return nil
+}
+
+// graphDraftSend carries a fresh (non-reply) send whose attachments include
+// files above the inline cap: a draft is created and shaped, oversize files
+// ride upload sessions and small ones the regular attachments endpoint, and
+// the draft is sent. Everything before the final send call precedes
+// provider acceptance, so failures there are terminal after deleting the
+// leftover draft; the send itself keeps sendMail's ambiguity semantics.
+func (a *App) graphDraftSend(ctx context.Context, cred mail.Credential, out *mail.Outgoing, inline []map[string]any, oversize []mail.Attachment) error {
+	var draft struct {
+		ID string `json:"id"`
+	}
+	if err := graphCall(ctx, cred, http.MethodPost, "/me/messages", map[string]any{}, &draft); err != nil {
+		return &mail.NotSubmittedError{Err: err}
+	}
+	if draft.ID == "" {
+		return &mail.NotSubmittedError{Err: errors.New("graph send: draft creation returned no id")}
+	}
+	draftPath := "/me/messages/" + draft.ID
+	cleanup := func(err error) error {
+		_ = graphCall(ctx, cred, http.MethodDelete, draftPath, nil, nil)
+		return err
+	}
+	contentType, content := "Text", out.Text
+	if out.HTML != "" {
+		contentType, content = "HTML", out.HTML
+	}
+	patch := map[string]any{
+		"subject":       out.Subject,
+		"body":          map[string]string{"contentType": contentType, "content": content},
+		"toRecipients":  graphRecipients(out.To),
+		"ccRecipients":  graphRecipients(out.Cc),
+		"bccRecipients": graphRecipients(out.Bcc),
+	}
+	if err := graphCall(ctx, cred, http.MethodPatch, draftPath, patch, nil); err != nil {
+		return cleanup(&mail.NotSubmittedError{Err: err})
+	}
+	for _, file := range inline {
+		if err := graphCall(ctx, cred, http.MethodPost, draftPath+"/attachments", file, nil); err != nil {
+			return cleanup(&mail.NotSubmittedError{Err: err})
+		}
+	}
+	for _, att := range oversize {
+		if err := graphUploadAttachment(ctx, cred, draftPath, att); err != nil {
+			return cleanup(&mail.NotSubmittedError{Err: err})
+		}
+	}
+	if err := graphCall(ctx, cred, http.MethodPost, draftPath+"/send", nil, nil); err != nil {
+		return cleanup(err)
+	}
+	return nil
 }

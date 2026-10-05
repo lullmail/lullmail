@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
@@ -66,12 +67,15 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 var oauthDriverID atomic.Uint64
 
 func TestGraphAttachmentsSerializeAsFileAttachments(t *testing.T) {
-	atts, err := graphAttachments([]mail.Attachment{
+	atts, sessions, err := graphAttachments([]mail.Attachment{
 		{Filename: "invoice.pdf", ContentType: "application/pdf", Data: []byte("PDF")},
 		{Filename: "blob.bin", Data: []byte("B")},
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("small files must stay inline, got %d session files", len(sessions))
 	}
 	if len(atts) != 2 {
 		t.Fatalf("entries = %d, want 2", len(atts))
@@ -94,19 +98,36 @@ func TestGraphAttachmentsSerializeAsFileAttachments(t *testing.T) {
 	}
 }
 
-func TestGraphAttachmentsRejectOversizedFilesBeforeSending(t *testing.T) {
+// Files above the inline cap are no longer refused — they ride upload
+// sessions at delivery — but the 25 MB total still rejects the whole set
+// before anything is sent.
+func TestGraphAttachmentsSplitOversizeFilesAndCapTheTotal(t *testing.T) {
 	big := make([]byte, graphAttachmentMax+1)
-	if atts, err := graphAttachments([]mail.Attachment{{Filename: "big.pdf", Data: big}}); err == nil || atts != nil {
-		t.Fatalf("per-file over-limit attachment accepted: %v", err)
+	inline, sessions, err := graphAttachments([]mail.Attachment{
+		{Filename: "small.txt", ContentType: "text/plain", Data: []byte("hi")},
+		{Filename: "big.pdf", ContentType: "application/pdf", Data: big},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
+	if len(inline) != 1 || inline[0]["name"] != "small.txt" {
+		t.Fatalf("inline entries = %+v, want only the small file", inline)
+	}
+	if len(sessions) != 1 || sessions[0].Filename != "big.pdf" || len(sessions[0].Data) != len(big) {
+		t.Fatalf("session entries = %+v, want the oversize file verbatim", sessions)
+	}
+	if sessions[0].ContentType != "application/pdf" {
+		t.Fatalf("session entry lost its content type: %q", sessions[0].ContentType)
+	}
+
 	many := make([]mail.Attachment, 0, 9)
 	for range 9 {
 		many = append(many, mail.Attachment{Filename: "f", Data: make([]byte, 3<<20)})
 	}
-	if atts, err := graphAttachments(many); err == nil || atts != nil {
-		t.Fatalf("over-total attachments accepted: %v", err)
+	if _, _, err := graphAttachments(many); err == nil {
+		t.Fatal("over-total attachments accepted")
 	}
-	if _, err := graphAttachments(nil); err != nil {
+	if _, _, err := graphAttachments(nil); err != nil {
 		t.Fatalf("no attachments should pass: %v", err)
 	}
 }
@@ -287,9 +308,9 @@ func TestGraphReplyThreadsThroughCreateReply(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var calls []call
-	saved := http.DefaultClient.Transport
-	t.Cleanup(func() { http.DefaultClient.Transport = saved })
-	http.DefaultClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	saved := providerHTTP.Transport
+	t.Cleanup(func() { providerHTTP.Transport = saved })
+	providerHTTP.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		body := ""
 		if r.Body != nil {
 			raw, _ := io.ReadAll(r.Body)
@@ -378,9 +399,9 @@ func TestGraphFreshSendUsesSendMailWithoutCustomHeaders(t *testing.T) {
 
 	var mu sync.Mutex
 	var bodies []string
-	saved := http.DefaultClient.Transport
-	t.Cleanup(func() { http.DefaultClient.Transport = saved })
-	http.DefaultClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	saved := providerHTTP.Transport
+	t.Cleanup(func() { providerHTTP.Transport = saved })
+	providerHTTP.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		raw, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		bodies = append(bodies, r.Method+" "+r.URL.Path+" "+string(raw))
@@ -403,5 +424,222 @@ func TestGraphFreshSendUsesSendMailWithoutCustomHeaders(t *testing.T) {
 	}
 	if strings.Contains(bodies[0], "internetMessageHeaders") {
 		t.Fatalf("sendMail payload still carries unsupported custom headers: %s", bodies[0])
+	}
+}
+
+// A fresh Graph send with a file above the inline cap goes through a draft:
+// shape it, carry small files inline, stream the oversize one through an
+// upload session in 320 KiB-multiple chunks, then send the draft — never
+// sendMail, whose payload Graph would reject outright (audit 6 F11).
+func TestGraphFreshSendWithLargeAttachmentUsesUploadSession(t *testing.T) {
+	cfg := &Config{
+		SecretKey:             "0123456789abcdef0123456789abcdef",
+		MicrosoftClientID:     "client",
+		MicrosoftClientSecret: "secret",
+		MicrosoftTenant:       "common",
+	}
+	token, err := json.Marshal(oauth2.Token{AccessToken: "graph-token", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := sealSecret(cfg, string(token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &App{cfg: cfg, log: discardLogger(), db: openStepDB(t,
+		dbStep{kind: "query", rows: &testRows{
+			columns: []string{"provider", "address", "username", "host", "port", "cred_ciphertext"},
+			values:  [][]driver.Value{{"graph", "owner@example.com", "", "", int64(0), sealed}},
+		}},
+		dbStep{kind: "query", rows: &testRows{
+			columns: []string{"cred_ciphertext"},
+			values:  [][]driver.Value{{sealed}},
+		}},
+	)}
+
+	big := make([]byte, graphAttachmentMax+1)
+	for i := range big {
+		big[i] = byte(i % 251)
+	}
+	type uploadChunk struct {
+		contentRange string
+		data         []byte
+	}
+	var mu sync.Mutex
+	var calls []string
+	var chunks []uploadChunk
+	saved := providerHTTP.Transport
+	t.Cleanup(func() { providerHTTP.Transport = saved })
+	providerHTTP.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.Method == http.MethodPut {
+			raw, _ := io.ReadAll(r.Body)
+			chunks = append(chunks, uploadChunk{r.Header.Get("Content-Range"), raw})
+			calls = append(calls, "PUT "+r.URL.Host)
+			return &http.Response{
+				StatusCode: http.StatusAccepted,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader("{}")),
+			}, nil
+		}
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		reply := "{}"
+		switch {
+		case r.URL.Path == "/v1.0/me/messages" && r.Method == http.MethodPost:
+			reply = `{"id":"draft-9"}`
+		case strings.HasSuffix(r.URL.Path, "/createUploadSession"):
+			reply = `{"uploadUrl":"https://outlook.office.com/attachment-sessions/abc"}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusAccepted,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(reply)),
+		}, nil
+	})
+
+	out := &mail.Outgoing{
+		To:      []mail.Address{{Email: "peer@example.com"}},
+		Subject: "big",
+		Text:    "fresh",
+		Attachments: []mail.Attachment{
+			{Filename: "big.bin", ContentType: "application/octet-stream", Data: big},
+			{Filename: "small.txt", ContentType: "text/plain", Data: []byte("hi")},
+		},
+	}
+	if err := a.sendOAuth(context.Background(), "graph", "acct-1", out, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{
+		"POST /v1.0/me/messages",
+		"PATCH /v1.0/me/messages/draft-9",
+		"POST /v1.0/me/messages/draft-9/attachments",
+		"POST /v1.0/me/messages/draft-9/attachments/createUploadSession",
+	}
+	for range (len(big) + graphUploadChunk - 1) / graphUploadChunk {
+		want = append(want, "PUT outlook.office.com")
+	}
+	want = append(want, "POST /v1.0/me/messages/draft-9/send")
+	if len(calls) != len(want) {
+		t.Fatalf("graph calls = %+v, want %+v", calls, want)
+	}
+	for i, w := range want {
+		if calls[i] != w {
+			t.Fatalf("call %d = %q, want %q (all: %+v)", i, calls[i], w, calls)
+		}
+	}
+	var reassembled []byte
+	for i, chunk := range chunks {
+		var start, end, total int
+		if n, err := fmt.Sscanf(chunk.contentRange, "bytes %d-%d/%d", &start, &end, &total); err != nil || n != 3 {
+			t.Fatalf("chunk %d Content-Range = %q", i, chunk.contentRange)
+		}
+		if total != len(big) {
+			t.Fatalf("chunk %d total = %d, want %d", i, total, len(big))
+		}
+		if end-start+1 != len(chunk.data) {
+			t.Fatalf("chunk %d range %s does not match %d bytes", i, chunk.contentRange, len(chunk.data))
+		}
+		if start != len(reassembled) {
+			t.Fatalf("chunk %d starts at %d, want %d", i, start, len(reassembled))
+		}
+		if i < len(chunks)-1 && len(chunk.data)%(320<<10) != 0 {
+			t.Fatalf("non-final chunk %d size %d is not a 320 KiB multiple", i, len(chunk.data))
+		}
+		reassembled = append(reassembled, chunk.data...)
+	}
+	if !bytes.Equal(reassembled, big) {
+		t.Fatal("chunks do not reassemble the attachment")
+	}
+}
+
+// An upload-session failure happens strictly before the provider send
+// boundary: the leftover draft is deleted and the error is terminal
+// (NotSubmittedError), so the outbox records a refusal rather than an
+// ambiguity.
+func TestGraphUploadFailureDeletesDraftAndIsTerminal(t *testing.T) {
+	cfg := &Config{
+		SecretKey:             "0123456789abcdef0123456789abcdef",
+		MicrosoftClientID:     "client",
+		MicrosoftClientSecret: "secret",
+		MicrosoftTenant:       "common",
+	}
+	token, err := json.Marshal(oauth2.Token{AccessToken: "graph-token", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := sealSecret(cfg, string(token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &App{cfg: cfg, log: discardLogger(), db: openStepDB(t,
+		dbStep{kind: "query", rows: &testRows{
+			columns: []string{"provider", "address", "username", "host", "port", "cred_ciphertext"},
+			values:  [][]driver.Value{{"graph", "owner@example.com", "", "", int64(0), sealed}},
+		}},
+		dbStep{kind: "query", rows: &testRows{
+			columns: []string{"cred_ciphertext"},
+			values:  [][]driver.Value{{sealed}},
+		}},
+	)}
+
+	var mu sync.Mutex
+	var calls []string
+	saved := providerHTTP.Transport
+	t.Cleanup(func() { providerHTTP.Transport = saved })
+	providerHTTP.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		status := http.StatusAccepted
+		reply := "{}"
+		switch {
+		case r.URL.Path == "/v1.0/me/messages" && r.Method == http.MethodPost:
+			reply = `{"id":"draft-9"}`
+		case strings.HasSuffix(r.URL.Path, "/createUploadSession"):
+			status = http.StatusInternalServerError
+			reply = `{"error":{"message":"storage unavailable"}}`
+		}
+		return &http.Response{
+			StatusCode: status,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(reply)),
+		}, nil
+	})
+
+	out := &mail.Outgoing{
+		To:          []mail.Address{{Email: "peer@example.com"}},
+		Subject:     "big",
+		Text:        "fresh",
+		Attachments: []mail.Attachment{{Filename: "big.bin", Data: make([]byte, graphAttachmentMax+1)}},
+	}
+	err = a.sendOAuth(context.Background(), "graph", "acct-1", out, "")
+	if err == nil {
+		t.Fatal("sendOAuth accepted a failed upload session")
+	}
+	var terminal *mail.NotSubmittedError
+	if !errors.As(err, &terminal) {
+		t.Fatalf("error %v is not terminal (NotSubmittedError)", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var deleted, sent bool
+	for _, c := range calls {
+		if strings.HasPrefix(c, "DELETE /v1.0/me/messages/") {
+			deleted = true
+		}
+		if strings.HasSuffix(c, "/send") {
+			sent = true
+		}
+	}
+	if !deleted {
+		t.Fatalf("leftover draft was not deleted: %+v", calls)
+	}
+	if sent {
+		t.Fatalf("the draft was sent despite the upload failure: %+v", calls)
 	}
 }

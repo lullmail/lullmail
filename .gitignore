@@ -24,3 +24,6 @@ go.work
 # A server run without DATA_DIR writes its generated secret.key here.
 # Never committable.
 data/
+
+# --- GPT-web audit working dir ---
+/_gpt-audit/

@@ -40,6 +40,8 @@ func serve() {
 
 	// Registered after connectApp so it can report database state.
 	mux.HandleFunc("/health", app.handleHealth)
+	mux.HandleFunc("/health/live", app.handleHealthLive)
+	mux.HandleFunc("/health/ready", app.handleHealthReady)
 
 	dist, err := fs.Sub(assets, "dashboard/dist")
 	if err != nil {
@@ -168,6 +170,36 @@ func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"status":"ok","database":"` + db + `"}`))
+}
+
+// handleHealthLive is liveness reduced to "the process serves HTTP" — no
+// dependency probes, so a supervisor restarts only on process death.
+func (a *App) handleHealthLive(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"ok"}`))
+}
+
+// handleHealthReady is the deployment readiness probe: 200 only when the
+// database actually answers. A new container must not receive traffic (or a
+// deploy be cut over) before it can serve mail, while liveness above keeps
+// transient database outages from causing restart loops.
+func (a *App) handleHealthReady(w http.ResponseWriter, r *http.Request) {
+	if a == nil || a.db == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"status":"unavailable","database":"down"}`))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	if err := a.db.PingContext(ctx); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"status":"unavailable","database":"down"}`))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"ready","database":"up"}`))
 }
 
 func securityHeaders(next http.Handler) http.Handler {

@@ -217,36 +217,26 @@ func TestHandleSendEnvelopeCoversAdvertisedAttachmentTotals(t *testing.T) {
 	}
 }
 
-// Graph's 3 MB per-file limit must reject the request BEFORE queue
-// acceptance, not inside delivery after the browser draft is gone
-// (audit SEND-06).
+// Graph attachment limits must still be checked BEFORE queue acceptance
+// with the exact delivery-time validator, so the two can never drift
+// (audit SEND-06). Per-file oversize is no longer a refusal — delivery
+// streams those through upload sessions — but the 25 MB total still
+// rejects the set up front.
 func TestHandleSendRejectsGraphOversizeAttachmentsPreQueue(t *testing.T) {
-	cfg := &Config{SecretKey: "0123456789abcdef0123456789abcdef"}
-	a := &App{
-		cfg:   cfg,
-		log:   discardLogger(),
-		sendq: newSendQueue(),
-		db: openStepDB(t,
-			dbStep{kind: "query", rows: &testRows{
-				columns: []string{"mirror_account_id", "provider"},
-				values:  [][]driver.Value{{"mirror-1", "graph"}},
-			}},
-		),
+	small := mail.Attachment{Filename: "f.bin", Data: make([]byte, 3<<20)}
+	oversize := mail.Attachment{Filename: "big.bin", Data: make([]byte, 3<<20+1)}
+	if msg := validateTransportAttachments("graph", []mail.Attachment{oversize}); msg != "" {
+		t.Fatalf("upload-session deliverable file refused pre-queue: %q", msg)
 	}
-	big := base64.StdEncoding.EncodeToString(make([]byte, 3<<20+1))
-	body, _ := json.Marshal(map[string]any{
-		"to": "dest@example.com", "subject": "big", "text": "hi",
-		"attachments": []sendAttachmentRequest{{Filename: "f.bin", DataB64: ptr(big)}},
-	})
-	r := httptest.NewRequest(http.MethodPost, "/api/send", bytes.NewReader(body))
-	r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, "owner-1"))
-	w := httptest.NewRecorder()
-	a.handleSend(w, r)
-	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "3 MB") {
-		t.Fatalf("graph oversize attachment: status = %d body = %s", w.Code, w.Body.String())
+	if msg := validateTransportAttachments("imap", []mail.Attachment{oversize}); msg != "" {
+		t.Fatalf("graph limits applied to another provider: %q", msg)
 	}
-	if strings.Contains(w.Body.String(), "queued") {
-		t.Fatal("an oversize Graph attachment was queued anyway")
+	overTotal := make([]mail.Attachment, 0, 9)
+	for range 9 {
+		overTotal = append(overTotal, small)
+	}
+	if msg := validateTransportAttachments("graph", overTotal); msg == "" || !strings.Contains(msg, "25 MB") {
+		t.Fatalf("over-total graph set: %q", msg)
 	}
 }
 

@@ -104,11 +104,16 @@ function assertOwner(owner: string, gen: number): void {
 async function request<T>(path: string, opts: Opts = {}, setupToken = "", protectedRoute = true): Promise<T> {
   const headers: Record<string, string> = {};
   if (setupToken) headers.Authorization = "Bearer " + setupToken;
+  // The method derives from the request options alone, never from the
+  // serialized body's truthiness, and is initialized before any closure
+  // that reads it: a future edit moving an assertCurrent() call earlier
+  // must not be able to cross a temporal dead zone.
+  const method = opts.method || (opts.body !== undefined ? "POST" : "GET");
   // The idempotency key is minted BEFORE the first attempt (audit
   // WEB-04): a request whose response never arrived may still have been
   // applied server-side, and replaying under the SAME key returns the
   // recorded answer instead of applying the change twice.
-  const queueable = protectedRoute && canQueue(path, opts.method || (opts.body !== undefined ? "POST" : "GET"));
+  const queueable = protectedRoute && canQueue(path, method);
   const idempotencyKey = opts.idempotencyKey || (queueable ? newMutationKey() : undefined);
   if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
   // The owner snapshot fences this whole operation against an owner
@@ -129,7 +134,6 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
     headers["Content-Type"] = "application/json";
     body = JSON.stringify(opts.body);
   }
-  const method = opts.method || (body ? "POST" : "GET");
   assertCurrent();
   const privateOutbox = path === "/outbox" || path.startsWith("/outbox/") || path.startsWith("/outbox?");
   if (protectedRoute && method === "GET" && !privateOutbox && !opts.fresh) {

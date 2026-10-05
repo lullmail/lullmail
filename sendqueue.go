@@ -435,12 +435,15 @@ type sendAttachmentRequest struct {
 
 // validateTransportAttachments runs the chosen transport's attachment
 // validator ahead of queue acceptance, reusing the exact delivery-time
-// check so the two limits can never drift (audit SEND-06).
+// check so the two limits can never drift (audit SEND-06). Graph no longer
+// refuses oversize files here — they ride upload sessions at delivery —
+// but the 25 MB total cap still rejects the set up front; the 15 MiB
+// per-file cap is decodeAttachments' job.
 func validateTransportAttachments(provider string, attachments []mail.Attachment) string {
 	if provider != "graph" || len(attachments) == 0 {
 		return ""
 	}
-	if _, err := graphAttachments(attachments); err != nil {
+	if _, _, err := graphAttachments(attachments); err != nil {
 		return err.Error()
 	}
 	return ""

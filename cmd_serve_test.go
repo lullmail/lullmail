@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"io"
 	"net/http/httptest"
 	"strings"
@@ -38,6 +41,77 @@ func TestHealthStaysLiveWhenDatabaseIsDown(t *testing.T) {
 				t.Fatalf("body = %s, want database down", w.Body.String())
 			}
 		})
+	}
+}
+
+// The split probes (audit 6 F12): /health/live answers liveness with no
+// dependency probes at all, and /health/ready refuses 200 until the
+// database answers so a deploy never cuts traffic over to an instance that
+// cannot serve mail.
+func TestHealthLiveIsAlwaysOK(t *testing.T) {
+	w := httptest.NewRecorder()
+	(*App)(nil).handleHealthLive(w, httptest.NewRequest("GET", "/health/live", nil))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `"status":"ok"`) {
+		t.Fatalf("body = %s, want ok", w.Body.String())
+	}
+}
+
+func TestHealthReadyRefusesWhenDatabaseIsDown(t *testing.T) {
+	db, err := sql.Open("pgx", "postgres://nobody:nopass@127.0.0.1:1/nowhere")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	for _, tc := range []struct {
+		name string
+		app  *App
+	}{
+		{"unreachable database", &App{db: db}},
+		{"no app at all", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			tc.app.handleHealthReady(w, httptest.NewRequest("GET", "/health/ready", nil))
+			if w.Code != 503 {
+				t.Fatalf("status = %d, want 503", w.Code)
+			}
+			if !strings.Contains(w.Body.String(), `"database":"down"`) {
+				t.Fatalf("body = %s, want database down", w.Body.String())
+			}
+		})
+	}
+}
+
+type readyPingDriver struct{}
+
+func (readyPingDriver) Open(string) (driver.Conn, error) { return readyPingConn{}, nil }
+
+type readyPingConn struct{}
+
+func (readyPingConn) Prepare(string) (driver.Stmt, error) { return nil, errors.New("not supported") }
+func (readyPingConn) Close() error                        { return nil }
+func (readyPingConn) Begin() (driver.Tx, error)           { return nil, errors.New("not supported") }
+func (readyPingConn) Ping(context.Context) error          { return nil }
+
+func TestHealthReadyPassesWhenDatabaseAnswers(t *testing.T) {
+	sql.Register("lullmail-ready-ping", readyPingDriver{})
+	db, err := sql.Open("lullmail-ready-ping", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	w := httptest.NewRecorder()
+	(&App{db: db}).handleHealthReady(w, httptest.NewRequest("GET", "/health/ready", nil))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `"status":"ready"`) {
+		t.Fatalf("body = %s, want ready", w.Body.String())
 	}
 }
 

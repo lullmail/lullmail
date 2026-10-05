@@ -25,7 +25,10 @@ ingress: host
 port: 8080
 
 health:
-  path: /health
+  # Readiness, not liveness: a deploy cuts over only when the database
+  # answers. /health/live stays 200 through database blips for process
+  # supervisors that only care that the server is alive.
+  path: /health/ready
 stop_timeout: 30
 
 accessories:

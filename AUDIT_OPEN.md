@@ -66,6 +66,22 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   re-authentication ceremony and AUTH-06 (pass 7) as the durable per-user
   TOTP budget (`b9c1027` server, `b889d95` dashboard) — all three leave
   this register.
+- Round 6 / audit 6 (2026-10-04, `AUDIT-CHATGPT-6.md`, 14 findings pinned
+  at `c0a5f70`): 5 findings fixed — F01 request-init TDZ guard (with typed
+  fetch-mock regression tests), F08 offline send logic, F11 oversize Graph
+  upload sessions (terminal pre-send failure, draft cleanup, no bearer on
+  pre-authenticated upload URLs), F12 `/health/live` + `/health/ready`
+  split with teploy wiring, F14 shared `providerHTTP` client with pooling
+  and handshake/header timeouts (commit tagged `audit 6-<ID>`); F09 partial
+  (outbox rows already v2 key-ID + AAD-bound; multi-key rotation and the
+  unversioned `sealSecret` remainder deferred, OPS-10); 8 findings
+  confirmed against source but deferred against standing entries —
+  F02→DATA-04, F03→GRAPH-02/PROVIDER-01, F04→WEB-02, F05/F06→OPS-05/06,
+  F07→WEB-03, F10→OPS-10, F13→WEB-02/03. F08's native-browser fault
+  suites remain owner-pending (OFF-02/DRAFT-02). No finding was assessed
+  as a false positive; every spot-checked finding reproduced against the
+  pinned source.
+
 - Round 5 / audit 5 (2026-09-19, `AUDIT-CHATGPT-5.md`, 42 findings — 20
   High, 19 Medium, 3 Low — pinned at `39e2518`, the first audit of the
   offline-v2/lifecycle/re-auth/IMAP-threading surface): 34 findings fixed
