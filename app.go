@@ -248,6 +248,13 @@ func (s *accountLifecycle) currentDrain() <-chan struct{} {
 // trusted it for ANY account.
 type accountGateKey struct{}
 
+// accountLifetimeKey carries the account gate's own lifetime context: a
+// best-effort cleanup after a failed provider attempt derives a fresh
+// bounded context from it, so the attempt's own deadline or cancellation
+// cannot skip cleanup while account deletion (or the shutdown drain) still
+// aborts it.
+type accountLifetimeKey struct{}
+
 // accountLeaseHeld reports whether ctx already holds the admission gate
 // for exactly this account.
 func accountLeaseHeld(ctx context.Context, id mail.AccountID) bool {
@@ -328,6 +335,7 @@ func (a *App) beginAccountWorkCtx(ctx context.Context, acct mail.AccountID) (con
 	}
 	joined, releaseJoin := joinAccountContext(ctx, accountCtx)
 	joined = context.WithValue(joined, accountGateKey{}, acct)
+	joined = context.WithValue(joined, accountLifetimeKey{}, accountCtx)
 	return joined, func() {
 		releaseJoin()
 		release()

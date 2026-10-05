@@ -430,6 +430,32 @@ func graphDefinitelyRejected(err error) bool {
 	return errors.As(err, &ge) && ge.Status >= 400 && ge.Status < 500
 }
 
+// graphPathSegment escapes a provider-supplied identifier into exactly one
+// Graph URL path segment: an opaque id carrying reserved path, query or
+// fragment characters must address that one resource, not rewrite the URL's
+// structure. url.PathEscape is the path-segment escaper; QueryEscape would
+// also encode it, but as form data.
+func graphPathSegment(id string) string {
+	return url.PathEscape(id)
+}
+
+// graphCleanupTimeout bounds the best-effort draft cleanup DELETE.
+const graphCleanupTimeout = 5 * time.Second
+
+// graphCleanupContext derives the cleanup DELETE's context from the account
+// lifetime the submission ran under (accountLifetimeKey), not from the
+// failed attempt's own deadline: a Graph send whose 60-second submission
+// context expired mid-draft must still attempt to delete its partial draft,
+// while an account being deleted or drained still aborts cleanup. A caller
+// with no account lease detaches only the attempt's cancellation.
+func graphCleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	parent := context.WithoutCancel(ctx)
+	if lifetime, ok := ctx.Value(accountLifetimeKey{}).(context.Context); ok && lifetime != nil {
+		parent = lifetime
+	}
+	return context.WithTimeout(parent, graphCleanupTimeout)
+}
+
 // providerHTTP is the one client for the fixed-origin provider APIs (Gmail,
 // Graph). Centralizing it makes transport hygiene explicit — pooling,
 // handshake and header timeouts as an outer ceiling — where http.DefaultClient
@@ -466,7 +492,7 @@ func (a *App) graphReplySend(ctx context.Context, cred mail.Credential, out *mai
 	var draft struct {
 		ID string `json:"id"`
 	}
-	if err := graphCall(ctx, cred, http.MethodPost, "/me/messages/"+native+"/createReply", map[string]any{}, &draft); err != nil {
+	if err := graphCall(ctx, cred, http.MethodPost, "/me/messages/"+graphPathSegment(native)+"/createReply", map[string]any{}, &draft); err != nil {
 		if graphDefinitelyRejected(err) {
 			return &mail.NotSubmittedError{Err: err}
 		}
@@ -475,12 +501,14 @@ func (a *App) graphReplySend(ctx context.Context, cred mail.Credential, out *mai
 	if draft.ID == "" {
 		return &mail.NotSubmittedError{Err: errors.New("graph reply: createReply returned no draft id")}
 	}
-	draftPath := "/me/messages/" + draft.ID
-	cleanup := func(err error) error {
-		if derr := graphCall(ctx, cred, http.MethodDelete, draftPath, nil, nil); derr != nil {
-			return errors.Join(err, derr)
+	draftPath := "/me/messages/" + graphPathSegment(draft.ID)
+	cleanup := func(primary error) error {
+		cleanupCtx, cancel := graphCleanupContext(ctx)
+		defer cancel()
+		if derr := graphCall(cleanupCtx, cred, http.MethodDelete, draftPath, nil, nil); derr != nil {
+			return errors.Join(primary, derr)
 		}
-		return err
+		return primary
 	}
 	contentType, content := "Text", out.Text
 	if out.HTML != "" {
@@ -630,8 +658,14 @@ func validateGraphUploadURL(raw string) error {
 	if !strings.EqualFold(u.Hostname(), graphUploadHost) {
 		return fmt.Errorf("graph upload url host %q is not %s", u.Hostname(), graphUploadHost)
 	}
+	if port := u.Port(); port != "" && port != "443" {
+		return fmt.Errorf("graph upload url uses unexpected port %q", port)
+	}
 	if u.User != nil {
 		return errors.New("graph upload url must not carry userinfo")
+	}
+	if u.Fragment != "" {
+		return errors.New("graph upload url must not carry a fragment")
 	}
 	return nil
 }
@@ -689,6 +723,7 @@ func graphUploadAttachment(ctx context.Context, cred mail.Credential, draftPath 
 	client := graphUploadClient()
 	for offset := 0; offset < len(att.Data); {
 		end := min(offset+graphUploadChunk, len(att.Data))
+		final := end == len(att.Data)
 		req, err := http.NewRequestWithContext(ctx, http.MethodPut, session.UploadURL, bytes.NewReader(att.Data[offset:end]))
 		if err != nil {
 			return err
@@ -705,19 +740,51 @@ func graphUploadAttachment(ctx context.Context, cred mail.Credential, draftPath 
 			res.Body.Close()
 			return &graphHTTPError{Status: res.StatusCode, Err: fmt.Errorf("graph upload %q status %d: %s", att.Filename, res.StatusCode, strings.TrimSpace(string(data)))}
 		}
-		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		res.Body.Close()
-		if trimmed := strings.TrimSpace(string(body)); trimmed != "" {
-			var next struct {
-				NextExpectedRanges []string `json:"nextExpectedRanges"`
+		body, readErr := io.ReadAll(io.LimitReader(res.Body, 4096))
+		closeErr := res.Body.Close()
+		if readErr != nil {
+			return fmt.Errorf("graph upload %q response read failed: %w", att.Filename, readErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("graph upload %q response close failed: %w", att.Filename, closeErr)
+		}
+		trimmed := strings.TrimSpace(string(body))
+		if trimmed == "" {
+			// Only the final chunk may answer without a continuation:
+			// Graph returns the created attachment there instead. An
+			// intermediate 2xx with no acknowledgement is not evidence
+			// the bytes through end-1 were accepted.
+			if !final {
+				return fmt.Errorf("graph upload %q returned no continuation acknowledgement after byte %d", att.Filename, end)
 			}
-			if err := json.Unmarshal([]byte(trimmed), &next); err != nil {
-				return fmt.Errorf("graph upload %q response undecodable: %w", att.Filename, err)
-			}
+			offset = end
+			continue
+		}
+		var next struct {
+			NextExpectedRanges []string `json:"nextExpectedRanges"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &next); err != nil {
+			return fmt.Errorf("graph upload %q response undecodable: %w", att.Filename, err)
+		}
+		if final {
+			// The final answer may be attachment metadata and need not
+			// include ranges, but one that still expects bytes the client
+			// never sends means the stored session state diverged.
 			if len(next.NextExpectedRanges) > 0 {
 				if start, ok := uploadRangeStart(next.NextExpectedRanges[0]); !ok || start != end {
-					return fmt.Errorf("graph upload %q session expects %q after byte %d; stored state diverged", att.Filename, next.NextExpectedRanges[0], end)
+					return fmt.Errorf("graph upload %q final response unexpectedly expects %q after byte %d", att.Filename, next.NextExpectedRanges[0], end)
 				}
+			}
+		} else {
+			if len(next.NextExpectedRanges) == 0 {
+				return fmt.Errorf("graph upload %q returned no nextExpectedRanges after byte %d", att.Filename, end)
+			}
+			if len(next.NextExpectedRanges) != 1 {
+				return fmt.Errorf("graph upload %q returned unsupported continuation ranges %q", att.Filename, next.NextExpectedRanges)
+			}
+			start, ok := uploadRangeStart(next.NextExpectedRanges[0])
+			if !ok || start != end {
+				return fmt.Errorf("graph upload %q session expects %q after byte %d; stored state diverged", att.Filename, next.NextExpectedRanges[0], end)
 			}
 		}
 		offset = end
@@ -746,12 +813,14 @@ func (a *App) graphDraftSend(ctx context.Context, cred mail.Credential, out *mai
 	if draft.ID == "" {
 		return &mail.NotSubmittedError{Err: errors.New("graph send: draft creation returned no id")}
 	}
-	draftPath := "/me/messages/" + draft.ID
-	cleanup := func(err error) error {
-		if derr := graphCall(ctx, cred, http.MethodDelete, draftPath, nil, nil); derr != nil {
-			return errors.Join(err, derr)
+	draftPath := "/me/messages/" + graphPathSegment(draft.ID)
+	cleanup := func(primary error) error {
+		cleanupCtx, cancel := graphCleanupContext(ctx)
+		defer cancel()
+		if derr := graphCall(cleanupCtx, cred, http.MethodDelete, draftPath, nil, nil); derr != nil {
+			return errors.Join(primary, derr)
 		}
-		return err
+		return primary
 	}
 	contentType, content := "Text", out.Text
 	if out.HTML != "" {

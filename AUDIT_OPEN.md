@@ -108,6 +108,19 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   failure stays ambiguous). Register read first; standing deferrals
   untouched. Race suites, dashboard 268 tests, typecheck + build green.
 
+- Round 8 / audit 8 (2026-10-04, `AUDIT-CHATGPT-8.md`, follow-up review of
+  the audit-7 delta at `7cbe476`): 4 findings, all confirmed and fixed —
+  F01 non-final 2xx upload chunks advanced offset without a matching
+  `nextExpectedRanges` continuation (now exactly-one-range match required;
+  final tolerates metadata/empty, rejects past-end), F02 cleanup DELETE
+  reused the attempt ctx so sendqueue deadlines/account cancellation killed
+  it pre-dispatch (accountLifetimeKey lease ctx + fresh 5s-bounded DELETE
+  ctx), F03 unescaped native/draft IDs in Graph paths (url.PathEscape),
+  F04 upload-URL validator accepted :444 and fragments. Race suites,
+  dashboard 268 tests, typecheck + build green. Standing deferrals
+  untouched.
+
+
 ## GMAIL-READ-01 / GMAIL-AUTH-01 - High - LOCAL PROPOSED PATCH; upstream and live-provider gates remain (2026-10-02)
 
 A deterministic fake transport reproduces initial-page starvation after a

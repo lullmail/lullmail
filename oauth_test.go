@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -673,6 +674,9 @@ func TestValidateGraphUploadURL(t *testing.T) {
 	}{
 		{"documented host", "https://outlook.office.com/attachment-sessions/abc?token=1", true},
 		{"mixed-case host", "https://Outlook.Office.COM/attachment-sessions/abc", true},
+		{"explicit default port", "https://outlook.office.com:443/attachment-sessions/abc", true},
+		{"non-default port", "https://outlook.office.com:444/attachment-sessions/abc", false},
+		{"fragment", "https://outlook.office.com/attachment-sessions/abc#frag", false},
 		{"plaintext", "http://outlook.office.com/attachment-sessions/abc", false},
 		{"foreign host", "https://attacker.example/upload?authtoken=1", false},
 		{"suffix lookalike", "https://outlook.office.com.evil.example/upload", false},
@@ -1037,5 +1041,349 @@ func TestGraphReplySendFailureClassification(t *testing.T) {
 				t.Fatalf("leftover draft cleanup = %v, want %v (calls: %v)", got, tc.wantCleanup, log.calls)
 			}
 		})
+	}
+}
+
+// Every non-final upload chunk needs positive evidence the service accepted
+// exactly the bytes through end-1: a 2xx whose body carries no matching
+// nextExpectedRanges must not advance the local offset, or a malformed or
+// rewritten answer can turn the stored attachment silently incomplete. The
+// final chunk is different — Graph answers with the created attachment
+// resource there, so it need not carry ranges (audit 8 F01).
+func TestGraphUploadRequiresContinuationAcknowledgement(t *testing.T) {
+	twoChunks := make([]byte, graphAttachmentMax+1)
+	if graphUploadChunk >= len(twoChunks) {
+		t.Fatal("fixture must span more than one chunk")
+	}
+	firstEnd := graphUploadChunk
+	oneChunk := []byte("hello")
+	for _, tc := range []struct {
+		name      string
+		data      []byte
+		putBodies []string
+		wantErr   string
+		wantPUTs  int
+	}{
+		{
+			name:      "intermediate empty JSON object",
+			data:      twoChunks,
+			putBodies: []string{`{}`},
+			wantErr:   "no nextExpectedRanges",
+			wantPUTs:  1,
+		},
+		{
+			name:      "intermediate empty body",
+			data:      twoChunks,
+			putBodies: []string{``},
+			wantErr:   "no continuation acknowledgement",
+			wantPUTs:  1,
+		},
+		{
+			name:      "intermediate unrelated JSON",
+			data:      twoChunks,
+			putBodies: []string{`{"foo":"bar"}`},
+			wantErr:   "no nextExpectedRanges",
+			wantPUTs:  1,
+		},
+		{
+			name: "intermediate disjoint continuation ranges",
+			data: twoChunks,
+			putBodies: []string{fmt.Sprintf(`{"nextExpectedRanges":["%d-","2000000-2500000"]}`, firstEnd)},
+			wantErr:   "unsupported continuation ranges",
+			wantPUTs:  1,
+		},
+		{
+			name:      "intermediate wrong range",
+			data:      twoChunks,
+			putBodies: []string{`{"nextExpectedRanges":["0-"]}`},
+			wantErr:   "stored state diverged",
+			wantPUTs:  1,
+		},
+		{
+			name:      "intermediate undecodable body",
+			data:      twoChunks,
+			putBodies: []string{`{"nextExpectedRanges":[`},
+			wantErr:   "undecodable",
+			wantPUTs:  1,
+		},
+		{
+			name: "acknowledged continuation then final attachment metadata",
+			data: twoChunks,
+			putBodies: []string{
+				fmt.Sprintf(`{"nextExpectedRanges":["%d-"]}`, firstEnd),
+				`{"id":"AA==","name":"big.bin"}`,
+			},
+			wantPUTs: 2,
+		},
+		{
+			name: "final answer reporting nothing further",
+			data: twoChunks,
+			putBodies: []string{
+				fmt.Sprintf(`{"nextExpectedRanges":["%d-"]}`, firstEnd),
+				fmt.Sprintf(`{"nextExpectedRanges":["%d-"]}`, len(twoChunks)),
+			},
+			wantPUTs: 2,
+		},
+		{
+			name:      "single final chunk with attachment metadata",
+			data:      oneChunk,
+			putBodies: []string{`{"id":"AA==","name":"big.bin"}`},
+			wantPUTs:  1,
+		},
+		{
+			name:      "single final chunk empty body",
+			data:      oneChunk,
+			putBodies: []string{``},
+			wantPUTs:  1,
+		},
+		{
+			name:      "final chunk still expecting bytes",
+			data:      oneChunk,
+			putBodies: []string{`{"nextExpectedRanges":["99-"]}`},
+			wantErr:   "unexpectedly expects",
+			wantPUTs:  1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			saved := providerHTTP.Transport
+			t.Cleanup(func() { providerHTTP.Transport = saved })
+			var puts int
+			providerHTTP.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.Body != nil {
+					_, _ = io.ReadAll(r.Body)
+				}
+				if r.Method != http.MethodPut {
+					return &http.Response{
+						StatusCode: http.StatusAccepted,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(`{"uploadUrl":"https://outlook.office.com/attachment-sessions/abc"}`)),
+					}, nil
+				}
+				if puts >= len(tc.putBodies) {
+					t.Errorf("upload PUT %d was sent but only %d answers were scripted", puts+1, len(tc.putBodies))
+					return nil, errors.New("unexpected PUT")
+				}
+				body := tc.putBodies[puts]
+				puts++
+				return &http.Response{
+					StatusCode: http.StatusAccepted,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(body)),
+				}, nil
+			})
+
+			err := graphUploadAttachment(context.Background(), mail.Credential{AccessToken: "graph-token"}, "/me/messages/draft-9",
+				mail.Attachment{Filename: "big.bin", ContentType: "application/octet-stream", Data: tc.data})
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("upload failed: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("upload error = %v, want it to contain %q", err, tc.wantErr)
+			}
+			if puts != tc.wantPUTs {
+				t.Fatalf("upload PUTs = %d, want %d", puts, tc.wantPUTs)
+			}
+		})
+	}
+}
+
+// Provider message and draft ids are opaque identifiers: interpolating one
+// carrying reserved path, query or fragment characters must address that one
+// message resource, never rewrite the URL's structure. The wire form keeps
+// the escapes (EscapedPath) while the decoded path still names exactly the
+// id (audit 8 F03).
+func TestGraphPathsEscapeProviderIDs(t *testing.T) {
+	for _, id := range []string{"abc/def", "abc?def", "abc#def", "abc%2Fdef", "abc def"} {
+		t.Run(id, func(t *testing.T) {
+			saved := providerHTTP.Transport
+			t.Cleanup(func() { providerHTTP.Transport = saved })
+			escaped := url.PathEscape(id)
+			var mu sync.Mutex
+			var wire, decoded []string
+			providerHTTP.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.Body != nil {
+					_, _ = io.ReadAll(r.Body)
+				}
+				mu.Lock()
+				wire = append(wire, r.Method+" "+r.URL.EscapedPath())
+				decoded = append(decoded, r.URL.Path)
+				mu.Unlock()
+				if r.URL.RawQuery != "" || r.URL.ForceQuery || r.URL.Fragment != "" {
+					t.Errorf("%s %s: id leaked into query/fragment structure (rawQuery=%q fragment=%q)", r.Method, r.URL.EscapedPath(), r.URL.RawQuery, r.URL.Fragment)
+				}
+				reply := "{}"
+				if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/createReply") {
+					reply = `{"id":"` + id + `"}`
+				}
+				return &http.Response{
+					StatusCode: http.StatusAccepted,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(reply)),
+				}, nil
+			})
+
+			cred := mail.Credential{Provider: mail.Provider("graph"), AccessToken: "graph-token"}
+			out := &mail.Outgoing{
+				To:        []mail.Address{{Email: "peer@example.com"}},
+				Subject:   "t",
+				Text:      "body",
+				InReplyTo: "parent@example.com",
+			}
+			a := &App{}
+			if err := a.graphReplySend(context.Background(), cred, out, "n:graph:"+id); err != nil {
+				t.Fatal(err)
+			}
+			wantWire := []string{
+				"POST /v1.0/me/messages/" + escaped + "/createReply",
+				"PATCH /v1.0/me/messages/" + escaped,
+				"POST /v1.0/me/messages/" + escaped + "/send",
+			}
+			wantDecoded := []string{
+				"/v1.0/me/messages/" + id + "/createReply",
+				"/v1.0/me/messages/" + id,
+				"/v1.0/me/messages/" + id + "/send",
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(wire) != len(wantWire) {
+				t.Fatalf("graph calls = %v, want %v", wire, wantWire)
+			}
+			for i := range wantWire {
+				if wire[i] != wantWire[i] {
+					t.Fatalf("call %d wire path = %q, want %q", i, wire[i], wantWire[i])
+				}
+				if decoded[i] != wantDecoded[i] {
+					t.Fatalf("call %d decoded path = %q, want %q", i, decoded[i], wantDecoded[i])
+				}
+			}
+		})
+	}
+}
+
+// A draft send whose submission deadline expires mid-draft must still
+// attempt the cleanup DELETE: cleanup derives a fresh bounded context from
+// the account lifetime, not from the exhausted attempt context. The DELETE
+// must arrive on a live request context with its own short deadline (audit
+// 8 F02).
+func TestGraphDraftCleanupOutlivesSubmissionDeadline(t *testing.T) {
+	a := &App{}
+	leaseCtx, release, ok := a.beginAccountWorkCtx(context.Background(), "acct-cleanup")
+	if !ok {
+		t.Fatal("account lease refused")
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(leaseCtx, 50*time.Millisecond)
+	defer cancel()
+
+	var mu sync.Mutex
+	var deleteSeen bool
+	var deleteSlack time.Duration
+	saved := providerHTTP.Transport
+	t.Cleanup(func() { providerHTTP.Transport = saved })
+	providerHTTP.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Body != nil {
+			_, _ = io.ReadAll(r.Body)
+		}
+		if r.Method == http.MethodPatch {
+			// The provider stalls until the submission deadline fires.
+			select {
+			case <-r.Context().Done():
+				return nil, r.Context().Err()
+			case <-time.After(5 * time.Second):
+				return nil, errors.New("patch never observed the deadline")
+			}
+		}
+		if r.Method == http.MethodDelete {
+			mu.Lock()
+			deleteSeen = true
+			if deadline, ok := r.Context().Deadline(); ok {
+				deleteSlack = time.Until(deadline)
+			}
+			mu.Unlock()
+		}
+		reply := "{}"
+		if r.Method == http.MethodPost && r.URL.Path == "/v1.0/me/messages" {
+			reply = `{"id":"draft-9"}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusAccepted,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(reply)),
+		}, nil
+	})
+
+	out := &mail.Outgoing{To: []mail.Address{{Email: "peer@example.com"}}, Subject: "t", Text: "body"}
+	err := a.graphDraftSend(ctx, mail.Credential{Provider: mail.Provider("graph"), AccessToken: "graph-token"}, out, nil, nil)
+	if err == nil {
+		t.Fatal("graphDraftSend succeeded despite the expired submission deadline")
+	}
+	if mail.IsNotSubmitted(err) {
+		t.Fatalf("deadline expiry must stay ambiguous: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !deleteSeen {
+		t.Fatal("cleanup DELETE was not attempted after the submission deadline expired")
+	}
+	if deleteSlack <= 0 || deleteSlack > graphCleanupTimeout {
+		t.Fatalf("cleanup DELETE deadline slack = %v, want a fresh bound within %v", deleteSlack, graphCleanupTimeout)
+	}
+}
+
+// Account deletion must still win over cleanup: the DELETE derives from the
+// account lifetime, so a sealed account cancels it before any bytes are
+// written (audit 8 F02).
+func TestGraphDraftCleanupAbortedByAccountDeletion(t *testing.T) {
+	a := &App{}
+	acct := mail.AccountID("acct-cleanup-delete")
+	ctx, release, ok := a.beginAccountWorkCtx(context.Background(), acct)
+	if !ok {
+		t.Fatal("account lease refused")
+	}
+	defer release()
+
+	var mu sync.Mutex
+	var deleteCtxErr error
+	saved := providerHTTP.Transport
+	t.Cleanup(func() { providerHTTP.Transport = saved })
+	providerHTTP.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Body != nil {
+			_, _ = io.ReadAll(r.Body)
+		}
+		if r.Method == http.MethodPatch {
+			// Deletion begins while the provider call is in flight.
+			a.accountState(acct).seal()
+			return nil, errors.New("connection lost after write: PATCH /v1.0/me/messages/draft-9")
+		}
+		if r.Method == http.MethodDelete {
+			mu.Lock()
+			deleteCtxErr = r.Context().Err()
+			mu.Unlock()
+			return nil, deleteCtxErr
+		}
+		reply := "{}"
+		if r.Method == http.MethodPost && r.URL.Path == "/v1.0/me/messages" {
+			reply = `{"id":"draft-9"}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusAccepted,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(reply)),
+		}, nil
+	})
+
+	out := &mail.Outgoing{To: []mail.Address{{Email: "peer@example.com"}}, Subject: "t", Text: "body"}
+	err := a.graphDraftSend(ctx, mail.Credential{Provider: mail.Provider("graph"), AccessToken: "graph-token"}, out, nil, nil)
+	if err == nil {
+		t.Fatal("graphDraftSend succeeded despite the sealed account")
+	}
+	if !strings.Contains(err.Error(), "connection lost after write") {
+		t.Fatalf("error %q lost the primary submission failure", err.Error())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if deleteCtxErr == nil {
+		t.Fatal("cleanup DELETE ran on a live context after the account was sealed for deletion")
 	}
 }
