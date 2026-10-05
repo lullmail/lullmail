@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -410,6 +411,25 @@ func oauthStatusError(status int, err error) error {
 	return err
 }
 
+// graphHTTPError is an answer the service explicitly returned, as opposed
+// to a transport failure, where the request's server-side fate is unknown.
+type graphHTTPError struct {
+	Status int
+	Err    error
+}
+
+func (e *graphHTTPError) Error() string { return e.Err.Error() }
+func (e *graphHTTPError) Unwrap() error { return e.Err }
+
+// graphDefinitelyRejected reports whether err is an explicit 4xx refusal of
+// one operation, which proves that operation never took effect. Transport
+// failures and 5xx answers may follow committed server-side work, so they
+// prove nothing either way.
+func graphDefinitelyRejected(err error) bool {
+	var ge *graphHTTPError
+	return errors.As(err, &ge) && ge.Status >= 400 && ge.Status < 500
+}
+
 // providerHTTP is the one client for the fixed-origin provider APIs (Gmail,
 // Graph). Centralizing it makes transport hygiene explicit — pooling,
 // handshake and header timeouts as an outer ceiling — where http.DefaultClient
@@ -435,24 +455,31 @@ var graphAPIBase = "https://graph.microsoft.com/v1.0"
 // graphReplySend threads a reply the documented way: createReply drafts a
 // message with In-Reply-To/References set by the service, the draft is
 // shaped with the composer's body and recipients, then sent. A failure
-// after drafting removes the leftover draft rather than littering Drafts.
+// after drafting removes the leftover draft rather than littering Drafts;
+// only deterministic refusals are terminal (NotSubmittedError) — a draft
+// mutation whose transport outcome is unknown stays ambiguous.
 func (a *App) graphReplySend(ctx context.Context, cred mail.Credential, out *mail.Outgoing, replyParent string) error {
 	native := mail.NativeID(mail.MessageID(replyParent))
 	if native == "" {
-		return fmt.Errorf("graph reply: parent %q has no native provider id", replyParent)
+		return &mail.NotSubmittedError{Err: fmt.Errorf("graph reply: parent %q has no native provider id", replyParent)}
 	}
 	var draft struct {
 		ID string `json:"id"`
 	}
 	if err := graphCall(ctx, cred, http.MethodPost, "/me/messages/"+native+"/createReply", map[string]any{}, &draft); err != nil {
+		if graphDefinitelyRejected(err) {
+			return &mail.NotSubmittedError{Err: err}
+		}
 		return err
 	}
 	if draft.ID == "" {
-		return fmt.Errorf("graph reply: createReply returned no draft id")
+		return &mail.NotSubmittedError{Err: errors.New("graph reply: createReply returned no draft id")}
 	}
 	draftPath := "/me/messages/" + draft.ID
 	cleanup := func(err error) error {
-		_ = graphCall(ctx, cred, http.MethodDelete, draftPath, nil, nil)
+		if derr := graphCall(ctx, cred, http.MethodDelete, draftPath, nil, nil); derr != nil {
+			return errors.Join(err, derr)
+		}
 		return err
 	}
 	contentType, content := "Text", out.Text
@@ -467,6 +494,9 @@ func (a *App) graphReplySend(ctx context.Context, cred mail.Credential, out *mai
 		"bccRecipients": graphRecipients(out.Bcc),
 	}
 	if err := graphCall(ctx, cred, http.MethodPatch, draftPath, patch, nil); err != nil {
+		if graphDefinitelyRejected(err) {
+			return cleanup(&mail.NotSubmittedError{Err: err})
+		}
 		return cleanup(err)
 	}
 	inline, oversize, err := graphAttachments(out.Attachments)
@@ -475,15 +505,24 @@ func (a *App) graphReplySend(ctx context.Context, cred mail.Credential, out *mai
 	}
 	for _, file := range inline {
 		if err := graphCall(ctx, cred, http.MethodPost, draftPath+"/attachments", file, nil); err != nil {
+			if graphDefinitelyRejected(err) {
+				return cleanup(&mail.NotSubmittedError{Err: err})
+			}
 			return cleanup(err)
 		}
 	}
 	for _, att := range oversize {
 		if err := graphUploadAttachment(ctx, cred, draftPath, att); err != nil {
-			return cleanup(&mail.NotSubmittedError{Err: err})
+			if graphDefinitelyRejected(err) {
+				return cleanup(&mail.NotSubmittedError{Err: err})
+			}
+			return cleanup(err)
 		}
 	}
 	if err := graphCall(ctx, cred, http.MethodPost, draftPath+"/send", nil, nil); err != nil {
+		if graphDefinitelyRejected(err) {
+			return cleanup(&mail.NotSubmittedError{Err: err})
+		}
 		return cleanup(err)
 	}
 	return nil
@@ -518,7 +557,7 @@ func graphCall(ctx context.Context, cred mail.Credential, method, endpoint strin
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
-		return fmt.Errorf("graph %s %s status %d: %s", method, endpoint, res.StatusCode, strings.TrimSpace(string(data)))
+		return &graphHTTPError{Status: res.StatusCode, Err: fmt.Errorf("graph %s %s status %d: %s", method, endpoint, res.StatusCode, strings.TrimSpace(string(data)))}
 	}
 	if out != nil {
 		return json.NewDecoder(io.LimitReader(res.Body, providerJSONLimit)).Decode(out)
@@ -570,9 +609,61 @@ func graphAttachments(atts []mail.Attachment) (inline []map[string]any, sessions
 	return inline, sessions, nil
 }
 
+// graphUploadHost is the one origin Microsoft documents for Outlook
+// attachment-session upload URLs. Additional clouds, if ever supported,
+// belong here as an explicit allowlist — never an open one.
+const graphUploadHost = "outlook.office.com"
+
+// validateGraphUploadURL enforces the documented origin of the provider's
+// pre-authenticated upload URL: its query token IS the credential, so a
+// compromised or unexpected continuation must be refused before any bytes
+// leave. This is a fixed Microsoft contract, distinct from OPS-09's
+// user-configured provider hosts.
+func validateGraphUploadURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid graph upload url: %w", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("graph upload url must use https: %q", raw)
+	}
+	if !strings.EqualFold(u.Hostname(), graphUploadHost) {
+		return fmt.Errorf("graph upload url host %q is not %s", u.Hostname(), graphUploadHost)
+	}
+	if u.User != nil {
+		return errors.New("graph upload url must not carry userinfo")
+	}
+	return nil
+}
+
+// graphUploadClient is the shared provider transport with upload-session
+// policy: a redirect on the pre-authenticated upload URL would carry both
+// the attachment bytes and the URL's token to an unvetted destination, so
+// redirects are never followed. The per-call copy reads providerHTTP's
+// transport live, keeping the tests that re-point it working.
+func graphUploadClient() *http.Client {
+	client := *providerHTTP
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &client
+}
+
+// uploadRangeStart reads the leading offset of a Graph "start-" range entry.
+func uploadRangeStart(entry string) (int, bool) {
+	dash := strings.IndexByte(entry, '-')
+	if dash <= 0 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(entry[:dash])
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
 // graphUploadAttachment streams one oversize attachment into a draft
 // through a Graph upload session. The uploadUrl is pre-authenticated, so
-// the bearer token must not ride along on the chunk PUTs.
+// the bearer token must not ride along on the chunk PUTs, the URL's origin
+// is validated before the first PUT, and redirects are never followed.
 func graphUploadAttachment(ctx context.Context, cred mail.Credential, draftPath string, att mail.Attachment) error {
 	var session struct {
 		UploadURL string `json:"uploadUrl"`
@@ -588,26 +679,47 @@ func graphUploadAttachment(ctx context.Context, cred mail.Credential, draftPath 
 		return err
 	}
 	if session.UploadURL == "" {
-		return fmt.Errorf("graph upload session for %q returned no upload url", att.Filename)
+		// A fully-received answer: nothing was uploaded, so the refusal is
+		// deterministic.
+		return &mail.NotSubmittedError{Err: fmt.Errorf("graph upload session for %q returned no upload url", att.Filename)}
 	}
+	if err := validateGraphUploadURL(session.UploadURL); err != nil {
+		return &mail.NotSubmittedError{Err: err}
+	}
+	client := graphUploadClient()
 	for offset := 0; offset < len(att.Data); {
 		end := min(offset+graphUploadChunk, len(att.Data))
 		req, err := http.NewRequestWithContext(ctx, http.MethodPut, session.UploadURL, bytes.NewReader(att.Data[offset:end]))
 		if err != nil {
 			return err
 		}
+		req.ContentLength = int64(end - offset)
+		req.Header.Set("Content-Type", "application/octet-stream")
 		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, end-1, len(att.Data)))
-		res, err := providerHTTP.Do(req)
+		res, err := client.Do(req)
 		if err != nil {
 			return err
 		}
 		if res.StatusCode < 200 || res.StatusCode >= 300 {
 			data, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
 			res.Body.Close()
-			return fmt.Errorf("graph upload %q status %d: %s", att.Filename, res.StatusCode, strings.TrimSpace(string(data)))
+			return &graphHTTPError{Status: res.StatusCode, Err: fmt.Errorf("graph upload %q status %d: %s", att.Filename, res.StatusCode, strings.TrimSpace(string(data)))}
 		}
-		io.Copy(io.Discard, io.LimitReader(res.Body, 2048))
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 		res.Body.Close()
+		if trimmed := strings.TrimSpace(string(body)); trimmed != "" {
+			var next struct {
+				NextExpectedRanges []string `json:"nextExpectedRanges"`
+			}
+			if err := json.Unmarshal([]byte(trimmed), &next); err != nil {
+				return fmt.Errorf("graph upload %q response undecodable: %w", att.Filename, err)
+			}
+			if len(next.NextExpectedRanges) > 0 {
+				if start, ok := uploadRangeStart(next.NextExpectedRanges[0]); !ok || start != end {
+					return fmt.Errorf("graph upload %q session expects %q after byte %d; stored state diverged", att.Filename, next.NextExpectedRanges[0], end)
+				}
+			}
+		}
 		offset = end
 	}
 	return nil
@@ -616,22 +728,29 @@ func graphUploadAttachment(ctx context.Context, cred mail.Credential, draftPath 
 // graphDraftSend carries a fresh (non-reply) send whose attachments include
 // files above the inline cap: a draft is created and shaped, oversize files
 // ride upload sessions and small ones the regular attachments endpoint, and
-// the draft is sent. Everything before the final send call precedes
-// provider acceptance, so failures there are terminal after deleting the
-// leftover draft; the send itself keeps sendMail's ambiguity semantics.
+// the draft is sent. Deterministic refusals before the final send are
+// terminal (NotSubmittedError) after deleting the leftover draft; a draft
+// mutation whose transport outcome is unknown stays ambiguous, because the
+// remote draft may hold committed work and the cleanup DELETE may itself
+// fail. The send itself keeps sendMail's ambiguity semantics.
 func (a *App) graphDraftSend(ctx context.Context, cred mail.Credential, out *mail.Outgoing, inline []map[string]any, oversize []mail.Attachment) error {
 	var draft struct {
 		ID string `json:"id"`
 	}
 	if err := graphCall(ctx, cred, http.MethodPost, "/me/messages", map[string]any{}, &draft); err != nil {
-		return &mail.NotSubmittedError{Err: err}
+		if graphDefinitelyRejected(err) {
+			return &mail.NotSubmittedError{Err: err}
+		}
+		return err
 	}
 	if draft.ID == "" {
 		return &mail.NotSubmittedError{Err: errors.New("graph send: draft creation returned no id")}
 	}
 	draftPath := "/me/messages/" + draft.ID
 	cleanup := func(err error) error {
-		_ = graphCall(ctx, cred, http.MethodDelete, draftPath, nil, nil)
+		if derr := graphCall(ctx, cred, http.MethodDelete, draftPath, nil, nil); derr != nil {
+			return errors.Join(err, derr)
+		}
 		return err
 	}
 	contentType, content := "Text", out.Text
@@ -646,19 +765,31 @@ func (a *App) graphDraftSend(ctx context.Context, cred mail.Credential, out *mai
 		"bccRecipients": graphRecipients(out.Bcc),
 	}
 	if err := graphCall(ctx, cred, http.MethodPatch, draftPath, patch, nil); err != nil {
-		return cleanup(&mail.NotSubmittedError{Err: err})
+		if graphDefinitelyRejected(err) {
+			return cleanup(&mail.NotSubmittedError{Err: err})
+		}
+		return cleanup(err)
 	}
 	for _, file := range inline {
 		if err := graphCall(ctx, cred, http.MethodPost, draftPath+"/attachments", file, nil); err != nil {
-			return cleanup(&mail.NotSubmittedError{Err: err})
+			if graphDefinitelyRejected(err) {
+				return cleanup(&mail.NotSubmittedError{Err: err})
+			}
+			return cleanup(err)
 		}
 	}
 	for _, att := range oversize {
 		if err := graphUploadAttachment(ctx, cred, draftPath, att); err != nil {
-			return cleanup(&mail.NotSubmittedError{Err: err})
+			if graphDefinitelyRejected(err) {
+				return cleanup(&mail.NotSubmittedError{Err: err})
+			}
+			return cleanup(err)
 		}
 	}
 	if err := graphCall(ctx, cred, http.MethodPost, draftPath+"/send", nil, nil); err != nil {
+		if graphDefinitelyRejected(err) {
+			return cleanup(&mail.NotSubmittedError{Err: err})
+		}
 		return cleanup(err)
 	}
 	return nil

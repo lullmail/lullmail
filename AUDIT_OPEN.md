@@ -93,6 +93,21 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   JMAP enumeration hole, the destructive rescan retry, and the owner-delete
   busy-connection failure all reproduced exactly as reported.
 
+- Round 7 / audit 7 (2026-10-04, `AUDIT-CHATGPT-7.md`, follow-up review of
+  the audit-6 delta at `02b1c8a`): 2 findings, both High, both confirmed
+  and fixed — AUDIT7-F01 Graph oversize upload PUT followed redirects with
+  no origin pin (now `validateGraphUploadURL` https + `outlook.office.com`
+  host pin + no userinfo, and a no-redirect `graphUploadClient`;
+  deterministic refusals classify NotSubmitted) and AUDIT7-F02 transport/5xx
+  upload errors were unconditionally wrapped `NotSubmittedError` violating
+  the oauth.go contract (now typed `graphHTTPError`, `graphDefinitelyRejected`
+  4xx-only gating; F11 terminal semantics preserved where provable; cleanup
+  failures retained via `errors.Join`). Partial: explicit
+  `Content-Type`/`Content-Length` + `nextExpectedRanges` monotonic
+  verification per chunk; session resume not implemented (ambiguous chunk
+  failure stays ambiguous). Register read first; standing deferrals
+  untouched. Race suites, dashboard 268 tests, typecheck + build green.
+
 ## GMAIL-READ-01 / GMAIL-AUTH-01 - High - LOCAL PROPOSED PATCH; upstream and live-provider gates remain (2026-10-02)
 
 A deterministic fake transport reproduces initial-page starvation after a

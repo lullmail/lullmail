@@ -462,8 +462,11 @@ func TestGraphFreshSendWithLargeAttachmentUsesUploadSession(t *testing.T) {
 		big[i] = byte(i % 251)
 	}
 	type uploadChunk struct {
-		contentRange string
-		data         []byte
+		contentRange  string
+		contentType   string
+		authorization string
+		length        int64
+		data          []byte
 	}
 	var mu sync.Mutex
 	var calls []string
@@ -475,12 +478,17 @@ func TestGraphFreshSendWithLargeAttachmentUsesUploadSession(t *testing.T) {
 		defer mu.Unlock()
 		if r.Method == http.MethodPut {
 			raw, _ := io.ReadAll(r.Body)
-			chunks = append(chunks, uploadChunk{r.Header.Get("Content-Range"), raw})
+			chunks = append(chunks, uploadChunk{r.Header.Get("Content-Range"), r.Header.Get("Content-Type"), r.Header.Get("Authorization"), r.ContentLength, raw})
 			calls = append(calls, "PUT "+r.URL.Host)
+			reply := "{}"
+			var start, end int
+			if n, err := fmt.Sscanf(r.Header.Get("Content-Range"), "bytes %d-%d", &start, &end); err == nil && n == 2 {
+				reply = fmt.Sprintf(`{"nextExpectedRanges":["%d-"]}`, end+1)
+			}
 			return &http.Response{
 				StatusCode: http.StatusAccepted,
 				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body:       io.NopCloser(strings.NewReader("{}")),
+				Body:       io.NopCloser(strings.NewReader(reply)),
 			}, nil
 		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
@@ -533,6 +541,15 @@ func TestGraphFreshSendWithLargeAttachmentUsesUploadSession(t *testing.T) {
 	}
 	var reassembled []byte
 	for i, chunk := range chunks {
+		if chunk.contentType != "application/octet-stream" {
+			t.Fatalf("chunk %d Content-Type = %q, want application/octet-stream", i, chunk.contentType)
+		}
+		if chunk.authorization != "" {
+			t.Fatalf("chunk %d leaked an Authorization header on the pre-authenticated upload URL: %q", i, chunk.authorization)
+		}
+		if chunk.length != int64(len(chunk.data)) {
+			t.Fatalf("chunk %d Content-Length = %d, want %d", i, chunk.length, len(chunk.data))
+		}
 		var start, end, total int
 		if n, err := fmt.Sscanf(chunk.contentRange, "bytes %d-%d/%d", &start, &end, &total); err != nil || n != 3 {
 			t.Fatalf("chunk %d Content-Range = %q", i, chunk.contentRange)
@@ -556,10 +573,11 @@ func TestGraphFreshSendWithLargeAttachmentUsesUploadSession(t *testing.T) {
 	}
 }
 
-// An upload-session failure happens strictly before the provider send
-// boundary: the leftover draft is deleted and the error is terminal
-// (NotSubmittedError), so the outbox records a refusal rather than an
-// ambiguity.
+// A deterministic upload-session refusal (explicit 4xx) happens strictly
+// before the provider send boundary: the leftover draft is deleted and the
+// error is terminal (NotSubmittedError), so the outbox records a refusal
+// rather than an ambiguity. Transport-level and 5xx failures of the same
+// call are covered separately below — they stay ambiguous.
 func TestGraphUploadFailureDeletesDraftAndIsTerminal(t *testing.T) {
 	cfg := &Config{
 		SecretKey:             "0123456789abcdef0123456789abcdef",
@@ -600,8 +618,8 @@ func TestGraphUploadFailureDeletesDraftAndIsTerminal(t *testing.T) {
 		case r.URL.Path == "/v1.0/me/messages" && r.Method == http.MethodPost:
 			reply = `{"id":"draft-9"}`
 		case strings.HasSuffix(r.URL.Path, "/createUploadSession"):
-			status = http.StatusInternalServerError
-			reply = `{"error":{"message":"storage unavailable"}}`
+			status = http.StatusBadRequest
+			reply = `{"error":{"message":"attachment session refused"}}`
 		}
 		return &http.Response{
 			StatusCode: status,
@@ -641,5 +659,383 @@ func TestGraphUploadFailureDeletesDraftAndIsTerminal(t *testing.T) {
 	}
 	if sent {
 		t.Fatalf("the draft was sent despite the upload failure: %+v", calls)
+	}
+}
+
+// The pre-authenticated upload URL is only ever accepted from the one
+// documented Outlook origin, over https, without userinfo. Everything else
+// is refused before any request is built.
+func TestValidateGraphUploadURL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		ok   bool
+	}{
+		{"documented host", "https://outlook.office.com/attachment-sessions/abc?token=1", true},
+		{"mixed-case host", "https://Outlook.Office.COM/attachment-sessions/abc", true},
+		{"plaintext", "http://outlook.office.com/attachment-sessions/abc", false},
+		{"foreign host", "https://attacker.example/upload?authtoken=1", false},
+		{"suffix lookalike", "https://outlook.office.com.evil.example/upload", false},
+		{"userinfo", "https://user:pass@outlook.office.com/attachment-sessions/abc", false},
+		{"missing host", "https:///attachment-sessions/abc", false},
+		{"not a url", "outlook office", false},
+	} {
+		err := validateGraphUploadURL(tc.raw)
+		if tc.ok && err != nil {
+			t.Errorf("%s: validateGraphUploadURL(%q) = %v, want accepted", tc.name, tc.raw, err)
+		}
+		if !tc.ok && err == nil {
+			t.Errorf("%s: validateGraphUploadURL(%q) accepted an untrusted url", tc.name, tc.raw)
+		}
+	}
+}
+
+type graphCallLog struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (l *graphCallLog) add(call string) {
+	l.mu.Lock()
+	l.calls = append(l.calls, call)
+	l.mu.Unlock()
+}
+
+func (l *graphCallLog) has(prefix string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, c := range l.calls {
+		if strings.HasPrefix(c, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// graphFault is one injected failure: a nonzero status answers with that
+// status and marker body; a zero status with ranges set answers a
+// successful upload PUT whose nextExpectedRanges disagree with the bytes
+// sent; a bare zero status reads the whole request body and then fails the
+// transport, modeling a connection lost after the bytes were written — the
+// server may have committed the operation the caller never saw.
+type graphFault struct {
+	status int
+	body   string
+	ranges string
+}
+
+// graphFaultTransport serves the draft-shaping happy sequence (the fresh
+// POST /me/messages shape when parent is empty, the createReply shape
+// otherwise) and injects the configured fault at the first matching call.
+func graphFaultTransport(parent string, faults map[string]graphFault) (roundTripFunc, *graphCallLog) {
+	log := &graphCallLog{}
+	return roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Body != nil {
+			_, _ = io.ReadAll(r.Body)
+		}
+		key := r.Method + " " + r.URL.Path
+		log.add(key)
+		if fault, ok := faults[key]; ok {
+			switch {
+			case fault.ranges != "":
+				return &http.Response{
+					StatusCode: http.StatusAccepted,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"nextExpectedRanges":["` + fault.ranges + `"]}`)),
+				}, nil
+			case fault.status == 0:
+				return nil, fmt.Errorf("connection lost after write: %s", key)
+			default:
+				return &http.Response{
+					StatusCode: fault.status,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(fault.body)),
+				}, nil
+			}
+		}
+		reply := "{}"
+		switch {
+		case parent != "" && strings.HasSuffix(r.URL.Path, "/createReply"):
+			reply = `{"id":"draft-9"}`
+		case parent == "" && r.Method == http.MethodPost && r.URL.Path == "/v1.0/me/messages":
+			reply = `{"id":"draft-9"}`
+		case strings.HasSuffix(r.URL.Path, "/createUploadSession"):
+			reply = `{"uploadUrl":"https://outlook.office.com/attachment-sessions/abc"}`
+		case r.Method == http.MethodPut:
+			var start, end int
+			if n, err := fmt.Sscanf(r.Header.Get("Content-Range"), "bytes %d-%d", &start, &end); err == nil && n == 2 {
+				reply = fmt.Sprintf(`{"nextExpectedRanges":["%d-"]}`, end+1)
+			}
+		}
+		return &http.Response{
+			StatusCode: http.StatusAccepted,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(reply)),
+		}, nil
+	}), log
+}
+
+// A redirect on the pre-authenticated upload URL must not be followed: the
+// PUT bytes and the URL's embedded token would travel to an unvetted
+// destination. The 302 itself surfaces as an error without any request to
+// the redirect target, and the unfollowed 3xx is not a deterministic
+// refusal, so the outcome stays ambiguous.
+func TestGraphUploadDoesNotFollowRedirects(t *testing.T) {
+	saved := providerHTTP.Transport
+	t.Cleanup(func() { providerHTTP.Transport = saved })
+	var redirectSeen bool
+	providerHTTP.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Body != nil {
+			_, _ = io.ReadAll(r.Body)
+		}
+		if r.Method == http.MethodPut {
+			redirectSeen = true
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header: http.Header{
+					"Content-Type": []string{"application/json"},
+					"Location":     []string{"https://evil.example/collect?token=leaked"},
+				},
+				Body: io.NopCloser(strings.NewReader("{}")),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusAccepted,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"uploadUrl":"https://outlook.office.com/attachment-sessions/abc"}`)),
+		}, nil
+	})
+
+	err := graphUploadAttachment(context.Background(), mail.Credential{AccessToken: "graph-token"}, "/me/messages/draft-9",
+		mail.Attachment{Filename: "big.bin", ContentType: "application/octet-stream", Data: make([]byte, graphAttachmentMax+1)})
+	if err == nil {
+		t.Fatal("a redirected upload PUT was treated as success")
+	}
+	if !redirectSeen {
+		t.Fatal("the upload PUT never happened")
+	}
+	if mail.IsNotSubmitted(err) {
+		t.Fatalf("an unfollowed redirect must stay ambiguous, got terminal: %v", err)
+	}
+	var ge *graphHTTPError
+	if !errors.As(err, &ge) || ge.Status != http.StatusFound {
+		t.Fatalf("error %v does not carry the 302 status", err)
+	}
+}
+
+// Only deterministic refusals (explicit 4xx answers, fully-local failures)
+// may classify as NotSubmittedError. A transport failure or 5xx after the
+// request bytes were written leaves the remote draft state unknown, so the
+// outbox must record ambiguity even though the message was never /sent.
+func TestGraphDraftSendFailureClassification(t *testing.T) {
+	oversize := mail.Attachment{Filename: "big.bin", ContentType: "application/octet-stream", Data: make([]byte, graphAttachmentMax+1)}
+	small := mail.Attachment{Filename: "a.txt", ContentType: "text/plain", Data: []byte("hi")}
+	for _, tc := range []struct {
+		name             string
+		faults           map[string]graphFault
+		atts             []mail.Attachment
+		wantNotSubmitted bool
+		wantCleanup      bool
+		wantNoUploadPut  bool
+		wantContains     []string
+	}{
+		{
+			name:             "draft create 400",
+			faults:           map[string]graphFault{"POST /v1.0/me/messages": {status: 400, body: `{"error":{"message":"nope"}}`}},
+			wantNotSubmitted: true,
+		},
+		{
+			name:   "draft create response lost",
+			faults: map[string]graphFault{"POST /v1.0/me/messages": {}},
+		},
+		{
+			name:             "patch 429",
+			faults:           map[string]graphFault{"PATCH /v1.0/me/messages/draft-9": {status: 429, body: `{"error":{"message":"throttled"}}`}},
+			wantNotSubmitted: true,
+			wantCleanup:      true,
+		},
+		{
+			name:        "patch 500",
+			faults:      map[string]graphFault{"PATCH /v1.0/me/messages/draft-9": {status: 500, body: `{"error":{"message":"boom"}}`}},
+			wantCleanup: true,
+		},
+		{
+			name:        "patch response lost after write",
+			faults:      map[string]graphFault{"PATCH /v1.0/me/messages/draft-9": {}},
+			wantCleanup: true,
+		},
+		{
+			name:             "inline attachment 400",
+			faults:           map[string]graphFault{"POST /v1.0/me/messages/draft-9/attachments": {status: 400, body: `{"error":{"message":"bad attachment"}}`}},
+			atts:             []mail.Attachment{small},
+			wantNotSubmitted: true,
+			wantCleanup:      true,
+		},
+		{
+			name:             "upload session 400",
+			faults:           map[string]graphFault{"POST /v1.0/me/messages/draft-9/attachments/createUploadSession": {status: 400, body: `{"error":{"message":"refused"}}`}},
+			atts:             []mail.Attachment{oversize},
+			wantNotSubmitted: true,
+			wantCleanup:      true,
+		},
+		{
+			name:        "upload session 500",
+			faults:      map[string]graphFault{"POST /v1.0/me/messages/draft-9/attachments/createUploadSession": {status: 500, body: `{"error":{"message":"storage down"}}`}},
+			atts:        []mail.Attachment{oversize},
+			wantCleanup: true,
+		},
+		{
+			name:        "upload session response lost",
+			faults:      map[string]graphFault{"POST /v1.0/me/messages/draft-9/attachments/createUploadSession": {}},
+			atts:        []mail.Attachment{oversize},
+			wantCleanup: true,
+		},
+		{
+			name:             "upload url from foreign origin",
+			faults:           map[string]graphFault{"POST /v1.0/me/messages/draft-9/attachments/createUploadSession": {status: 202, body: `{"uploadUrl":"https://attacker.example/upload?authtoken=1"}`}},
+			atts:             []mail.Attachment{oversize},
+			wantNotSubmitted: true,
+			wantCleanup:      true,
+			wantNoUploadPut:  true,
+		},
+		{
+			name:             "upload chunk 413",
+			faults:           map[string]graphFault{"PUT /attachment-sessions/abc": {status: 413, body: `{"error":{"message":"chunk too large"}}`}},
+			atts:             []mail.Attachment{oversize},
+			wantNotSubmitted: true,
+			wantCleanup:      true,
+		},
+		{
+			name:        "final chunk stored but response lost",
+			faults:      map[string]graphFault{"PUT /attachment-sessions/abc": {}},
+			atts:        []mail.Attachment{oversize},
+			wantCleanup: true,
+		},
+		{
+			name:        "upload session range diverged",
+			faults:      map[string]graphFault{"PUT /attachment-sessions/abc": {ranges: "0-"}},
+			atts:        []mail.Attachment{oversize},
+			wantCleanup: true,
+		},
+		{
+			name:             "send 400",
+			faults:           map[string]graphFault{"POST /v1.0/me/messages/draft-9/send": {status: 400, body: `{"error":{"message":"no recipients"}}`}},
+			atts:             []mail.Attachment{oversize},
+			wantNotSubmitted: true,
+			wantCleanup:      true,
+		},
+		{
+			name:        "send response lost stays ambiguous",
+			faults:      map[string]graphFault{"POST /v1.0/me/messages/draft-9/send": {}},
+			atts:        []mail.Attachment{oversize},
+			wantCleanup: true,
+		},
+		{
+			name: "cleanup failure is retained with the primary uncertainty",
+			faults: map[string]graphFault{
+				"PATCH /v1.0/me/messages/draft-9":  {},
+				"DELETE /v1.0/me/messages/draft-9": {status: 500, body: `{"error":{"message":"delete exploded"}}`},
+			},
+			wantCleanup:  true,
+			wantContains: []string{"connection lost after write", "delete exploded"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			saved := providerHTTP.Transport
+			t.Cleanup(func() { providerHTTP.Transport = saved })
+			transport, log := graphFaultTransport("", tc.faults)
+			providerHTTP.Transport = transport
+
+			out := &mail.Outgoing{To: []mail.Address{{Email: "peer@example.com"}}, Subject: "t", Text: "body", Attachments: tc.atts}
+			inline, sessions, err := graphAttachments(out.Attachments)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := &App{}
+			err = a.graphDraftSend(context.Background(), mail.Credential{Provider: mail.Provider("graph"), AccessToken: "graph-token"}, out, inline, sessions)
+			if err == nil {
+				t.Fatal("graphDraftSend succeeded despite the injected fault")
+			}
+			if got := mail.IsNotSubmitted(err); got != tc.wantNotSubmitted {
+				t.Fatalf("IsNotSubmitted = %v, want %v (err: %v)", got, tc.wantNotSubmitted, err)
+			}
+			if got := log.has("DELETE /v1.0/me/messages/draft-9"); got != tc.wantCleanup {
+				t.Fatalf("leftover draft cleanup = %v, want %v (calls: %v)", got, tc.wantCleanup, log.calls)
+			}
+			if tc.wantNoUploadPut && log.has("PUT ") {
+				t.Fatalf("upload PUT happened despite an untrusted session url: %v", log.calls)
+			}
+			for _, sub := range tc.wantContains {
+				if !strings.Contains(err.Error(), sub) {
+					t.Fatalf("error %q does not retain %q", err.Error(), sub)
+				}
+			}
+		})
+	}
+}
+
+// The reply path shares the draft-shaping classification: a deterministic
+// refusal before /send is terminal, a lost response after the bytes were
+// written is not — including on the oversize upload the audit called out.
+func TestGraphReplySendFailureClassification(t *testing.T) {
+	oversize := mail.Attachment{Filename: "big.bin", ContentType: "application/octet-stream", Data: make([]byte, graphAttachmentMax+1)}
+	for _, tc := range []struct {
+		name             string
+		faults           map[string]graphFault
+		atts             []mail.Attachment
+		wantNotSubmitted bool
+		wantCleanup      bool
+	}{
+		{
+			name:             "createReply 400",
+			faults:           map[string]graphFault{"POST /v1.0/me/messages/AAMkParent/createReply": {status: 400, body: `{"error":{"message":"no parent"}}`}},
+			atts:             []mail.Attachment{oversize},
+			wantNotSubmitted: true,
+		},
+		{
+			name:        "patch 500",
+			faults:      map[string]graphFault{"PATCH /v1.0/me/messages/draft-9": {status: 500, body: `{"error":{"message":"boom"}}`}},
+			atts:        []mail.Attachment{oversize},
+			wantCleanup: true,
+		},
+		{
+			name:        "upload chunk response lost",
+			faults:      map[string]graphFault{"PUT /attachment-sessions/abc": {}},
+			atts:        []mail.Attachment{oversize},
+			wantCleanup: true,
+		},
+		{
+			name:             "send 400",
+			faults:           map[string]graphFault{"POST /v1.0/me/messages/draft-9/send": {status: 400, body: `{"error":{"message":"no recipients"}}`}},
+			atts:             []mail.Attachment{oversize},
+			wantNotSubmitted: true,
+			wantCleanup:      true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			saved := providerHTTP.Transport
+			t.Cleanup(func() { providerHTTP.Transport = saved })
+			transport, log := graphFaultTransport("AAMkParent", tc.faults)
+			providerHTTP.Transport = transport
+
+			out := &mail.Outgoing{
+				To:          []mail.Address{{Email: "peer@example.com"}},
+				Subject:     "Re: t",
+				Text:        "body",
+				InReplyTo:   "parent@example.com",
+				Attachments: tc.atts,
+			}
+			a := &App{}
+			err := a.graphReplySend(context.Background(), mail.Credential{Provider: mail.Provider("graph"), AccessToken: "graph-token"}, out, "n:graph:AAMkParent")
+			if err == nil {
+				t.Fatal("graphReplySend succeeded despite the injected fault")
+			}
+			if got := mail.IsNotSubmitted(err); got != tc.wantNotSubmitted {
+				t.Fatalf("IsNotSubmitted = %v, want %v (err: %v)", got, tc.wantNotSubmitted, err)
+			}
+			if got := log.has("DELETE /v1.0/me/messages/draft-9"); got != tc.wantCleanup {
+				t.Fatalf("leftover draft cleanup = %v, want %v (calls: %v)", got, tc.wantCleanup, log.calls)
+			}
+		})
 	}
 }
