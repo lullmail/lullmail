@@ -252,7 +252,10 @@ type accountGateKey struct{}
 // best-effort cleanup after a failed provider attempt derives a fresh
 // bounded context from it, so the attempt's own deadline or cancellation
 // cannot skip cleanup while account deletion (or the shutdown drain) still
-// aborts it.
+// aborts it. The context-in-context is deliberate cancellation plumbing,
+// not request data: an explicit-signature refactor would move lease
+// acquisition earlier and change admission ordering — the key is retained
+// deliberately; do not "fix" it without revisiting that ordering.
 type accountLifetimeKey struct{}
 
 // accountLeaseHeld reports whether ctx already holds the admission gate
