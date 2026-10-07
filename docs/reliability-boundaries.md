@@ -24,55 +24,34 @@ Replays preserve Content-Type, Location, Retry-After, and Cache-Control. Cookies
 authentication headers, and transport-specific headers are never replayed.
 Previously recorded outcomes retain their existing retention policy.
 
-## Send acceptance is still volatile
+## Send acceptance: durable outbox (current contract)
 
-`enqueue` atomically checks the submission key, reserves capacity, publishes the
-entry, and admits the worker. A replay neither reserves another job nor creates
-another undo token. Rejected worker admission is not published as an acceptance.
-Dashboard drafts persist one key for unchanged composition; edits and new or
-undo-restored compositions get a new submission identity.
+Send acceptance is durable. The outbox described below was proposed here,
+landed through PR 21 (durable outbox) and its follow-up PR 22 (admission
+fairness, concurrent workers, drain, lost-ack, account deletion), and is
+what the application runs today. The full contract — states, transitions,
+fencing, deployment rules, and the duplicate-send windows that remain —
+lives in [docs/durable-outbox.md](durable-outbox.md); this section keeps
+only the boundaries that motivated it.
 
-After the worker exits, the queue retains at most 4096 small completion receipts
-for 24 hours from completion; retries never extend expiry. The oldest receipt is
-evicted at capacity. Receipts contain only an ID, request hash, outcome, and
-expiry, never composition or attachment content. A submitted receipt replays the
-original token with zero undo time. Transport errors and panics remain ambiguous
-and refuse same-key resubmission; cancelled receipts do likewise. Undo-restored
-compositions use a new key.
+The in-process `enqueue`/receipt layer it replaced worked as designed:
+atomic key check and admission, at most 4096 small completion receipts
+retained 24 hours, submitted receipts replaying with zero undo time, and
+transport errors staying ambiguous. Its boundary was the process: after a
+restart, expiry, or capacity eviction, deduplication was gone, and queue
+acceptance was never delivery confirmation. Those boundaries are why the
+outbox keeps explicit states (`pending`, `submitting`, `submitted`,
+`failed`, `ambiguous`, `cancelled`) in PostgreSQL with conditional
+transitions, a per-entry undo deadline, durable Sent-copy filing state,
+and an owner-scoped status endpoint — exactly the shape this document
+argued for.
 
-This does not guarantee deduplication after server restart, expiry, or capacity
-eviction. Queue acceptance is not delivery confirmation. No automatic provider
-retry should be added to conceal uncertainty.
-
-### Proposed durable outbox, separate change
-
-A future outbox should persist composition and attachment references alongside a
-unique `(owner, submission_key)` and immutable request hash, before acknowledging
-acceptance. Keep explicit states:
-
-- `pending`: durable and undoable until a persisted deadline
-- `submitting`: one leased worker has begun submission
-- `submitted`: provider acceptance is known, with provider identifier when available
-- `failed`: a definite failure, retaining a recoverable draft
-- `ambiguous`: submission may have succeeded; do not blindly retry
-- `cancelled`: undo won before submission began
-
-Undo and worker claim must use conditional state transitions in the same
-database. Restart recovery may safely re-claim `pending`, but an expired
-`submitting` lease must become `ambiguous` unless the transport supplies a
-verifiable idempotent submission contract. SMTP connection loss after DATA is
-not proof of non-delivery. A stable Message-ID helps investigation, but does not
-make SMTP exactly-once.
-
-Expose an owner-scoped status endpoint and event updates. Retire the browser's
-recoverable composition only after durable server ownership is confirmed, and
-surface failed/ambiguous outcomes. Sent-copy filing needs its own durable status
-so filing retries never resend the message. Define attachment quotas, encryption,
-retention, export/deletion, and migration before implementation.
-
-Tradeoff: this adds persistent private-message storage and a worker lifecycle,
-but makes accepted work recoverable. The bounded in-memory receipt cache reduces repeats after completion; it cannot
-resolve restart or SMTP ambiguity.
+No automatic provider retry was added then or since: ambiguous outcomes
+stay ambiguous and recoverable, SMTP connection loss after DATA is not
+proof of non-delivery, and a stable Message-ID helps investigation
+without making SMTP exactly-once. The largest duplicate-send window that
+remains is a pre-outbox build writing to the same database, which only
+the documented stop-old/start-new deployment rule can prevent.
 
 ## Reconciliation completion
 

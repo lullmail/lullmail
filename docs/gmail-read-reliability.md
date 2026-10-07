@@ -1,10 +1,19 @@
-# Gmail read recovery: local proposed patch
+# Gmail read recovery: landed behavior
 
-The default review candidate combines the frozen 2026-10-02 systematic-review
-hardening with this Gmail synchronization delta (public base `7e3ba75`). It has not been published,
-merged, deployed or exercised against a real mailbox. Engine changes require
-matching Neutron upstream work followed by re-vendoring under
-`mail-engine/VENDOR.md`; downstream-only edits are not a release-ready solution.
+The bounded read-only retries, shared local pacing, 100-ID initial pages and
+the credential-classification repairs described here landed on main (they
+entered the default review candidate against public base `7e3ba75` and were
+merged with it); the Gmail read path in the current app carries them. What
+this document's authoring-time status note described as unmerged is
+superseded.
+
+Verification status: exercised against fake HTTP/SQL transports and the
+PostgreSQL integration suites in CI, not against a live Gmail mailbox, and
+the instance has not been deployed with these changes observed in
+production. The vendored engine copy on main matches the recorded Neutron
+snapshot (`888b01c7`), so the earlier upstream-backflow prerequisite is met
+for the checked-in engine; any future engine change still follows
+`mail-engine/VENDOR.md` (upstream first, then re-vendor).
 
 ## Confirmed failures
 

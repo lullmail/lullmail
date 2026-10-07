@@ -377,7 +377,7 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, http.StatusNotFound, "Parent Not Found", "reply_to_message_id does not resolve")
 			return
 		}
-		_, from, ok := a.deliveryFor(r.Context(), mail.AccountID(parentAcct), req.ReplyToID)
+		_, from, ok := a.deliveryFor(r.Context(), mail.AccountID(parentAcct), req.ReplyToID, string(parent.ThreadID))
 		if !ok {
 			writeProblem(w, http.StatusPreconditionFailed, "No Send Credential", "cannot send for this account")
 			return
@@ -393,11 +393,25 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(req.Subject) != "" {
 			outgoing.Subject = req.Subject
 		}
-		a.acceptOutbox(w, r, uid, parentAcct, req.ReplyToID, outgoing, rawBody)
+		// Full-composition transport preflight on the exact message this
+		// reply will send (LUL-D11/LUL-GRAPH-01): provider-specific
+		// expansion — Gmail MIME, Graph serialized JSON — is checked
+		// before durable acceptance, so a composition the transport is
+		// guaranteed to refuse fails here with the draft retained
+		// instead of failing at delivery after acknowledgment.
+		if problem := validateTransportComposition(parentProvider, outgoing); problem != "" {
+			writeProblem(w, http.StatusUnprocessableEntity, "Message Too Large", problem)
+			return
+		}
+		// The parent's native thread id travels in the encrypted payload
+		// (LUL-D12), captured from the ownership-checked envelope — never
+		// the client's request — so a delayed send or restart cannot
+		// depend on the parent still being mirrored later.
+		a.acceptOutbox(w, r, uid, parentAcct, req.ReplyToID, string(parent.ThreadID), outgoing, rawBody)
 		return
 	}
 
-	_, from, ok := a.deliveryFor(r.Context(), mail.AccountID(mirror), "")
+	_, from, ok := a.deliveryFor(r.Context(), mail.AccountID(mirror), "", "")
 	if !ok {
 		writeProblem(w, http.StatusPreconditionFailed, "No Send Credential", "cannot send for this account")
 		return
@@ -412,7 +426,11 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		HTML:        req.HTML,
 		Attachments: attachments,
 	}
-	a.acceptOutbox(w, r, uid, mirror, "", outgoing, rawBody)
+	if problem := validateTransportComposition(provider, outgoing); problem != "" {
+		writeProblem(w, http.StatusUnprocessableEntity, "Message Too Large", problem)
+		return
+	}
+	a.acceptOutbox(w, r, uid, mirror, "", "", outgoing, rawBody)
 }
 
 // sendRequestHash binds one send acceptance to its exact wire body. The
@@ -445,6 +463,29 @@ func validateTransportAttachments(provider string, attachments []mail.Attachment
 	}
 	if _, _, err := graphAttachments(attachments); err != nil {
 		return err.Error()
+	}
+	return ""
+}
+
+// validateTransportComposition runs the chosen transport's FULL-message
+// preflight ahead of queue acceptance (LUL-D11/LUL-GRAPH-01): the
+// attachment-only validator bounds input bytes, but each transport grows
+// the composition when it serializes it — Gmail base64-wraps attachments
+// and quoted-printable-encodes text inside MIME, Graph carries base64
+// attachment bytes inside JSON write requests with a documented 4 MB
+// cap. A composition the transport is guaranteed to refuse must fail
+// synchronously with the draft retained, not be durably accepted and
+// fail at delivery. Providers without a bounded complete-message format
+// (SMTP submission size limits are server-policy) have no preflight
+// here. Like the attachment validator, this runs AFTER the same-key
+// replay lookup: a retry of an already-accepted composition is always
+// answered from the outbox, never re-validated.
+func validateTransportComposition(provider string, out *mail.Outgoing) string {
+	switch provider {
+	case "gmail":
+		return validateGmailComposition(out)
+	case "graph":
+		return validateGraphComposition(out)
 	}
 	return ""
 }
@@ -555,8 +596,11 @@ func stripTags(s string) string {
 
 // deliveryFor resolves an account to its outbound sender: same host as
 // IMAP, port 587 STARTTLS, unless the account overrides it. replyParent is
-// the mirror message id being answered ("" for fresh sends); OAuth
-// providers that cannot set threading headers on a flat send need it.
+// the mirror message id being answered ("" for fresh sends); replyThreadID
+// is the parent's native provider thread id captured at admission
+// (LUL-D12, "" when the parent has none or the payload predates the
+// field). OAuth providers that cannot set threading headers on a flat
+// send need both.
 //
 // Credentials are resolved at DELIVERY time, not enqueue time: the undo
 // timer can outlive an account deletion, and a captured sender holding the
@@ -565,14 +609,14 @@ func stripTags(s string) string {
 // lease from before credential resolution until filing completes, so a
 // concurrent deletion cannot commit between the credential lookup and the
 // network submission (audit 3 SEND-02).
-func (a *App) deliveryFor(ctx context.Context, account mail.AccountID, replyParent string) (deliverFunc, mail.Address, bool) {
+func (a *App) deliveryFor(ctx context.Context, account mail.AccountID, replyParent, replyThreadID string) (deliverFunc, mail.Address, bool) {
 	var provider, address string
 	if err := a.db.QueryRowContext(ctx, `SELECT provider,address FROM email_accounts WHERE mirror_account_id=$1`, string(account)).Scan(&provider, &address); err != nil {
 		return nil, mail.Address{}, false
 	}
 	if provider == "gmail" || provider == "graph" {
 		deliver := func(ctx context.Context, outgoing *mail.Outgoing) error {
-			return a.sendOAuth(ctx, provider, string(account), outgoing, replyParent)
+			return a.sendOAuth(ctx, provider, string(account), outgoing, replyParent, replyThreadID)
 		}
 		return a.guardDelivery(account, deliver), mail.Address{Email: address}, true
 	}

@@ -326,7 +326,10 @@ func (a *App) handleAccountItem(w http.ResponseWriter, r *http.Request) {
 }
 
 // getAccountJSON returns one account in the same shape as the list, so a
-// caller refreshing a single connection reads what the list would show.
+// caller refreshing a single connection reads what the list would show —
+// including the desired/applied policy versions, which the list exposes
+// through the same accountJSON fields (a detail refresh that zeroed them
+// could not distinguish a pending policy transition from an applied one).
 func (a *App) getAccountJSON(w http.ResponseWriter, r *http.Request, id string) {
 	uid, err := a.userID(r.Context())
 	if err != nil {
@@ -342,11 +345,13 @@ func (a *App) getAccountJSON(w http.ResponseWriter, r *http.Request, id string) 
 		       (SELECT count(*) FROM hey_messages h
 		         JOIN mail_messages m ON m.account_id = h.account_id AND m.id = h.message_id
 		          AND m.account_id = ea.mirror_account_id
-		         WHERE h.user_id = ea.user_id AND h.bucket = 'screener')
+		         WHERE h.user_id = ea.user_id AND h.bucket = 'screener'),
+		       ea.policy_version, ea.applied_policy_version
 		FROM email_accounts ea
 		WHERE ea.user_id = $1 AND ea.id::text = $2`, uid, id).
 		Scan(&acc.ID, &acc.MirrorAccountID, &acc.Provider, &acc.Address, &acc.Label, &acc.BackfillDays, &acc.RetentionDays, &acc.SyncEnabled,
-			&lastSync, &lastErr, &acc.MessageCount, &acc.ScreenerCount)
+			&lastSync, &lastErr, &acc.MessageCount, &acc.ScreenerCount,
+			&acc.PolicyVersion, &acc.AppliedPolicyVersion)
 	if err == sql.ErrNoRows {
 		writeProblem(w, http.StatusNotFound, "Not Found", "no such account")
 		return

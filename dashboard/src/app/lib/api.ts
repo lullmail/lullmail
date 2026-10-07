@@ -5,6 +5,7 @@ import {
   cacheResponse, cachedResponse, canQueue, captureOfflineContext, clearReplayAdmission, generationCurrent, newMutationKey, offlineEmail, OfflineOwnerChangedError,
   offlineGeneration, offlineOwner, prepareOfflineOwner, queueMutation, snapshotGeneration, suspendOfflineStorage,
 } from "./offline";
+import { hydrateDrafts } from "./store";
 
 export const authed = signal(false);
 export const authReady = signal(false);
@@ -222,6 +223,15 @@ export async function refreshAuth(): Promise<AuthStatus> {
       const previousOwner = offlineOwner();
       try {
         await prepareOfflineOwner(status, storageContext);
+        // A successful preparation can be the moment parked drafts first
+        // become readable: the mount-time hydration ran before any META
+        // session existed (a v3→v4/v5 upgrade, a legacy migration, a
+        // recovered missing-owner mirror), so its loadDrafts transaction
+        // matched no metadata and returned nothing. Re-hydrate once,
+        // driven by this admission — not a polling loop. hydrateDrafts'
+        // own generation/owner/liveness guards make it a no-op whenever
+        // nothing changed, and it never clobbers a live draft ring.
+        await hydrateDrafts();
       } catch (storageError) {
         if (storageError instanceof OfflineOwnerChangedError) throw new StaleOwnerError();
         // A storage failure is not an unreachable server: the session is

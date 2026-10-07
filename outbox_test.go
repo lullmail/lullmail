@@ -121,7 +121,7 @@ func TestOutboxLostCommitDoesNotAcknowledgeAcceptance(t *testing.T) {
 	r := httptest.NewRequest("POST", "/api/send", nil)
 	r.Header.Set("Idempotency-Key", "stable-key")
 	w := httptest.NewRecorder()
-	a.acceptOutbox(w, r, "owner", "mirror-1", "", &emptyOutgoing, []byte(`{"text":"private"}`))
+	a.acceptOutbox(w, r, "owner", "mirror-1", "", "", &emptyOutgoing, []byte(`{"text":"private"}`))
 	if w.Code != 503 || strings.Contains(w.Body.String(), `"queued"`) {
 		t.Fatalf("response=%d %s", w.Code, w.Body.String())
 	}
@@ -227,7 +227,7 @@ func TestOutboxDiscardedPayloadDoesNotClaimProviderAcceptance(t *testing.T) {
 func TestOutboxMissingEncryptionKeyRefusesAcceptance(t *testing.T) {
 	a := &App{cfg: &Config{}, log: discardLogger()}
 	w := httptest.NewRecorder()
-	a.acceptOutbox(w, httptest.NewRequest(http.MethodPost, "/send", nil), "owner", "account", "", &emptyOutgoing, []byte(`{"text":"private"}`))
+	a.acceptOutbox(w, httptest.NewRequest(http.MethodPost, "/send", nil), "owner", "account", "", "", &emptyOutgoing, []byte(`{"text":"private"}`))
 	if w.Code != http.StatusServiceUnavailable || strings.Contains(w.Body.String(), `"queued"`) {
 		t.Fatalf("unencrypted acceptance=%d %s", w.Code, w.Body.String())
 	}

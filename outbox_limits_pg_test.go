@@ -409,7 +409,7 @@ func TestAccountDeletionGuardsOutbox(t *testing.T) {
 		r = r.WithContext(contextWithOwner(r.Context(), e.p.uid))
 		r.Header.Set("Idempotency-Key", "gone-key")
 		w := httptest.NewRecorder()
-		pr.app.acceptOutbox(w, r, e.p.uid, "no-such-account", "", out, raw)
+		pr.app.acceptOutbox(w, r, e.p.uid, "no-such-account", "", "", out, raw)
 		if w.Code != 404 || strings.Contains(w.Body.String(), "retry with the same submission key") || !strings.Contains(w.Body.String(), "not queued") {
 			t.Fatalf("answer=%d %s", w.Code, w.Body.String())
 		}

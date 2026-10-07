@@ -2236,6 +2236,15 @@ func (a *App) handleFullAccountDelete(w http.ResponseWriter, r *http.Request) {
 	// transaction began; creation cannot add one while it runs.
 	for _, id := range mirrors {
 		for _, q := range []string{
+			// Staged-scan rows belong to these accounts but carry no FK
+			// to the account/user rows deleted below, so nothing else in
+			// this list can reclaim them. The single-account disconnect
+			// already removes them; a full-owner deletion that left them
+			// behind would strand account/mailbox ids, continuation
+			// cursors and accumulated seen-message ids forever (the
+			// disconnected mirror id is never reused).
+			`DELETE FROM mirror_scan_seen WHERE scan_id IN (SELECT id FROM mirror_scans WHERE account_id=$1)`,
+			`DELETE FROM mirror_scans WHERE account_id=$1`,
 			`DELETE FROM mail_message_mailboxes WHERE account_id=$1`, `DELETE FROM mail_bodies WHERE account_id=$1`,
 			`DELETE FROM mail_messages WHERE account_id=$1`, `DELETE FROM mail_mailboxes WHERE account_id=$1`,
 			`DELETE FROM mail_sync_state WHERE account_id=$1`, `DELETE FROM mail_accounts WHERE id=$1`,

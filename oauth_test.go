@@ -340,7 +340,7 @@ func TestGraphReplyThreadsThroughCreateReply(t *testing.T) {
 		References:  []string{"parent@example.com"},
 		Attachments: []mail.Attachment{{Filename: "a.txt", ContentType: "text/plain", Data: []byte("hi")}},
 	}
-	if err := a.sendOAuth(context.Background(), "graph", "acct-1", out, "n:graph:AAMkParent"); err != nil {
+	if err := a.sendOAuth(context.Background(), "graph", "acct-1", out, "n:graph:AAMkParent", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -415,7 +415,7 @@ func TestGraphFreshSendUsesSendMailWithoutCustomHeaders(t *testing.T) {
 	})
 
 	out := &mail.Outgoing{To: []mail.Address{{Email: "peer@example.com"}}, Subject: "hello", Text: "fresh"}
-	if err := a.sendOAuth(context.Background(), "graph", "acct-1", out, ""); err != nil {
+	if err := a.sendOAuth(context.Background(), "graph", "acct-1", out, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -516,7 +516,7 @@ func TestGraphFreshSendWithLargeAttachmentUsesUploadSession(t *testing.T) {
 			{Filename: "small.txt", ContentType: "text/plain", Data: []byte("hi")},
 		},
 	}
-	if err := a.sendOAuth(context.Background(), "graph", "acct-1", out, ""); err != nil {
+	if err := a.sendOAuth(context.Background(), "graph", "acct-1", out, "", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -635,7 +635,7 @@ func TestGraphUploadFailureDeletesDraftAndIsTerminal(t *testing.T) {
 		Text:        "fresh",
 		Attachments: []mail.Attachment{{Filename: "big.bin", Data: make([]byte, graphAttachmentMax+1)}},
 	}
-	err = a.sendOAuth(context.Background(), "graph", "acct-1", out, "")
+	err = a.sendOAuth(context.Background(), "graph", "acct-1", out, "", "")
 	if err == nil {
 		t.Fatal("sendOAuth accepted a failed upload session")
 	}

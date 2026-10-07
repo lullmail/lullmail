@@ -118,6 +118,14 @@ type outboxPayload struct {
 	Outgoing    mail.Outgoing   `json:"outgoing"`
 	Request     json.RawMessage `json:"request"`
 	ReplyParent string          `json:"reply_parent"`
+	// ReplyThreadID is the reply parent's native provider thread id
+	// (LUL-D12), captured at admission from the ownership-checked parent
+	// envelope — never from the client. Empty for fresh sends, replies to
+	// parents without one, and legacy payloads created before the field
+	// existed (delivery recovers those from the mirror when it still
+	// holds the parent). Optional, so old and new payloads decode
+	// interchangeably.
+	ReplyThreadID string `json:"reply_thread_id,omitempty"`
 }
 type outboxAttempt struct{ ID, Token, UserID string }
 type outboxContextKey struct{}
@@ -134,7 +142,7 @@ type outboxRecord struct {
 	SavedCopy   bool      `json:"saved_sent_copy"`
 }
 
-func (a *App) acceptOutbox(w http.ResponseWriter, r *http.Request, uid, account, replyParent string, outgoing *mail.Outgoing, raw []byte) {
+func (a *App) acceptOutbox(w http.ResponseWriter, r *http.Request, uid, account, replyParent, replyThreadID string, outgoing *mail.Outgoing, raw []byte) {
 	if a.shuttingDown() {
 		writeProblem(w, 503, "Shutting Down", "the message was not queued; retry with the same submission key")
 		return
@@ -144,7 +152,7 @@ func (a *App) acceptOutbox(w http.ResponseWriter, r *http.Request, uid, account,
 		key = newID()
 	} // older clients still receive durable ownership
 	hash := mutationRequestHash(r.Method, r.URL.Path, r.URL.RawQuery, raw)
-	payload, err := json.Marshal(outboxPayload{Outgoing: *outgoing, Request: raw, ReplyParent: replyParent})
+	payload, err := json.Marshal(outboxPayload{Outgoing: *outgoing, Request: raw, ReplyParent: replyParent, ReplyThreadID: replyThreadID})
 	if err != nil {
 		writeProblem(w, 500, "Queue Failed", "composition could not be saved")
 		return
@@ -613,7 +621,7 @@ func (a *App) deliverOutbox(ctx context.Context, job outboxAttempt, account, cip
 	defer cancel()
 	ctx = context.WithValue(ctx, outboxContextKey{}, job)
 	_ = a.outboxPoint("claim:after")
-	deliver, _, ok := a.deliveryFor(ctx, mail.AccountID(account), payload.ReplyParent)
+	deliver, _, ok := a.deliveryFor(ctx, mail.AccountID(account), payload.ReplyParent, payload.ReplyThreadID)
 	if !ok {
 		state, code = "failed", "account_unavailable"
 		return
@@ -676,12 +684,19 @@ func (a *App) processSentCopy(ctx context.Context) error {
 type sentCopyClaim struct{ id, owner, account, ciphertext string }
 
 // claimSentCopy claims the filing of row id, or ("") of the oldest waiting
-// row whose account is not in busy.
+// row whose account is not in busy. The schema fence rides the UPDATE
+// itself, exactly like the submission claim: the worker checks the ledger
+// once per sweep, and a newer migration can commit between that check and
+// this filing claim — an unfenced claim would let an old build APPEND a
+// saved copy a newer build owns. A refused claim leaves the copy pending
+// for the capable worker (callers already treat ErrNoRows as "nothing to
+// do"); the fence never discards an already-recorded acceptance outcome,
+// it only declines to start new provider work.
 func (a *App) claimSentCopy(ctx context.Context, id string, busy []string) (sentCopyClaim, error) {
 	var c sentCopyClaim
 	err := a.db.QueryRowContext(ctx, `UPDATE outbox_jobs SET filing_state='submitting',updated_at=now()
  WHERE id=(SELECT id FROM outbox_jobs WHERE state='submitted' AND filing_state='pending' AND ($1='' OR id::text=$1) AND account_id <> ALL($2::text[]) ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
- AND filing_state='pending' RETURNING id::text,user_id::text,account_id,sent_ciphertext`, id, busy).Scan(&c.id, &c.owner, &c.account, &c.ciphertext)
+ AND filing_state='pending' AND `+outboxSchemaNewerSQL+` <= $3 RETURNING id::text,user_id::text,account_id,sent_ciphertext`, id, busy, outboxSupportedSchema()).Scan(&c.id, &c.owner, &c.account, &c.ciphertext)
 	return c, err
 }
 

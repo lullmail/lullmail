@@ -19,7 +19,7 @@ is the register the audit asked for: route, auth, body bound, notes.
 
 | Route | Auth | Body bound | Notes |
 |---|---|---|---|
-| `POST /api/send` | session/agent | 34 MiB + decode slot | wire size of 25 MiB decoded attachments; per-file 15 MiB, ≤20 files, Graph 3 MB/file; stored durably before the 200; admission ≤8 active sends, 512 MiB reserved process-wide / 256 MiB per owner, ≤50,000 retained receipts per owner (429); 503 while a newer build owns the outbox |
+| `POST /api/send` | session/agent | 34 MiB + decode slot | wire size of 25 MiB decoded attachments; per-file 15 MiB, ≤20 files, Graph 3 MB/file (≥ → upload session); full-composition preflight before acceptance — Graph: every serialized request under a conservative 4,000,000-byte budget (draft route splits multi-file aggregates; unsplittable compositions 422), Gmail: rendered MIME under the 36,700,160-byte message budget (422); stored durably before the 200; admission ≤8 active sends, 512 MiB reserved process-wide / 256 MiB per owner, ≤50,000 retained receipts per owner (429); 503 while a newer build owns the outbox |
 | `GET /api/outbox` | session/agent | — | bounded metadata, newest 4096 |
 | `GET /api/outbox/{id}` | session | — | decrypted composition or `?format=eml` Sent copy; never cached by the dashboard |
 | `DELETE /api/outbox/{id}` | session | — | cancel during the undo window (claim and cancel are one predicate) |

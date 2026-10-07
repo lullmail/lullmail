@@ -161,7 +161,7 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   the Go side is untouched.
 
 
-## GMAIL-READ-01 / GMAIL-AUTH-01 - High - LOCAL PROPOSED PATCH; upstream and live-provider gates remain (2026-10-02)
+## GMAIL-READ-01 / GMAIL-AUTH-01 - High - LANDED on main (synthetic + PostgreSQL evidence); live-provider gate remains (updated 2026-10-07)
 
 A deterministic fake transport reproduces initial-page starvation after a
 metadata throttle. Gmail reads now have bounded read-only retries and shared
@@ -177,21 +177,33 @@ origin-restricted GET-only refresh/replay through the application CAS path;
 invalid refresh grants are typed and scheduler admission records reauth.
 Sends and label mutations are not retried. Cancellation covers waits and refresh
 lock acquisition. See `docs/gmail-read-reliability.md` for the contract, measured
-synthetic budget, quota references and outstanding boundaries. The default review
-candidate now includes these Gmail fixes with the frozen main hardening. The
-optional outbox layer remains separate. Neutron upstream backflow/re-vendor is
-required before release; no live mailbox or deployment was touched.
+synthetic budget, quota references and outstanding boundaries. Status update
+2026-10-07: these repairs are merged on main and covered by the full CI pass
+below (including the PostgreSQL integration job); the checked-in vendored
+engine matches the recorded Neutron `888b01c7` snapshot, so the earlier
+upstream-backflow prerequisite is met for this tree. Still outstanding and
+separate: submission through a live Gmail mailbox and production deployment.
 
-## Current verification status (2026-10-02)
+## Current verification status (2026-10-07)
 
 This register distinguishes local implementations, executed checks, and release
-requirements. Product, engine and MCP `go test -race -count=1 ./...` plus `go vet
-./...` now pass with Go 1.26.6. PostgreSQL-dependent tests skip in this authoring
-environment because server socket creation is restricted; their SQL and
-concurrency guarantees are **not** marked verified. Real-browser interaction,
-live-provider submission, upstream backflow and deployment remain separate gates.
-See the per-item statuses below rather than the historical open-item count;
-several report IDs are aliases for the same underlying issue.
+requirements. As of 2026-10-07, CI run 37278867051 completed green on main at
+`e94e288` with all six jobs: verify (product/engine/MCP tests + vet), postgres
+integration (real PostgreSQL, race detector included), dashboard selection,
+dashboard keybinds, dashboard outbox (real-browser durable-outbox recovery on
+loopback fakes), and publish. The deeper-correctness work landed after that run
+(phases 1–2 at `d8dd0ad`, SEND-CONFIRM-01 at `f4d00c3`, phases 3–4 in the
+current tree) re-ran the same surfaces locally: `go test -race -count=1 ./...`
+against local PostgreSQL 17, mail-engine and MCP suites, dashboard vitest ×3,
+typecheck, build, and the synthetic Chromium selection/keybind/outbox suites.
+
+Historical "local-only", "unmerged", "branch", and broad "PostgreSQL
+unavailable" notes further below describe authoring-time status on 2026-10-02
+and are superseded by this evidence — read them as history, not as open work.
+Still separate gates, intentionally not claimed here: real-provider submission
+(live Gmail/Graph mailboxes), production deployment, and the native
+upgrade/crash/quota/privacy browser-fault matrices recorded under OFF-02 and
+DRAFT-02.
 
 ## UI-SELECT-01 - FIXED locally (selection and navigation pass, 2026-10-02)
 
@@ -254,17 +266,19 @@ Fallback now depends on the actual export request context: a live request can
 use the mirror with its disclosure, while request/account cancellation stops
 the export. Provider deadline and caller-cancellation cases pass in unit tests.
 
-## SYNC-REPAIR-01 - High - IMPLEMENTED locally; PostgreSQL and upstream gates remain (2026-10-02)
+## SYNC-REPAIR-01 - High - LANDED with full suite coverage; upstream parity met, production run remains (updated 2026-10-07)
 
 Atomic terminal-page completion prevents new stranded staged scans. Historical
 scans lack completion evidence and cannot safely be finalized by inference.
 `repair-scans` defaults to inspection; mutation requires one exact `--scan` ID
 plus `--apply`. The targeted transaction restarts enumeration without deleting
 live envelopes, bodies, cursor or filing state, retains policy generation, and
-rejects retired late page/finalizer IDs. The CLI guard passes; preservation,
-rollback and late-writer tests require PostgreSQL and remain unrun. This tool has
-not been run against production. See `docs/scan-repair.md` and the required
-Neutron upstream/re-vendor boundary.
+rejects retired late page/finalizer IDs. Status update 2026-10-07: the
+preservation/rollback SQL now runs in the regular PostgreSQL integration job
+and locally under `-race` (the 2026-10-02 note predates the PG harness), and
+the vendored engine on main matches the recorded Neutron snapshot, so the
+upstream-parity prerequisite holds for this tree. This tool still has not been
+run against production. See `docs/scan-repair.md`.
 
 ## Reliability follow-up (2026-10-02)
 
@@ -277,11 +291,18 @@ Contained fixes and regression coverage are prepared for these confirmed gaps:
 
 Product, engine and MCP compilation, non-PostgreSQL tests/race checks and vet now pass. PostgreSQL 17 integration execution remains a verification gate. See [reliability boundaries and outbox proposal](docs/reliability-boundaries.md) for contract limits and required checks.
 
-## Durable outbox (2026-10-02)
+## Durable outbox (2026-10-02; merged via PRs 21 and 22 — updated 2026-10-07)
 
-The durable outbox (`docs/durable-outbox.md`) is implemented on the feat/durable-outbox
-branch as the fix for the SEND-01/SEND-03 deferral below; that deferral stands
-until the branch is merged and deployed. Its review found and fixed: encrypted Sent-copy MIME exceeding its admission
+The durable outbox (`docs/durable-outbox.md`) landed: PR 21 introduced it and
+PR 22 followed with admission fairness, the concurrent worker, drain budget,
+lost-ack lookup and account-delete coverage. The current application sends
+through `handleSend` → `acceptOutbox`; nothing runs on the old volatile
+timer-map path, and the historical "only volatile timer-map sends" diagnosis no
+longer describes this code. The deferral recorded for SEND-01/SEND-03 below is
+therefore resolved as implemented-and-merged; deployment of the outbox build is
+not independently verified, which is why the entries keep their history.
+
+Its review found and fixed: encrypted Sent-copy MIME exceeding its admission
 reservation; cancellation lookup errors answering Too Late; discarded payloads
 claiming provider acceptance; a global (not per-owner) retained-receipt cap that
 one owner could use to stop everyone sending; saved compositions sealed without a
@@ -291,13 +312,16 @@ key id or row binding; uncertain and provably-unsent failures both recorded as
 The 7-to-8 migration, claim and cancel exclusivity, every persistence and
 provider boundary (process kill, dropped connection, lost commit
 acknowledgment, pool exhaustion), concurrent teardown, and the fence are
-exercised against PostgreSQL 17 and real sockets. Remaining duplicate-send
-windows are enumerated in the document; the largest is a pre-outbox build
-writing to the same database, which only the deployment rule can prevent.
+exercised against PostgreSQL 17 and real sockets — in CI since run 37278867051
+and locally under `-race`. Remaining duplicate-send windows are enumerated in
+the document; the largest is a pre-outbox build writing to the same database,
+which only the deployment rule can prevent. Later passes added the single-writer
+schema fence across admission, claim, sweep and Sent filing, and the
+deeper-pass ordering repairs (see the phases 1–4 sections below).
 
-Standing decision: **SEND-01 = SEND-03 (pass 6) = lullmail-10 below.** The
-durable-outbox finding appears in both later reports; it is the same item
-as this register's one recorded product deferral, and the deferral stands.
+Standing decision, updated: **SEND-01 = SEND-03 (pass 6) = lullmail-10 below** —
+one item across three reports, previously this register's only recorded product
+deferral; that deferral is now discharged by PRs 21/22 as above.
 
 ## F07 (round 3) - Medium - PARTIALLY FIXED (contained guard landed), submission transport DEFERRED (product)
 
@@ -317,7 +341,7 @@ as this register's one recorded product deferral, and the deferral stands.
 - Fixed (round 3, commits tagged `audit 4-F05`): the transitional patch kept the ring in localStorage with payloads in IndexedDB, surfaced quota failures, and kept attachment-only drafts restorable.
 - Fixed (remainder, offline-v2 `9e52433`): one draft is ONE IndexedDB record — fields and attachment payloads in the same row, the draft ring those rows in seq order — so the two-engine atomicity gap and the localStorage quota ceiling are both gone. Regression (fake-indexeddb): field edits merge into the single record without clobbering its attachments (`offline-storage.test.ts`).
 
-## lullmail__lullmail-10 - P2 / SEND-03 (pass 6) / SEND-01 (pass 7) High - DEFERRED (decision)
+## lullmail__lullmail-10 - P2 / SEND-03 (pass 6) / SEND-01 (pass 7) High - IMPLEMENTED AND MERGED via PRs 21/22 (updated 2026-10-07; deployment not independently verified)
 
 **Expose a durable send outcome instead of only an undo token**
 
@@ -325,7 +349,7 @@ as this register's one recorded product deferral, and the deferral stands.
 - Evidence: enqueue immediately returns queued/undo_seconds. The worker sends its result to a buffered done channel, logs failures and removes the map entry. The inspected product routes expose undo but no delivery-status lookup; no reader of done appears in the inspected queue code.
 - Impact: The enqueue response is not a delivery acknowledgment. A later provider failure or restart during the undo window has no durable outcome in this path. The frontend draft lifecycle was not inspected, so draft loss itself is not asserted.
 - Proposed fix: Add persistent outbox states and a delivery-result event or status endpoint. Retain/recover draft content until an outcome is known; distinguish accepted, submitting, submitted, failed and ambiguous. Define retry/idempotency behavior rather than blindly retrying sends.
-- Deferral: the original sendqueue.go design comment recorded the decision this item argues against — "Five seconds is the whole feature — no queue table, no worker, just a timer map" (SPEC §6.1; the in-process undo window IS the shipped feature). A durable outbox with delivery states, a status endpoint, and retry/idempotency semantics is a product redesign of that surface, not a defect repair; reopening it is a product call, not an audit action. Pass-7 SEND-01 restates it with a full outbox_jobs design; same item, deferral stands. SEND-04 (durable Sent-copy filing state, pass 7) is a requirement on the same replacement and is deferred with it — today a failed Sent-file is logged (never silently dropped) and the delivered message is never re-sent. Partial hardening landed in pass 7: the queue now has an aggregate admission budget and delivery holds an account-use lease, so the volatile window is bounded and fenced (commits tagged `audit 3-SEND-02`, `audit 3-SEND-03`).
+- Resolution (2026-10-07): the product redesign this item proposed shipped as the durable outbox — PR 21 (states, undo deadline, status endpoint, recoverable drafts) and PR 22 (admission fairness, concurrent workers, drain, lost-ack lookup, account deletion). SEND-04's durable Sent-copy filing state landed with it. The historical deferral text below is retained for the record: the original sendqueue.go design comment recorded the decision this item argued against — "Five seconds is the whole feature — no queue table, no worker, just a timer map" — and the pass-7 restatement with a full outbox_jobs design; the recorded product decision was later revisited and the outbox merged. Partial hardening that landed in pass 7 (aggregate admission budget, account-use lease) is subsumed.
 - Review commit: `49d159b6654d3dbd27866f87ac783402f19c6cb7` (last reviewed 2026-09-10)
 
 ## AUTH-02 (pass 7) / AUTH-06 (pass 6) - Medium - FIXED (lifecycle + re-auth pass, 2026-09-18)
@@ -525,12 +549,13 @@ upstream/re-vendor requirements remain separate release gates.
 - Evidence: Hardening per the report: SECRET_KEY accepts arbitrary text, agent tokens are broad and unexpiry'd, no key rotation/versioning.
 - Deferral: Key IDs + AEAD additional data with re-encryption migration, agent-token scopes/expiry with per-token migration, and documented retention semantics are each their own security-feature tasks; the secure defaults that exist today (generated 32-byte keys, agent route denylist, auth-surface fencing) hold the line meanwhile.
 
-## SEND-01 (audit 5) - High - DEFERRED (standing lullmail-10 product decision)
+## SEND-01 (audit 5) - High - IMPLEMENTED AND MERGED via PRs 21/22 (updated 2026-10-07; deployment not independently verified)
 
 **Accepted sends and their only recoverable draft can disappear**
 
-- Evidence: Confirmed per the report — the queue is in-process, worker errors are logged, the composer retires the draft on the queued response, and a restart or provider failure inside the window loses both. This is the same finding as SEND-01/SEND-03 (pass 7)/lullmail-10 above, restated with the full durable-outbox design; the recorded product deferral stands.
-- Contained hardening (audit 5 SEND-02/LIFE-03, extended in the reliability follow-up): acceptance claims are atomic, and completion/ambiguous/cancelled receipts retain the request hash and original token for up to 24 hours, bounded to 4096 keys. A different body under a retained key is 409. Shutdown-refused work unrolls reservations and answers 503; accepted work cancelled before submission retains a cancelled receipt. The dashboard carries stable submission keys and does not offer undo after a replayed zero-second window. Restart, receipt expiry, and capacity eviction remain outside the guarantee and require the durable outbox the deferral describes.
+- Evidence: Confirmed per the report — the queue is in-process, worker errors are logged, the composer retires the draft on the queued response, and a restart or provider failure inside the window loses both. This is the same finding as SEND-01/SEND-03 (pass 7)/lullmail-10 above, restated with the full durable-outbox design.
+- Resolution (2026-10-07): the durable outbox this entry required is merged (PRs 21/22) — durable states and undo deadline, recoverable compositions until a definite outcome, an owner-scoped status endpoint, and no automatic retry across uncertain outcomes. Deployment of the outbox build is not independently verified.
+- Contained hardening (audit 5 SEND-02/LIFE-03, extended in the reliability follow-up), retained as history: acceptance claims are atomic, and completion/ambiguous/cancelled receipts retain the request hash and original token for up to 24 hours, bounded to 4096 keys. A different body under a retained key is 409. Shutdown-refused work unrolls reservations and answers 503; accepted work cancelled before submission retains a cancelled receipt. The dashboard carries stable submission keys and does not offer undo after a replayed zero-second window. The restart, receipt-expiry, and capacity-eviction gaps this hardening could not close are exactly what the merged outbox now covers.
 
 ## SYNC-02 (audit 5) - High - DEFERRED (standing GRAPH-02/PROVIDER-01 decision)
 
@@ -687,9 +712,148 @@ outbox e2e S1–S7.
   error rather than silently applying a default. Baseline dropped the
   deadline (undo sent undated set_aside).
 
-Owner-gated (not implemented): the send-confirmation ambiguity for
-draft-edited known-ambiguous sends is a product decision. Phase-3 items
-(migrated-draft hydration D03, Gmail MIME preflight D11, native reply
-thread context D12, Graph request budget GRAPH-01, staged-scan cleanup
-B01, Sent-copy schema fence B02, account-detail policy versions B03,
-documentation reconciliation DOC-01) remain queued.
+Owner-gated (resolved 2026-10-07): the send-confirmation ambiguity for
+draft-edited known-ambiguous sends was decided by the owner and landed as
+SEND-CONFIRM-01 above. Phase-3/4 items (migrated-draft hydration D03,
+Gmail MIME preflight D11, native reply thread context D12, Graph request
+budget GRAPH-01, staged-scan cleanup B01, Sent-copy schema fence B02,
+account-detail policy versions B03, documentation reconciliation DOC-01)
+landed 2026-10-07 — see the phases 3–4 section at the end of this
+register.
+
+## Deeper correctness pass phases 3–4 (2026-10-07) — LUL-B01/B02/B03, LUL-GRAPH-01, LUL-D11/D12, LUL-D03 all FIXED; LUL-DOC-01 reconciled
+
+Follow-up to the phases 1–2 section above, same review. Every fix shipped
+with fail-before/pass-after regressions; suites: go build/vet + full go test
+-count=1 against local PostgreSQL 17 (product, engine, MCP), dashboard vitest
+3/3, tsc clean, production build, Chromium selection/keybind/outbox e2e.
+
+- **LUL-B01 FIXED — full-owner deletion omitted both staged-scan tables.**
+  handleFullAccountDelete now removes mirror_scan_seen/mirror_scans for each
+  connected mirror inside the same transaction (first in the per-mirror list),
+  matching the single-account disconnect. Both tables carry no FK to the rows
+  the handler already deleted, so nothing else could reclaim them — an
+  unfinished scan's identifiers, continuation and seen set survived "delete
+  everything" forever. PG regressions: staged rows for both deleted mirrors
+  gone, an unrelated owner's scan/seen/completion marker untouched, and a
+  forced later-delete failure rolls the whole deletion back (owner, mirror
+  rows and staging all restored together).
+- **LUL-B02 FIXED — Sent-copy claim had no atomic schema fence.** The worker
+  checks the ledger once per sweep; a newer migration could commit between
+  that check and the filing claim, letting an old build APPEND a saved copy a
+  newer build owns. claimSentCopy now carries the same
+  newest-ledger-version <= supported predicate inside the UPDATE as the
+  submission claim (third bind parameter), covering both the
+  oldest-waiting-row and submission-completion (by-id) claim paths. A refused
+  claim leaves the copy pending for the capable worker; proven acceptance
+  outcomes are never discarded. PG regression extends the fence suite:
+  both claim paths refuse under a newer ledger and leave the row pending, a
+  processOutbox pass whose sweep already ran does not dial the provider, and
+  exactly one filing claim succeeds once the fence lifts.
+- **LUL-B03 FIXED — account detail zeroed the policy versions.** The list
+  selected ea.policy_version/ea.applied_policy_version; the detail handler
+  selected neither, so GET /api/accounts/{id} serialized 0/0 for every
+  account and a single-connection refresh could not tell a pending policy
+  transition from an applied one — despite the handler's own promise of the
+  list shape. Detail now selects and scans both columns. PG regression:
+  4/2 from both endpoints (with and without a reconcile job), 4/4 after the
+  job completes.
+- **LUL-GRAPH-01 FIXED — complete serialized Graph request budget.** A
+  conservative 4,000,000-byte application budget (under Microsoft's
+  documented 4 MB write cap) now plans every serialized request with one
+  marshal-based check on actual wire bytes, at admission and again at
+  delivery: the one-shot sendMail body, the draft/reply PATCH (body +
+  recipients, no attachments), each inline attachment POST, and each
+  upload-session metadata request. Multi-file aggregates over the budget
+  still send — routed through the draft path whose pieces were proven to
+  fit — and the fast one-shot path is preserved for payloads that fit.
+  The 3 MiB inline/session boundary is now inclusive (a file at the
+  provider's documented upload-session minimum rides the session; its
+  base64 inline JSON could not fit the budget anyway). Compositions with
+  no legal split — an oversized body, or a file below the session minimum
+  whose inline JSON is over budget — are refused synchronously with 422
+  before durable acceptance (draft retained), and delivery re-checks before
+  any provider call so nothing oversized is ever attempted. Boundary
+  regressions cover both sides of the serialized crossover, the session
+  minimum, the fast route, oversize-file-plus-oversize-body, and a fake
+  provider that refuses over-budget bodies never sees one from a supported
+  composition.
+- **LUL-D11 FIXED — Gmail preflight ignores MIME expansion.** Neither the
+  34 MiB input-JSON cap nor the 15/25 MiB raw attachment caps bound the
+  rendered MIME (base64 attachments plus line breaks, quoted-printable
+  text). Admission now renders the complete composition with the
+  production renderer (renderGmailMIME/RenderWithBcc, both fresh and reply
+  branches, after the same-key replay lookup) and enforces Gmail's
+  documented message budget — the discovery document's
+  users.messages.send.mediaUpload.maxSize, 36,700,160 bytes — with an
+  explicit 4 KiB allowance for re-minted Message-ID/boundary/Date bytes;
+  delivery re-renders and rechecks the exact submitted bytes and refuses
+  as known-unsent before any provider call. Oversize compositions get a
+  synchronous 422 naming the Gmail limit with the draft retained. The
+  deterministic counterexample (two 12 MiB files + a 1 MiB '=' body:
+  input JSON under every cap, rendered MIME over the budget) is rejected
+  before any outbox INSERT, computed with the real Go renderer; realistic
+  UTF-8 dual-alternative compositions with attachments just under the raw
+  caps stay admissible, and Bcc still rides the Gmail MIME. The note's
+  exact-byte persistence variant (preparing the MIME once and persisting
+  it in the payload) was deliberately deferred in favor of the sanctioned
+  renderer-backed-boundary + delivery-recheck variant; no retry was added
+  and outcome classification is unchanged.
+- **LUL-D12 FIXED — Gmail replies dropped the stored native thread ID.**
+  Google's threading contract wants the message to name its thread; the
+  Gmail branch sent only {"raw": ...} while the adapter faithfully stored
+  the parent's native ThreadId. Admission now captures the verified
+  parent's ThreadID from the ownership-checked envelope (never the client
+  body, never a message-ID prefix) into an optional account-qualified
+  reply_thread_id field of the encrypted outbox payload; delivery carries
+  it through the existing closure (account-lease order untouched) and adds
+  threadId beside raw for Gmail replies. Fresh sends carry no threadId;
+  legacy pending payloads recover the id from the mirror while the parent
+  is still retained and send without one otherwise (RFC
+  References/In-Reply-To headers ride regardless — no invented ids).
+  Changed-subject behavior is decided, not accidental: the captured id is
+  sent as-is and Google's documented subject condition decides whether the
+  message actually joins the thread — no claim is made that the field can
+  force a reworded subject into the old conversation.
+  Regressions: fake Gmail transport captures the persisted id, MIME keeps
+  the RFC headers, mirror recovery and unmirrored-parent behavior are
+  explicit, fresh sends omit the field, admission persists each account's
+  own id when two accounts share the same provider-local message id, a
+  restart-equivalent delivery pass submits exactly the persisted id, and
+  the same-key replay lookup still precedes everything.
+- **LUL-D03 FIXED — successful migration admission never retried draft
+  hydration.** The only production hydrateDrafts() call rode mount-time
+  layout resolution, which runs before refreshAuth prepares storage: on a
+  v3→v4/v5 upgrade (or legacy migration, or recovered missing-owner
+  mirror) the rows survive on disk but the meta store has no session, so
+  the early loadDrafts transaction matches no metadata and returns
+  nothing — and nothing hydrated again until a manual reload. A successful
+  prepareOfflineOwner inside refreshAuth now triggers exactly one more
+  hydrateDrafts(), driven by admission rather than polling; the existing
+  generation/owner/liveness guards make it a no-op when nothing changed
+  and it never clobbers a live draft ring. Dashboard regressions
+  (fake-indexeddb): v3 and legacy-migration fixtures hydrate after
+  authentication without a reload (attachments and send keys included), a
+  live ring survives a later refresh, and a failed preparation publishes
+  nothing while the parked rows stay intact on disk.
+- **LUL-DOC-01 FIXED — verification-status drift reconciled.** The
+  register, docs/reliability-boundaries.md, docs/gmail-read-reliability.md
+  and the CI workflow comment no longer describe the durable outbox as a
+  future branch, Gmail reads as an unmerged local patch, or the browser
+  outbox job as never-run: PRs 21/22 are merged and are what the app runs,
+  CI run 37278867051 passed all six jobs at e94e288, and the checked-in
+  engine matches the recorded Neutron snapshot. SEND-01/SEND-03/lullmail-10
+  moved from deferred to implemented-and-merged with deployment still
+  unverified. Historical authoring-time notes are kept as history with a
+  supersession pointer. Real-provider submission, production deployment,
+  and the native upgrade/crash/quota/privacy matrices remain separate
+  gates, and publish.needs is unchanged (making the browser suites a
+  mandatory release gate is a release-policy call, not a documentation
+  fix).
+
+Not reopened (per standing decisions): GRAPH-02/PROVIDER-01 immutable-ID
+preference remains the recorded architecture deferral — the new request
+budget deliberately does not touch persisted Graph identities. Gmail's
+JSON-route submission still sends the same rendered bytes the media-upload
+budget bounds; a measured JSON-route threshold, live-mailbox acceptance,
+and the standing WEB-02/WEB-03/OFF-02/DRAFT-02 matrices stay separate.
