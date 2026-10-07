@@ -32,7 +32,11 @@ What is and is not proven is stated in [Validation](#validation) and
   outcome is unknown, keeps the key on the draft, and an unchanged re-send
   reuses the key. If the draft is edited first, the old key is looked up again
   before a new key is minted, and an entry found (or a lookup that fails) asks
-  for explicit confirmation before a possible second copy is sent.
+  for explicit confirmation before a possible second copy is sent. A receipt
+  that itself reports `ambiguous` keeps the key on the draft the same way, so
+  an edited re-send asks again before a new submission can go out (owner
+  decision, 2026-10-07); the composer and the Today inline reply both do
+  this, and only a definite answer or the user's confirmation clears it.
 - `pending` is the only state that is resumed automatically. A conditional
   database claim wins against cancellation; a job is claimed only after its undo
   deadline (five seconds). Cancellation and claim are decided by one predicate on

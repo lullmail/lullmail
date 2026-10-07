@@ -120,6 +120,46 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   dashboard 268 tests, typecheck + build green. Standing deferrals
   untouched.
 
+## SEND-CONFIRM-01 - FIXED (owner decision recorded 2026-10-07)
+
+**Known-ambiguous sends did not ask again before an edited draft could send a second copy**
+
+- Evidence: Confirmed at `d8dd0ad` — when the server reports a send as
+  `ambiguous` (directly in the send receipt, or found by the
+  lost-acknowledgment outbox lookup), the send call resolved that as an
+  ordinary failure outcome, and both the composer and the Today inline
+  reply dropped the retained-key marker they keep for unresolved sends.
+  Editing the draft then cleared its send key, and with no unconfirmed key
+  surviving, the next send minted a fresh key and POSTed immediately — no
+  confirmation — even though the server had said the first copy may already
+  have reached the recipient. An unacknowledged send kept its key and asked
+  after an edit; the strictly stronger server-asserted ambiguity signal
+  did not.
+- Decision: this was held open as a product question rather than a defect —
+  the Outbox's warning-only workflow for composing a new draft from an
+  ambiguous entry is a standing decision and was not in question. The owner
+  decided on 2026-10-07: the same existing draft keeps the
+  explicit-confirmation contract after a known-ambiguous send.
+- Fixed: sends now end in a distinct `ambiguous` outcome, and the composer
+  and the Today inline reply retain the draft's unconfirmed key for that
+  outcome exactly as for an unacknowledged send. The marker survives edits,
+  parking and reload (it is part of the persisted draft record), and the
+  next send of edited content looks the earlier key up and demands explicit
+  confirmation before a possible second copy goes out; it clears only on a
+  definite answer (accepted, refused, or an entry provably not sent) or the
+  user's own confirmation. The Outbox recovery path — a person deliberately
+  creating a new draft from an ambiguous entry with its warning — is
+  unchanged. `docs/durable-outbox.md` records the contract.
+- Regressions (dashboard, fail-before/pass-after): ambiguous receipts via
+  both the direct answer and the lost-acknowledgment lookup resolve as
+  unresolved (provably-unsent failed/cancelled entries still settle as
+  definite answers); the composer asks before an edited draft re-sends
+  after a known-ambiguous send (Cancel: no second POST and the marker
+  stays; confirm: a deliberate new key); the same gate after the draft is
+  parked and reloaded; and the same gate in the Today inline reply.
+  Dashboard suite 308 tests (run three times), typecheck and build green;
+  the Go side is untouched.
+
 
 ## GMAIL-READ-01 / GMAIL-AUTH-01 - High - LOCAL PROPOSED PATCH; upstream and live-provider gates remain (2026-10-02)
 

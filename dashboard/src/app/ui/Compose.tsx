@@ -173,9 +173,10 @@ function DraftForm({ seed }: { seed: ComposeState }) {
         replyToId: submission.replyToId,
         attachments: submission.attachments,
       }, key);
-      // Unconfirmed: keep the key so the draft's next send is checked or
-      // replayed. Any definite answer settles it.
-      if (current()) setUnconfirmedSend(seed.id, outcome === "unconfirmed" ? key : undefined);
+      // Unconfirmed or known-ambiguous: keep the key so the draft's next
+      // send of EDITED content is checked or confirmed first. Any definite
+      // answer settles it.
+      if (current()) setUnconfirmedSend(seed.id, outcome === "unconfirmed" || outcome === "ambiguous" ? key : undefined);
     } finally {
       sending.current = false;
       const active = new Set(sendingDrafts.value); active.delete(seed.id); sendingDrafts.value = active;

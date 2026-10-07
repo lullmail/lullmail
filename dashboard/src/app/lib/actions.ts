@@ -515,10 +515,13 @@ export interface SendInput {
 
 /** How a send ended for the caller. "accepted": the server holds it (queued
  *  or already submitted). "kept": a definite answer that it is not going out
- *  from this draft (refused, failed, ambiguous, cancelled); the draft stays.
+ *  from this draft (refused, failed, cancelled); the draft stays.
  *  "unconfirmed": no acknowledgment arrived and the lookup could not confirm
- *  a row; the draft keeps its key, and an unchanged re-send reuses it. */
-export type SendOutcome = "accepted" | "kept" | "unconfirmed";
+ *  a row; the draft keeps its key, and an unchanged re-send reuses it.
+ *  "ambiguous": the server itself says the send may have gone out; the draft
+ *  stays and keeps its key exactly like an unconfirmed one, so an edited
+ *  re-send must confirm before a possible second copy can go out. */
+export type SendOutcome = "accepted" | "kept" | "unconfirmed" | "ambiguous";
 
 type OutboxStatus = "pending" | "submitting" | "submitted" | "failed" | "ambiguous" | "cancelled";
 interface SendReceipt { queued: string; undo_seconds: number; status?: OutboxStatus; durable?: boolean }
@@ -629,8 +632,15 @@ async function submitMail(input: SendInput, idempotencyKey: string): Promise<Sen
     res = { queued: found.id, undo_seconds: remaining, status: found.status, durable: true };
   }
   if (!current()) return "kept";
-  if (res.status === "ambiguous" || res.status === "failed" || res.status === "cancelled") {
-    showError(res.status === "ambiguous" ? "This send may already have reached the recipient. Check Outbox and Sent before sending again." : "This submission was not sent. Its saved copy is in Outbox; this draft has been kept.");
+  // The server itself says this send may have gone out. That is a stronger
+  // unresolved signal than a lost acknowledgment: the draft keeps its key so
+  // an edited re-send has to confirm before a possible second copy.
+  if (res.status === "ambiguous") {
+    showError("This send may already have reached the recipient. Check Outbox and Sent before sending again.");
+    return "ambiguous";
+  }
+  if (res.status === "failed" || res.status === "cancelled") {
+    showError("This submission was not sent. Its saved copy is in Outbox; this draft has been kept.");
     return "kept";
   }
   const window = Math.max(0, res.undo_seconds ?? 5);

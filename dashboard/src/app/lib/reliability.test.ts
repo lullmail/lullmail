@@ -310,8 +310,15 @@ describe("unknown send outcomes are resolved, not reported as failures", () => {
     expect(await sendMailOutcome(input, "lost-submitted")).toBe("accepted");
     expect(toast.value?.message).toBe("Message submitted");
     routeFetch(vi.fn().mockRejectedValue(new TypeError("timeout")), vi.fn().mockImplementation(async () => entry("ambiguous")));
-    expect(await sendMailOutcome(input, "lost-ambiguous")).toBe("kept");
+    expect(await sendMailOutcome(input, "lost-ambiguous")).toBe("ambiguous");
     expect(toast.value?.message).toContain("may already have reached the recipient");
+  });
+  it("keeps a known-ambiguous send as unresolved and a proved-unsent one as settled", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ queued: "row-9", undo_seconds: 0, durable: true, status: "ambiguous" }))));
+    expect(await sendMailOutcome(input, "known-ambiguous")).toBe("ambiguous");
+    expect(toast.value?.message).toContain("may already have reached the recipient");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ queued: "row-9", undo_seconds: 0, durable: true, status: "failed" }))));
+    expect(await sendMailOutcome(input, "proved-unsent")).toBe("kept");
   });
   it("retries the lookup with backoff before giving up", async () => {
     submissionLookup.backoffMs = [5, 5];

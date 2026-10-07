@@ -571,7 +571,8 @@ export interface ComposeState {
   context?: string;
   /** Reused only while this draft's send content is unchanged. */
   sendKey?: string;
-  /** A key whose send got no acknowledgment and could not be confirmed. It
+  /** A key whose send ended unresolved — no acknowledgment and no confirmed
+   *  row, or the server itself reporting the outcome as ambiguous. It
    *  survives edits (unlike sendKey), so a changed draft is checked against
    *  it before a second copy can go out. */
   unconfirmedKey?: string;

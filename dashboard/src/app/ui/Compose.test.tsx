@@ -8,7 +8,7 @@ import { InlineReply } from "../views/TodayView";
 import { submissionLookup } from "../lib/actions";
 import { clearMemoryCache } from "../lib/api";
 import { clearOfflineData, loadDrafts, prepareOfflineOwner } from "../lib/offline";
-import { accounts, draftStack, openCompose, pendingDraftReads, resetPrivateState, sendingDrafts, toast, updateDraftById } from "../lib/store";
+import { accounts, draftStack, hydrateDrafts, openCompose, pendingDraftReads, resetPrivateState, sendingDrafts, toast, updateDraftById } from "../lib/store";
 import type { BriefThread } from "../lib/types";
 
 const host = document.createElement("div");
@@ -187,6 +187,56 @@ describe("composer submission retries", () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it("asks before an edited draft could send a second copy of a known-ambiguous send", async () => {
+    openCompose(seed);
+    render(<Compose />, host);
+    await settle();
+    // The acknowledgment is lost and the lookup finds the row ambiguous:
+    // the server itself says the first copy may have gone out.
+    lookups.mockImplementation(async () => entry("ambiguous"));
+    await clickSend();
+    const key = fetcher.mock.calls[0][1].headers["Idempotency-Key"];
+    expect(toast.value?.message).toContain("may already have reached the recipient");
+    expect(draftStack.value[0].unconfirmedKey).toBe(key);
+    await edit("textarea.compose-body", "Edited after the ambiguous answer");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await clickSend();
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm.mock.calls[0][0]).toContain("This message may already have been sent");
+    expect(fetcher).toHaveBeenCalledTimes(1); // Cancel: no second POST
+    expect(draftStack.value).toHaveLength(1);
+    expect(draftStack.value[0].unconfirmedKey).toBe(key); // still unresolved
+    confirm.mockReturnValue(true); // sending anyway is a deliberate new submission
+    fetcher.mockResolvedValue(accepted());
+    await clickSend();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls[1][1].headers["Idempotency-Key"]).not.toBe(key);
+    expect(JSON.parse(fetcher.mock.calls[1][1].body).text).toBe("Edited after the ambiguous answer");
+    expect(draftStack.value).toEqual([]);
+  });
+
+  it("still asks after a known-ambiguous draft is parked, reloaded and edited", async () => {
+    fetcher.mockResolvedValue(new Response(JSON.stringify({ queued: "q9", undo_seconds: 0, durable: true, status: "ambiguous" })));
+    openCompose(seed);
+    render(<Compose />, host);
+    await settle();
+    await clickSend();
+    const key = fetcher.mock.calls[0][1].headers["Idempotency-Key"];
+    await edit("textarea.compose-body", "Edited before parking");
+    await act(async () => { await wait(300); }); // the autosave persists marker and edit together
+    expect((await loadDrafts())[0].unconfirmedKey).toBe(key);
+    await act(async () => { render(null, host); });
+    resetPrivateState();
+    await hydrateDrafts();
+    render(<Compose />, host);
+    await settle();
+    lookups.mockImplementation(async () => entry("ambiguous"));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await clickSend();
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(1); // the reload did not forget the ambiguous send
+  });
+
   it("guards button plus keyboard activation and a remount during an in-flight send", async () => {
     let resolve!: (value: Response) => void;
     fetcher.mockImplementation(() => new Promise<Response>((r) => { resolve = r; }));
@@ -291,6 +341,29 @@ describe("Today inline reply retries", () => {
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(onDone).not.toHaveBeenCalled();
+  });
+
+  it("asks before an edited reply could send a second copy of a known-ambiguous one", async () => {
+    const onDone = vi.fn();
+    fetcher.mockResolvedValue(new Response(JSON.stringify({ queued: "q9", undo_seconds: 0, durable: true, status: "ambiguous" })));
+    render(<InlineReply thread={thread} to="person@example.test" onDone={onDone} />, host);
+    await edit("textarea", "My reply");
+    await clickSend();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(onDone).not.toHaveBeenCalled();
+    await edit("textarea", "My edited reply");
+    lookups.mockImplementation(async () => entry("ambiguous"));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await clickSend();
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(1); // Cancel keeps it to one copy
+    expect(onDone).not.toHaveBeenCalled();
+    confirm.mockReturnValue(true); // sending anyway is a deliberate new submission
+    fetcher.mockResolvedValue(accepted());
+    await clickSend();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls[1][1].headers["Idempotency-Key"]).not.toBe(fetcher.mock.calls[0][1].headers["Idempotency-Key"]);
+    expect(onDone).toHaveBeenCalledTimes(1);
   });
 
   it("a stale mounted inline reply cannot send into the new session", async () => {

@@ -48,7 +48,9 @@ export function InlineReply({ thread, to, onDone }: { thread: BriefThread; to: s
       if (retry.current?.body !== body) retry.current = { body, key: newMutationKey() };
       const key = retry.current.key;
       const outcome = await sendMailOutcome(input, key);
-      unconfirmed.current = outcome === "unconfirmed" ? key : undefined;
+      // A known-ambiguous outcome is as unresolved as an unconfirmed one:
+      // the key stays so an edited reply must confirm before a second copy.
+      unconfirmed.current = outcome === "unconfirmed" || outcome === "ambiguous" ? key : undefined;
       if (outcome === "accepted" && current()) onDone();
     } finally {
       sendingNow.current = false;
