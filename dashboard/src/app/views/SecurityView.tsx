@@ -2,7 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import { ApiError, api, authApi, authed, refreshAuth } from "../lib/api";
 import { createPasskey } from "../lib/passkeys";
 import { fmtDate } from "../lib/fmt";
-import { resetSelection, setList, showToast } from "../lib/store";
+import { resetSelection, setList, showError, showToast } from "../lib/store";
 import { Empty, ListSkeleton, LoadError, PageHead, SettingsTabs } from "../ui/bits";
 import { navigate } from "../lib/router";
 import { clearOfflineData } from "../lib/offline";
@@ -179,7 +179,16 @@ export function SecurityView() {
       // leave with the session — no survivorship for the next owner of
       // this browser.
       authed.value = false;
-      try { await clearOfflineData(); } catch { /* already suspended fail-closed; next prepare retries the wipe */ }
+      try { await clearOfflineData(); }
+      catch (error) {
+        // The server session ended; only this device's local erase did
+        // not finish. Report the erase problem itself — never as a
+        // sign-out failure, which would invite retrying a logout that
+        // already happened (LUL-D01).
+        showError(error instanceof Error && error.message
+          ? error.message
+          : "This device's saved data could not be erased yet — it stays locked until the erase succeeds");
+      }
       await refreshAuth();
       navigate("/today");
     } catch (e) {
@@ -259,7 +268,14 @@ export function SecurityView() {
     try {
       await api("/account", { method: "DELETE", body: { confirmation: confirm } });
       authed.value = false;
-      try { await clearOfflineData(); } catch { /* already suspended fail-closed; next prepare retries the wipe */ }
+      try { await clearOfflineData(); }
+      catch (error) {
+        // The account is gone server-side; the local erase is the only
+        // unfinished part and is reported as itself (LUL-D01).
+        showError(error instanceof Error && error.message
+          ? error.message
+          : "This device's saved data could not be erased yet — it stays locked until the erase succeeds");
+      }
       await refreshAuth(); navigate("/today");
     } catch (e) { report(e, "Could not delete account"); setDeleting(false); }
   };

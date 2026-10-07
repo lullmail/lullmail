@@ -863,7 +863,7 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 
 	threadQuery := `
 		SELECT m.id, m.account_id, m.subject, m.from_addrs, m.to_addrs, m.reply_to_addrs, m.received_at,
-		       COALESCE(h.bucket,''), b.text_body, b.html_body, b.parts, b.fetched_at
+		       COALESCE(h.bucket,''), h.set_aside_until, b.text_body, b.html_body, b.parts, b.fetched_at
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
@@ -900,6 +900,11 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		// of the owner's addresses, so following up on sent mail goes back
 		// to the conversation, not to the owner. Empty means "ask".
 		ReplyTo string `json:"reply_to"`
+		// The dated snooze's exact return instant for reader rows
+		// (LUL-F04): the reader's Undo must restore the dated deadline
+		// verbatim, not the server's default three days. Empty when the
+		// snooze has no date (someday) or none is set.
+		SnoozeUntil string `json:"snooze_until,omitempty"`
 	}
 	out := []msgRow{}
 	type ref struct {
@@ -913,8 +918,9 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		var textBody, htmlBody sql.NullString
 		var fetched sql.NullTime
 		var received sql.NullTime
+		var snoozeUntil sql.NullTime
 		if err := rows.Scan(&row.ID, &row.Account, &row.Subject, &fromJSON, &toJSON, &replyToJSON,
-			&received, &row.Bucket, &textBody, &htmlBody, &parts, &fetched); err != nil {
+			&received, &row.Bucket, &snoozeUntil, &textBody, &htmlBody, &parts, &fetched); err != nil {
 			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
 			return
 		}
@@ -934,6 +940,11 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		row.ReplyTo = replyDefault(ownAddresses, fromJSON.String, replyToJSON.String, toJSON.String)
 		if received.Valid {
 			row.ReceivedAt = received.Time.Format(time.RFC3339)
+		}
+		// Retained verbatim (microsecond precision) so the client can send
+		// the exact instant back on Undo without re-rounding it.
+		if snoozeUntil.Valid {
+			row.SnoozeUntil = snoozeUntil.Time.UTC().Format(time.RFC3339Nano)
 		}
 		if !fetched.Valid {
 			refs = append(refs, ref{len(out), row.ID, row.Account})

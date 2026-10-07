@@ -126,11 +126,19 @@ describe("idempotency keys (audit WEB-04)", () => {
     expect(headers["Idempotency-Key"]).toBe("key-1");
     expect(headers["Content-Type"]).toBe("application/json");
     expect(init.body).toBe(JSON.stringify({ action: "read" }));
+    // The replay carries the expected-owner fence when a namespace is
+    // prepared (LUL-D02).
+    if (offlineOwner()) expect(headers["X-Lullmail-Owner"]).toBe(offlineOwner());
   });
-  it("omits the header for legacy queue rows minted before the contract", () => {
+  it("omits the idempotency header for legacy queue rows minted before the contract", () => {
     const init = replayRequestInit({ method: "DELETE" });
-    expect(init.headers).toBeUndefined();
+    const headers = init.headers as Record<string, string> | undefined;
+    expect(headers?.["Idempotency-Key"]).toBeUndefined();
     expect(init.body).toBeUndefined();
+    // The expected-owner fence (LUL-D02) still names the namespace the
+    // queue was admitted under — legacy rows need the fence as much as
+    // modern ones.
+    if (offlineOwner()) expect(headers?.["X-Lullmail-Owner"]).toBe(offlineOwner());
   });
 });
 

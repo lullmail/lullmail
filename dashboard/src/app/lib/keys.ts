@@ -5,7 +5,8 @@
 // one handler for the whole app: it reads the current list out of the store, so
 // every surface that publishes rows gets the same keys for free.
 import { closeCompose, compose, composeOpen, cursor, checked, clearChecked, focusRow, list, newDraft, noteKeyUse, openCompose, overlayOpen, palette, reader, readerOwnsPage, selectAllRows, selectRange, shortcuts, snoozePickerRows, toggleChecked, closeReader, targetRows, dismissToast, toast } from "./store";
-import { decide, markDone, moveTo, openThread, pinThreads } from "./actions";
+import { decide, loadReplySeed, markDone, moveTo, openThread, pinThreads } from "./actions";
+import { offlineOwner } from "./offline";
 import { navigate } from "./router";
 import { splitFrom } from "./fmt";
 
@@ -54,30 +55,52 @@ function replyToCursor() {
   const l = list.value;
   const row = l.kind === "rows" ? l.rows[cursor.value] : undefined;
   // Every verb acts on the highlighted row (see targetRows). The open thread's
-  // latest message is used only when it is that row's thread, or when the
-  // reader owns the page; after the cursor moves elsewhere, reply to the row.
+  // latest message is used only when it belongs to THAT row's account and
+  // thread, or when the reader owns the page; provider-local thread ids are
+  // not globally unique, so matching on thread_id alone could reply to
+  // another account's identically-named thread (LUL-F03). After the cursor
+  // moves elsewhere, reply to the row.
   const open = reader.value.messages[reader.value.messages.length - 1];
-  const source = open && (readerOwnsPage() || !row || row.thread_id === reader.value.threadId) ? open : undefined;
+  const matchesOpen = !!row && !!reader.value.account &&
+    row.account === reader.value.account && row.thread_id === reader.value.threadId;
+  const source = open && (readerOwnsPage() || !row || matchesOpen) ? open : undefined;
   if (source) {
-    const who = splitFrom(source.from);
+    // Loaded reader: the server computed the default recipients from the
+    // stored envelope (audit 4 F06) and they are already authoritative
+    // here. Empty means "ask": the composer opens with a blank To, never
+    // a From substitution (LUL-F02).
     openCompose({
-      to: who.email,
-      subject: /^re:/i.test(source.subject) ? source.subject : "Re: " + source.subject,
+      to: source.reply_to || "",
+      subject: /^re:/i.test(source.subject) ? source.subject : "Re: " + (source.subject || ""),
       accountId: source.account,
       replyToId: source.id,
-      context: "Replying to " + (who.name || who.email),
+      context: "Replying to " + (splitFrom(source.from).name || splitFrom(source.from).email),
     });
     return;
   }
   if (!row) return;
-  const who = splitFrom(row.from);
-  openCompose({
-    to: who.email,
-    subject: /^re:/i.test(row.subject) ? row.subject : "Re: " + row.subject,
-    accountId: row.account,
-    replyToId: row.message_id,
-    context: "Replying to " + (who.name || who.email),
-  });
+  // Row-only path (LUL-F02): From is not the reply default. Resolve the
+  // server-computed recipients for the exact account/message parent, then
+  // open the composer. Guard the late completion against navigation and
+  // owner changes so a stale seed cannot publish.
+  const listKey = l.key;
+  const owner = offlineOwner();
+  const fallback = () => {
+    if (list.value.key !== listKey || offlineOwner() !== owner) return;
+    // The parent could not be read (never opened offline, server
+    // unreachable): open with a blank To — "ask" — never substitute From.
+    openCompose({
+      to: "",
+      subject: /^re:/i.test(row.subject) ? row.subject : "Re: " + (row.subject || ""),
+      accountId: row.account,
+      replyToId: row.message_id,
+      context: "Replying to " + (splitFrom(row.from).name || splitFrom(row.from).email),
+    });
+  };
+  loadReplySeed(row.account, row.thread_id, row.message_id).then((seed) => {
+    if (list.value.key !== listKey || offlineOwner() !== owner) return;
+    openCompose(seed);
+  }, fallback);
 }
 
 export function installKeys(): () => void {

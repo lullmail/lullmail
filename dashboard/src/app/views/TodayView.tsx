@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { generationCurrent, newMutationKey, offlineGeneration, offlineOwner, offlineStorageSuspended } from "../lib/offline";
 import { api } from "../lib/api";
 import { useLoad } from "../lib/useLoad";
-import { accountFilter, accountQS, checked, cursor, resetSelection, rowIdentity, setList } from "../lib/store";
-import { CONFIRM_RESEND, checkEarlierSubmission, markDone, openThread, sendMailOutcome } from "../lib/actions";
+import { accountFilter, accountQS, checked, cursor, resetSelection, rowIdentity, setList, openCompose } from "../lib/store";
+import { CONFIRM_RESEND, checkEarlierSubmission, loadReplySeed, markDone, openThread, sendMailOutcome } from "../lib/actions";
 import type { Briefing, BriefThread, Row, ScreenerSender } from "../lib/types";
 import { countOf, daysSince, fmtDate, relativeAge, splitFrom } from "../lib/fmt";
 import { Empty, ListSkeleton, LoadError, PageHead, SectionHead } from "../ui/bits";
@@ -16,7 +16,7 @@ function asRow(t: BriefThread): Row {
   return { ...t, read: false, bucket: "imbox" };
 }
 
-export function InlineReply({ thread, onDone }: { thread: BriefThread; onDone: () => void }) {
+export function InlineReply({ thread, to, onDone }: { thread: BriefThread; to: string; onDone: () => void }) {
   const who = splitFrom(thread.from);
   const [text, setText] = useState("");
   const textNow = useRef("");
@@ -35,7 +35,9 @@ export function InlineReply({ thread, onDone }: { thread: BriefThread; onDone: (
     if (!text.trim() || sendingNow.current || !current()) return;
     sendingNow.current = true; // button + keyboard can activate before a render
     setSending(true);
-    const input = { to: who.email, subject: thread.subject || "", text, replyToId: thread.message_id, accountId: thread.account };
+    // The recipient is the server-computed default resolved when the
+    // inline reply opened (LUL-F02) — never a client-side From split.
+    const input = { to, subject: thread.subject || "", text, replyToId: thread.message_id, accountId: thread.account };
     const body = JSON.stringify(input);
     try {
       if (unconfirmed.current && retry.current?.body !== body) {
@@ -80,7 +82,44 @@ export function InlineReply({ thread, onDone }: { thread: BriefThread; onDone: (
 function NeedsRow({ thread, index }: { thread: BriefThread; index: number }) {
   const who = splitFrom(thread.from);
   const [replying, setReplying] = useState(false);
+  const [resolving, setResolving] = useState(false);
+  // The server-computed recipient, resolved before the inline reply is
+  // exposed (LUL-F02): null until then, and only ever set from the stored
+  // envelope — never a From substitution.
+  const [recipient, setRecipient] = useState<string | null>(null);
   const selected = checked.value.has(rowIdentity(thread));
+
+  const reply = () => {
+    if (resolving) return;
+    setResolving(true);
+    const owner = offlineOwner();
+    loadReplySeed(thread.account, thread.thread_id, thread.message_id)
+      .then((seed) => {
+        if (offlineOwner() !== owner) return; // owner reset: a late seed must not publish
+        setResolving(false);
+        if (seed.to) {
+          setRecipient(seed.to);
+          setReplying(true);
+        } else {
+          // The server's answer is "ask": open the standard composer with
+          // a blank To instead of guessing inline.
+          openCompose(seed);
+        }
+      })
+      .catch(() => {
+        if (offlineOwner() !== owner) return;
+        setResolving(false);
+        // The parent could not be read: the composer opens with a blank
+        // To rather than addressing the wrong recipient.
+        openCompose({
+          to: "",
+          subject: /^re:/i.test(thread.subject || "") ? thread.subject : "Re: " + (thread.subject || ""),
+          accountId: thread.account,
+          replyToId: thread.message_id,
+          context: "Replying to " + (who.name || who.email),
+        });
+      });
+  };
 
   return (
     <div
@@ -97,11 +136,11 @@ function NeedsRow({ thread, index }: { thread: BriefThread; index: number }) {
       {thread.preview && <div class="digest-preview">{thread.preview}</div>}
 
       {replying ? (
-        <InlineReply thread={thread} onDone={() => setReplying(false)} />
+        <InlineReply thread={thread} to={recipient || ""} onDone={() => setReplying(false)} />
       ) : (
         <div class="digest-acts">
-          <button class="btn btn-outline btn-sm" type="button" onClick={() => setReplying(true)}>
-            <Icon name="reply" size={13} /> Reply
+          <button class="btn btn-outline btn-sm" type="button" disabled={resolving} onClick={reply}>
+            <Icon name="reply" size={13} /> {resolving ? "Loading…" : "Reply"}
           </button>
           <button class="btn btn-ghost btn-sm" type="button" onClick={() => openThread(thread.thread_id, thread.account, "imbox")}>
             Read it

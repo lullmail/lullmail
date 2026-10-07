@@ -157,3 +157,60 @@ func TestIntegrationSnoozeValidationAndLegacyPath(t *testing.T) {
 		t.Fatalf("legacy deadline %v not within a minute of now+7d", until.Time)
 	}
 }
+
+// TestIntegrationThreadReturnsSnoozeDeadline (LUL-F04): the thread
+// endpoint carries the newest message's dated-snooze deadline so the
+// reader's Undo can restore the exact instant. The endpoint used to omit
+// it entirely — and the reader's row constructors dropped it — so an
+// undo sent an undated set_aside and the server applied its three-day
+// default to a known, dated deadline.
+func TestIntegrationThreadReturnsSnoozeDeadline(t *testing.T) {
+	p := newProductPG(t)
+	messageID, _ := seedSnoozeTarget(t, p)
+
+	intended := time.Now().UTC().Add(72 * time.Hour).Truncate(time.Microsecond)
+	if code, _ := actionRequest(t, p, messageID, `{"action":"set_aside","until":"`+intended.Format(time.RFC3339Nano)+`"}`); code != http.StatusOK {
+		t.Fatalf("snooze: status %d", code)
+	}
+
+	threadRequest := func() *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, "/api/threads/thread-snooze?account=snooze-acct", nil)
+		r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, p.uid))
+		r.SetPathValue("thread", "thread-snooze")
+		w := httptest.NewRecorder()
+		p.app.handleThread(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("thread: status %d: %.200s", w.Code, w.Body.String())
+		}
+		return w
+	}
+	var messages []struct {
+		SnoozeUntil string `json:"snooze_until"`
+	}
+	if err := json.Unmarshal(threadRequest().Body.Bytes(), &messages); err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("thread returned %d messages", len(messages))
+	}
+	got, err := time.Parse(time.RFC3339Nano, messages[0].SnoozeUntil)
+	if err != nil {
+		t.Fatalf("snooze_until missing or not an RFC3339 instant: %q", messages[0].SnoozeUntil)
+	}
+	if !got.Equal(intended) {
+		t.Fatalf("thread snooze_until = %s, want exact %s", messages[0].SnoozeUntil, intended.Format(time.RFC3339Nano))
+	}
+
+	// Someday (undated) rows carry no deadline: the client distinguishes
+	// "no date" from "date unknown" by the field's presence on dated rows.
+	if code, _ := actionRequest(t, p, messageID, `{"action":"set_aside","until":null}`); code != http.StatusOK {
+		t.Fatalf("someday: status %d", code)
+	}
+	messages = nil
+	if err := json.Unmarshal(threadRequest().Body.Bytes(), &messages); err != nil {
+		t.Fatal(err)
+	}
+	if messages[0].SnoozeUntil != "" {
+		t.Fatalf("someday row reports a deadline: %q", messages[0].SnoozeUntil)
+	}
+}

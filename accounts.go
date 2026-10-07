@@ -711,6 +711,28 @@ func (a *App) deleteAccount(w http.ResponseWriter, r *http.Request, id string) {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return
 	}
+	// Serialize the whole count/seal/delete sequence against concurrent
+	// send admission: without this gate, a send accepted between the first
+	// count and the seal is later cancelled by the seal (the worker sees a
+	// sealed account and records not_submitted) and then erased by the
+	// final count — an acknowledged, durable composition disappears. With
+	// the gate held across the entire disconnect, an acceptance that owns
+	// it first finishes its commit and is counted here (the deletion
+	// refuses before any cancellation), and a deletion that owns it first
+	// seals the account so a waiting send is refused without an
+	// acknowledgment. Deletion keeps its existing owner read-lock order and
+	// acquires this gate before the count; rollback/unseal (finishDelete)
+	// runs before the gate unlocks, so after an aborted deletion a waiting
+	// send may legitimately succeed. The account-work lease is never held
+	// while waiting for the global outbox SQL lock, so draining cannot
+	// deadlock against an admitted send's commit.
+	unlockAdmission, err := a.outboxAdmissionGateOf(mail.AccountID(mirror)).Lock(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusServiceUnavailable, "Delete Busy",
+			"this account is accepting a send; retry the deletion in a moment")
+		return
+	}
+	defer unlockAdmission()
 	// Checked before the seal so a refusal does not cancel the send it is
 	// protecting; rechecked under the admission lock inside the transaction.
 	if active, _, err := accountOutboxRows(r.Context(), a.db, mirror); err != nil {
@@ -720,10 +742,18 @@ func (a *App) deleteAccount(w http.ResponseWriter, r *http.Request, id string) {
 		writeOutboxActive(w, active)
 		return
 	}
+	if err := a.outboxPoint("delete:after-count"); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Delete Failed", err.Error())
+		return
+	}
 	finishDelete, ok := a.beginAccountDeletion(r.Context(), mail.AccountID(mirror))
 	if !ok {
 		writeProblem(w, http.StatusServiceUnavailable, "Delete Busy",
 			"this account has work still draining — retry the deletion in a moment")
+		return
+	}
+	if err := a.outboxPoint("delete:after-seal"); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Delete Failed", err.Error())
 		return
 	}
 	committed := false

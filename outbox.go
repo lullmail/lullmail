@@ -157,6 +157,22 @@ func (a *App) acceptOutbox(w http.ResponseWriter, r *http.Request, uid, account,
 		writeProblem(w, 503, "Queue Unavailable", "composition could not be encrypted; the draft was not queued")
 		return
 	}
+	// Serialize this acceptance against account deletion's count-and-seal
+	// pair: the admission gate is held from before the account-use lease
+	// through saveOutbox's commit (including its uncertain-commit return),
+	// so a disconnect either observes this row in its first count and
+	// refuses without cancelling anything, or seals before this send enters
+	// and the send is refused without ever being acknowledged. The gate is
+	// per-account and never held while waiting for the global outbox SQL
+	// lock, so unrelated mailboxes cannot head-of-line block and no
+	// lock-order cycle with the account lease can form.
+	unlockAdmission, err := a.outboxAdmissionGateOf(mail.AccountID(account)).Lock(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusServiceUnavailable, "Account Changing",
+			"the sending account is being disconnected; the message was not queued, retry with the same submission key")
+		return
+	}
+	defer unlockAdmission()
 	// Admission joins the account's gate so a deletion that has sealed it
 	// is not raced: the deletion waits for this commit and then counts the
 	// row, instead of cascading away a send it never saw.

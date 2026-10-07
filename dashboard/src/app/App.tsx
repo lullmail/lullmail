@@ -23,7 +23,7 @@ import { SearchView } from "./views/SearchView";
 import { Welcome } from "./views/Welcome";
 import { KeyHints } from "./ui/KeyHints";
 import { offline, startPWA } from "./lib/pwa";
-import { namespaceFor, startOfflineData } from "./lib/offline";
+import { namespaceFor, replayConfirmed, startOfflineData } from "./lib/offline";
 import { startLive, stopLive } from "./lib/live";
 
 // The mailbox loop stays in the first bundle. Larger secondary workspaces and
@@ -271,8 +271,11 @@ export default function App() {
     const offRouter = startRouter();
     const offKeys = installKeys();
     const offPWA = startPWA();
-    // Replay waits for a confirmed authenticated session (audit 5 OFF-02).
-    const offData = startOfflineData(() => authReady.value && authed.value);
+    // Replay waits for a CONFIRMED authenticated session (audit 5 OFF-02)
+    // — and for a confirmed replay admission (LUL-D02): the offline
+    // display fallback (unreachable server) keeps authed=true but is not
+    // the server-confirmed owner replay requires.
+    const offData = startOfflineData(() => authReady.value && authed.value && replayConfirmed());
     refreshAuth().catch(() => {});
     const refreshVisible = () => {
       if (!authed.value || document.visibilityState === "hidden") return;

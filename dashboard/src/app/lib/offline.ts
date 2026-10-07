@@ -18,7 +18,7 @@
 import { resetPrivateState, showError } from "./store";
 
 const DB = "lullmail-offline-v1";
-const VERSION = 4;
+const VERSION = 5;
 const CACHE = "responses";
 const QUEUE = "mutations";
 const ATTACHMENTS = "attachments"; // legacy v1 store; drained by the v2 migration
@@ -27,7 +27,7 @@ const META = "meta";
 const TOMBSTONES = "draft-tombstones";
 const SNAPSHOTS_KEY = "lull-offline-snapshots";
 const PURGE_PREFIX = "lull-offline-purge:";
-interface StorageMeta { key: "session"; owner: string; generation: number; snapshots: number; legacyMigrated?: boolean }
+interface StorageMeta { key: "session"; owner: string; generation: number; snapshots: number; legacyMigrated?: boolean; queueSequence?: number }
 interface StorageContext { owner: string; generation: number; snapshots?: number }
 let admitted: StorageContext | undefined;
 const draftRevisions = new Map<string, number>();
@@ -45,6 +45,13 @@ interface Queued {
   method: string;
   body?: unknown;
   queuedAt: number;
+  /** Durable admission order (LUL-F06): allocated from the shared META
+   *  counter inside the same transaction that writes the row, so entries
+   *  queued in the same millisecond replay in insertion order — random
+   *  UUID keys with equal timestamps used to replay newest-first and
+   *  restore the older state last. Carried unchanged through every
+   *  retry/backoff write. */
+  sequence?: number;
   /** Server idempotency key (audit WEB-04): minted before the FIRST
    *  attempt so a request whose acknowledgment was lost replays the
    *  recorded answer instead of applying twice. */
@@ -117,6 +124,16 @@ function openDB(): Promise<IDBDatabase> {
       if (request.transaction && event.oldVersion > 0 && event.oldVersion < 3) {
         request.transaction.objectStore(CACHE).clear();
       }
+      // v5 (LUL-F06): assign durable admission sequences to legacy queue
+      // rows, in the exact order they replay in today. The bump also
+      // fences mixed-version writers: an older tab still holding VERSION 4
+      // can no longer open the database, so it cannot enqueue unsequenced
+      // rows beside sequenced ones. The original intent behind historical
+      // equal-timestamp entries cannot be reconstructed and is not
+      // claimed recovered.
+      if (request.transaction && event.oldVersion > 0 && event.oldVersion < 5) {
+        sequenceLegacyQueue(request.transaction);
+      }
     };
     request.onerror = () => reject(new OfflineStorageError(request.error?.message ?? "Storage unavailable"));
     request.onsuccess = () => {
@@ -127,6 +144,25 @@ function openDB(): Promise<IDBDatabase> {
       db.onversionchange = () => db.close();
       resolve(db);
     };
+  });
+}
+
+/** The v5 upgrade's one-time sequencing of legacy queue rows (LUL-F06):
+ *  rows are assigned sequences in the order they replay in today —
+ *  primary-key getAll order stably sorted by queuedAt — and the META
+ *  counter is placed after them so fresh admissions follow. */
+function sequenceLegacyQueue(tx: IDBTransaction): void {
+  const metaRequest = tx.objectStore(META).get("session");
+  metaRequest.addEventListener("success", () => {
+    const meta = metaRequest.result as StorageMeta | undefined;
+    let sequence = meta?.queueSequence ?? 0;
+    const rows = tx.objectStore(QUEUE).getAll();
+    rows.addEventListener("success", () => {
+      const legacy = (rows.result as Queued[]).filter((row) => row && row.sequence === undefined);
+      legacy.sort((a, b) => a.queuedAt - b.queuedAt);
+      for (const row of legacy) tx.objectStore(QUEUE).put({ ...row, sequence: ++sequence });
+      if (legacy.length && meta) tx.objectStore(META).put({ ...meta, queueSequence: sequence });
+    });
   });
 }
 
@@ -228,9 +264,62 @@ export function snapshotGeneration(): number {
 export function suspendOfflineStorage(): void {
   transitionVersion++;
   storageSuspended = true;
+  // Suspension revokes replay authority too: a namespace whose storage
+  // failed to prepare must not replay queued work (LUL-D02).
+  replayAdmission = undefined;
 }
 
 export function offlineStorageSuspended(): boolean { return storageSuspended; }
+
+/* ---- confirmed replay admission (LUL-D02) ---- */
+
+/** Replay authority is separate from offline display: an unreachable
+ *  server keeps the offline mailbox viewable (authed=true with a
+ *  synthesized status), but that display fallback is not the confirmed
+ *  current-server owner the replay driver requires — replaying the
+ *  previous owner's queued mutations under whatever session cookie the
+ *  browser now holds can apply the wrong user's intent to
+ *  account-independent actions. This token is published only after a
+ *  successful server identity read AND a committed offline preparation of
+ *  the SAME namespace; every login/session transition (including
+ *  replacement for the same owner) advances the epoch, so a token
+ *  captured under an earlier session can never authorize a later one. */
+export interface ReplayAdmission {
+  readonly owner: string;
+  readonly generation: number;
+  readonly sessionEpoch: number;
+}
+
+/** Pure admission check: the token must still describe the CURRENT
+ *  namespace, generation and session epoch. It does not by itself prove
+ *  the cookie still identifies the same owner — the server-side
+ *  expected-owner comparison on queued mutations closes that gap. */
+export function replayAdmitted(
+  admission: ReplayAdmission | undefined,
+  owner: string,
+  generation: number,
+  sessionEpoch: number,
+): boolean {
+  return admission !== undefined &&
+    admission.owner === owner &&
+    admission.generation === generation &&
+    admission.sessionEpoch === sessionEpoch;
+}
+
+let replayAdmission: ReplayAdmission | undefined;
+let sessionEpoch = 0;
+
+/** Retract replay authority: failed identity confirmation, 401, storage
+ *  invalidation, or any session transition. */
+export function clearReplayAdmission(): void {
+  replayAdmission = undefined;
+}
+
+/** Whether replay may start and continue right now: a confirmed
+ *  admission still matching the current authoritative storage identity. */
+export function replayConfirmed(): boolean {
+  return replayAdmitted(replayAdmission, offlineOwner(), offlineGeneration(), sessionEpoch);
+}
 
 export interface OfflineOwnerIdentity {
   installation_id?: string;
@@ -286,8 +375,19 @@ export async function captureOfflineContext(): Promise<StorageContext> {
 
 export async function prepareOfflineOwner(identity: OfflineOwnerIdentity, captured?: StorageContext): Promise<void> {
   const ns = namespaceFor(identity);
-  if (!ns || !identity.email) return;
+  if (!ns || !identity.email) {
+    // No identity to prepare: whatever admission existed no longer
+    // describes this session (LUL-D02).
+    clearReplayAdmission();
+    return;
+  }
   const version = ++transitionVersion;
+  // Every preparation attempt is a login/session transition: it
+  // invalidates any admission token an earlier session captured, for the
+  // same owner as well (LUL-D02). Only a successful, committed
+  // preparation of this namespace republishes one.
+  sessionEpoch++;
+  clearReplayAdmission();
   const pendingWipe = wipePending;
   const pendingPurge = snapshotPurgePending;
   const expected = captured ?? context();
@@ -352,7 +452,16 @@ export async function prepareOfflineOwner(identity: OfflineOwnerIdentity, captur
         }
         recoveredPurgeHints = pendingHints;
         const generation = Math.max(existing?.generation ?? 0, expected.generation, interruptedWipe ? offlineGeneration() : 0) + (wipe || previous !== ns ? 1 : 0);
-        result = { key: "session", owner: ns, generation, snapshots: Math.max(existing?.snapshots ?? 0, snapshotGeneration(), pendingSnapshots) + (wipe ? 1 : 0), legacyMigrated: true };
+        // Preserve the queue-admission counter for the same owner when
+        // the queue itself survives (LUL-F06); after a wipe the queue was
+        // atomically cleared with this row, so the counter intentionally
+        // resets with it.
+        result = {
+          key: "session", owner: ns, generation,
+          snapshots: Math.max(existing?.snapshots ?? 0, snapshotGeneration(), pendingSnapshots) + (wipe ? 1 : 0),
+          legacyMigrated: true,
+          ...(!wipe && existing?.queueSequence !== undefined ? { queueSequence: existing.queueSequence } : {}),
+        };
         tx.objectStore(META).put(result);
         if (needsMigration && v1Owner === identity.email && !wipe) {
           const queue = tx.objectStore(QUEUE);
@@ -398,6 +507,10 @@ export async function prepareOfflineOwner(identity: OfflineOwnerIdentity, captur
     if (wipePending === pendingWipe) wipePending = undefined;
     if (snapshotPurgePending === pendingPurge) snapshotPurgePending = undefined;
     storageSuspended = false;
+    // Replay authority is published only now (LUL-D02): the caller's
+    // successful /auth/status read confirmed this server identity, and
+    // this namespace's storage preparation committed under it.
+    replayAdmission = { owner: ns, generation: offlineGeneration(), sessionEpoch };
   } catch (error) {
     if (version === transitionVersion) storageSuspended = true;
     throw error; // A failed migration retains every legacy source for retry.
@@ -546,8 +659,45 @@ export async function queueMutation(path: string, method: string, body?: unknown
   }
   const owner = offlineOwner(); if (!owner) throw new Error("Offline owner is not initialised");
   const id = newMutationKey();
-  const saved = await transaction(QUEUE, "readwrite", (store) => store.put({ id, key: key ?? id, owner, path, method, body, queuedAt: Date.now() } as Queued));
+  const saved = await transaction<StorageMeta>(QUEUE, "readwrite", (store, tx) => {
+    const metaRequest = tx.objectStore(META).get("session");
+    metaRequest.addEventListener("success", () => {
+      const meta = metaRequest.result as StorageMeta | undefined;
+      const existing = store.getAll();
+      existing.addEventListener("success", () => {
+        const rows = existing.result as Queued[];
+        // Same-transaction admission sequencing (LUL-F06): the sequence
+        // is allocated from the SHARED meta counter under the same
+        // readwrite transaction that writes the row, so equal-millisecond
+        // entries and two enqueuing tabs get a durable order. Any
+        // unsequenced rows that slipped in (a mixed-version tab, a
+        // restored backup) are sequenced first, in today's historical
+        // order, and the counter also covers sequenced rows ahead of it.
+        let sequence = meta?.queueSequence ?? 0;
+        const legacy = rows.filter((row) => row && row.sequence === undefined).sort((a, b) => a.queuedAt - b.queuedAt);
+        for (const row of legacy) store.put({ ...row, sequence: ++sequence });
+        for (const row of rows) {
+          if (typeof row?.sequence === "number" && row.sequence > sequence) sequence = row.sequence;
+        }
+        const next = sequence + 1;
+        if (!Number.isSafeInteger(next)) {
+          tx.abort();
+          return;
+        }
+        tx.objectStore(META).put({ ...meta, key: "session", queueSequence: next } as StorageMeta);
+        store.put({ id, key: key ?? id, owner, path, method, body, queuedAt: Date.now(), sequence: next } as Queued);
+      });
+    });
+    return metaRequest;
+  });
   if (saved === undefined) throw new OfflineStorageError("The offline owner changed; the change was NOT saved for replay");
+  // LUL-F05: a newly queued item must wake the running replay driver even
+  // while the browser stays nominally online — a network-level failure
+  // with navigator.onLine=true sets no unreachable state and fires no
+  // online event, so without this wake the first item could park
+  // indefinitely. The committed transaction result above is the
+  // authority; the wake dispatches only after it is verified.
+  try { window.dispatchEvent(new Event("lullmail-mutation-queued")); } catch { /* non-browser */ }
 }
 
 /** A client-generated idempotency key: opaque, unique, safe as both the
@@ -557,15 +707,21 @@ export function newMutationKey(): string {
 }
 
 /** The exact fetch one replayed mutation issues — export shape so the
- *  contract (headers, body) is testable without a network. */
-export function replayRequestInit(item: Pick<Queued, "method" | "body" | "key">): RequestInit {
+ *  contract (headers, body) is testable without a network. The optional
+ *  owner parameter carries the offline namespace the queue was admitted
+ *  under; the server compares it against the authenticated session and
+ *  refuses the mutation when they disagree, so a queued action cannot be
+ *  applied to a different signed-in owner (LUL-D02). Legacy clients that
+ *  send no owner are not enforced. */
+export function replayRequestInit(item: Pick<Queued, "method" | "body" | "key">, owner = offlineOwner()): RequestInit {
   const headers: Record<string, string> = {};
   if (item.body !== undefined) headers["Content-Type"] = "application/json";
   if (item.key) headers["Idempotency-Key"] = item.key;
+  if (owner) headers["X-Lullmail-Owner"] = owner;
   return {
     method: item.method,
     credentials: "same-origin",
-    headers: item.body === undefined && !item.key ? undefined : headers,
+    headers: item.body === undefined && !item.key && !owner ? undefined : headers,
     body: item.body === undefined ? undefined : JSON.stringify(item.body),
   };
 }
@@ -641,12 +797,14 @@ export interface ReplaySummary {
   retryAt?: number;
 }
 
-/** The replay order: oldest first, and a backed-off head STOPS the pass —
- *  nothing behind it runs early. Letting newer mutations overtake an older
- *  backed-off one applied sequential edits in the wrong order and let the
- *  older write clobber the newer result (audit 4 F09). The resume time is
- *  exactly the head's deadline, because nothing may run before it anyway. */
-export function replayPlan<T extends { owner: string; queuedAt: number; nextAttemptAt?: number; failed?: string }>(
+/** The replay order: strictly by admission sequence (falling back to
+ *  queuedAt for pre-sequence legacy rows, which sort ahead of sequenced
+ *  ones), and a backed-off head STOPS the pass — nothing behind it runs
+ *  early. Letting newer mutations overtake an older backed-off one
+ *  applied sequential edits in the wrong order and let the older write
+ *  clobber the newer result (audit 4 F09). The resume time is exactly
+ *  the head's deadline, because nothing may run before it anyway. */
+export function replayPlan<T extends { owner: string; queuedAt: number; sequence?: number; nextAttemptAt?: number; failed?: string }>(
   items: T[],
   owner: string,
   now: number,
@@ -655,7 +813,15 @@ export function replayPlan<T extends { owner: string; queuedAt: number; nextAtte
   let retryAt: number | undefined;
   for (const item of [...items]
     .filter((entry) => entry.owner === owner && !entry.failed)
-    .sort((a, b) => a.queuedAt - b.queuedAt)) {
+    .sort((a, b) => {
+      // LUL-F06: the durable admission sequence decides, not the random
+      // primary key; equal-millisecond entries used to replay by random
+      // ID order, restoring the older state last.
+      if (a.sequence !== undefined && b.sequence !== undefined) return a.sequence - b.sequence;
+      if (a.sequence !== undefined) return 1;
+      if (b.sequence !== undefined) return -1;
+      return a.queuedAt - b.queuedAt;
+    })) {
     if (item.nextAttemptAt && item.nextAttemptAt > now) {
       // Not due yet (persisted backoff from an earlier attempt): nothing
       // later may overtake it (audit 4 F09).
@@ -695,6 +861,10 @@ async function fetchReplay(item: Queued): Promise<{ response: Response; failureD
  *  mutations under the new session (audit 5 OFF-02). */
 async function replayDueMutations(): Promise<ReplaySummary> {
   const ctx = context();
+  // Confirmed replay admission (LUL-D02): an offline display fallback
+  // (unreachable server, synthesized authenticated status) must not be
+  // mistaken for the confirmed current-server owner this pass requires.
+  if (!replayConfirmed()) return { committed: 0, rejected: 0 };
   const all = await transaction<Queued[]>(QUEUE, "readonly", (store) => store.getAll(), undefined, ctx);
   if (!all || !currentContext(ctx)) return { committed: 0, rejected: 0 };
   const now = Date.now();
@@ -706,9 +876,9 @@ async function replayDueMutations(): Promise<ReplaySummary> {
   // unrelated event fires (audit 5 OFF-04).
   let retryAt = plan.retryAt;
   for (const item of plan.due) {
-    if (!currentContext(ctx)) break;
+    if (!currentContext(ctx) || !replayConfirmed()) break;
     const live = await transaction<Queued>(QUEUE, "readonly", (store) => store.get(item.id), undefined, ctx);
-    if (!live || !currentContext(ctx)) break; // check authoritative session before each send
+    if (!live || !currentContext(ctx) || !replayConfirmed()) break; // authoritative session + admission before each send
     let response: Response;
     let failureDetail: string | undefined;
     try {
@@ -756,8 +926,23 @@ async function replayDueMutations(): Promise<ReplaySummary> {
  *  cross-tab replay lock (WEB-04). A tab that loses the lock reports an
  *  empty pass — the holder's commits refresh the shared view anyway. */
 export async function replayMutations(): Promise<ReplaySummary> {
-  if (!navigator.onLine || storageSuspended || !offlineOwner()) return { committed: 0, rejected: 0 };
+  if (!navigator.onLine || storageSuspended || !offlineOwner() || !replayConfirmed()) return { committed: 0, rejected: 0 };
   return (await withReplayLock(replayDueMutations)) ?? { committed: 0, rejected: 0 };
+}
+
+/** replayMutations plus the fact the caller needs to keep a wakeup
+ *  pending (LUL-F05): ran=false means this tab did NOT run a pass —
+ *  another tab holds the cross-tab lock, or the preconditions (online,
+ *  admitted owner, confirmed identity) were unmet — so a queued-wake
+ *  must not be consumed by it. */
+export async function replayPassStatus(): Promise<{ summary: ReplaySummary; ran: boolean }> {
+  if (!navigator.onLine || storageSuspended || !offlineOwner() || !replayConfirmed()) {
+    return { summary: { committed: 0, rejected: 0 }, ran: false };
+  }
+  const result = await withReplayLock(replayDueMutations);
+  return result === undefined
+    ? { summary: { committed: 0, rejected: 0 }, ran: false }
+    : { summary: result, ran: true };
 }
 
 export async function clearResponseCache(): Promise<void> {
@@ -772,7 +957,17 @@ export async function clearResponseCache(): Promise<void> {
  *  report erased data while something survived — dangerous exactly when
  *  the same namespace is reused later (audit 3 WEB-02). The generation
  *  counter is NEVER removed: it keeps counting up across wipes so a
- *  pre-wipe async write can never publish into a post-wipe namespace. */
+ *  pre-wipe async write can never publish into a post-wipe namespace.
+ *
+ *  The localStorage writes are invalidation MIRRORS, not prerequisites
+ *  (LUL-D01): a quota failure on the first generation setItem used to
+ *  reject before IndexedDB was even opened, leaving session metadata,
+ *  drafts, queue and mail snapshots untouched on disk while the UI
+ *  reported a completed logout. Mirror failures are now retained and the
+ *  authoritative IDB wipe is always attempted; the outcome is reported
+ *  from what actually committed. An IDB failure is never converted into
+ *  success, and a mirror failure with no IDB to attempt cannot be
+ *  treated as successful cleanup either. */
 export async function clearOfflineData(): Promise<void> {
   const version = ++transitionVersion;
   const expected = wipePending ?? admitted ?? context();
@@ -785,14 +980,26 @@ export async function clearOfflineData(): Promise<void> {
   if (stale && !wipePending) return;
   const pendingWipe = expected;
   wipePending = pendingWipe;
+  let mirrorError: unknown;
   if (!stale) {
     responseGeneration = snapshotGeneration() + 1;
-    localStorage.setItem(GEN_KEY, String(offlineGeneration() + 1));
-    localStorage.setItem(SNAPSHOTS_KEY, String(responseGeneration));
+    try { localStorage.setItem(GEN_KEY, String(offlineGeneration() + 1)); }
+    catch (error) { mirrorError = error; }
+    try { localStorage.setItem(SNAPSHOTS_KEY, String(responseGeneration)); }
+    catch (error) { if (mirrorError === undefined) mirrorError = error; }
   }
   if (typeof indexedDB === "undefined") {
-    localStorage.removeItem(NS_KEY);
-    localStorage.removeItem(EMAIL_KEY);
+    try {
+      localStorage.removeItem(NS_KEY);
+      localStorage.removeItem(EMAIL_KEY);
+    } catch (error) {
+      if (mirrorError === undefined) mirrorError = error;
+    }
+    if (mirrorError !== undefined) {
+      // No durable second layer exists to attempt: the mirrors are all
+      // the storage there is, so a failure here is a failed erase.
+      throw new OfflineStorageError(`This device's saved data could not be erased (${mirrorError instanceof Error ? mirrorError.message : "storage unavailable"}); it stays locked until the erase succeeds`);
+    }
     wipePending = undefined;
     return;
   }
@@ -814,14 +1021,25 @@ export async function clearOfflineData(): Promise<void> {
       };
     });
     if (meta && version === transitionVersion) {
-      publishMeta(meta);
-      // A logout before first migration must not reimport these old drafts.
-      localStorage.setItem(V2_KEY, "1");
-      for (const key of Object.keys(localStorage)) {
-        if (key === OWNER || key === "es-drafts" || key.startsWith("es-draft-")) localStorage.removeItem(key);
+      // The authoritative wipe committed: erasure is durable even when
+      // the mirrors above did not publish. Publishing the new markers can
+      // still fail on the same storage condition; stay suspended and
+      // report the limited failure without claiming any row survived.
+      try {
+        publishMeta(meta);
+        // A logout before first migration must not reimport these old drafts.
+        localStorage.setItem(V2_KEY, "1");
+        for (const key of Object.keys(localStorage)) {
+          if (key === OWNER || key === "es-drafts" || key.startsWith("es-draft-")) localStorage.removeItem(key);
+        }
+      } catch (error) {
+        if (mirrorError === undefined) mirrorError = error;
+      }
+      if (wipePending === pendingWipe) wipePending = undefined;
+      if (mirrorError !== undefined) {
+        throw new OfflineStorageError("This device's saved mail, drafts and offline actions were erased, but the storage mirror could not be updated; offline access stays disabled until the next sign-in");
       }
     }
-    if (wipePending === pendingWipe) wipePending = undefined;
   } finally { db.close(); }
 }
 
@@ -832,7 +1050,15 @@ export async function clearOfflineData(): Promise<void> {
  *  the same row or vice versa). */
 export async function saveDraftFields(id: string, fields: Partial<DraftRecord>, gen = offlineGeneration(), stillLive: () => boolean = () => true): Promise<boolean> {
   const ns = offlineOwner(); if (storageSuspended || !generationCurrent(gen) || !ns || typeof indexedDB === "undefined") return false;
-  const current = () => !storageSuspended && offlineOwner() === ns && generationCurrent(gen) && stillLive();
+  // Session currency (owner + generation + not suspended) is separate
+  // from the snapshot's liveness: a committed own write must advance the
+  // local CAS knowledge even when a newer local edit has already made
+  // this transaction's payload stale (LUL-F01). Gating the bookkeeping on
+  // the snapshot identity instead made the very next autosave and
+  // prepareDraftSend fail the comparison with a false "changed in another
+  // tab", permanently desynchronizing this tab's revision map.
+  const sessionCurrent = () => !storageSuspended && offlineOwner() === ns && generationCurrent(gen);
+  const current = () => sessionCurrent() && stillLive();
   const db = await openDB();
   try {
     if (!current()) return false;
@@ -841,7 +1067,9 @@ export async function saveDraftFields(id: string, fields: Partial<DraftRecord>, 
       let savedRevision: number | undefined;
       let failure: Error | undefined;
       tx.oncomplete = () => {
-        if (savedRevision !== undefined && current()) draftRevisions.set(ns + "\n" + id, savedRevision);
+        if (savedRevision !== undefined && sessionCurrent()) {
+          draftRevisions.set(ns + "\n" + id, savedRevision);
+        }
         resolve(savedRevision !== undefined && current());
       };
       tx.onabort = () => reject(failure ?? tx.error ?? new OfflineStorageError("Draft save aborted"));
@@ -938,11 +1166,20 @@ export function startOfflineData(authenticated: () => boolean = () => true): () 
   // the pass used to start before refreshAuth resolved, so a previous
   // owner's queued mutations could replay under whatever session cookie
   // the browser holds before the server confirmed the namespace matches.
+  //
+  // The driver coalesces (LUL-F05): a wake that arrives while a pass is
+  // running requests exactly ONE further pass at that pass's completion,
+  // and a pass that could not run (another tab holds the replay lock)
+  // keeps the request pending instead of consuming the only wake. A wake
+  // may inspect the queue but never bypasses the head's persisted
+  // backoff deadline.
   let timer: number | undefined;
   // An in-flight replay must not schedule a new timer after the cleanup
   // function has run: unmount would leave an orphaned retry loop (audit
   // 4 F10).
   let stopped = false;
+  let running = false;
+  let requested = false;
   const replay = () => {
     if (stopped) return;
     if (!authenticated()) {
@@ -950,8 +1187,21 @@ export function startOfflineData(authenticated: () => boolean = () => true): () 
       // own refresh path once the session is known.
       return;
     }
-    replayMutations().then(async (summary) => {
+    if (running) {
+      requested = true;
+      return;
+    }
+    running = true;
+    replayPassStatus().then(async ({ summary, ran }) => {
+      running = false;
       if (stopped) return;
+      if (!ran) {
+        // Another tab owns the pass, or the preconditions are unmet (the
+        // online/auth events re-trigger this driver): keep the wake
+        // pending rather than consume it.
+        requested = true;
+        return;
+      }
       if (summary.committed > 0) {
         const { reload, refreshCounts } = await import("./actions");
         reload(); refreshCounts();
@@ -960,7 +1210,12 @@ export function startOfflineData(authenticated: () => boolean = () => true): () 
         showError(`${summary.rejected} offline action${summary.rejected === 1 ? "" : "s"} could not be applied — check the browser console for what the server rejected`);
       }
       if (summary.retryAt !== undefined) scheduleRetry(summary.retryAt);
+      else if (requested) {
+        requested = false;
+        replay();
+      }
     }).catch((error) => {
+      running = false;
       // Queued work and cached mail stay intact; the next online event
       // retries.
       console.error("Offline replay failed", error);
@@ -983,10 +1238,16 @@ export function startOfflineData(authenticated: () => boolean = () => true): () 
     if (!stopped && authenticated()) replay();
   };
   window.addEventListener("lullmail-auth-refreshed", retryWhenAuthenticated);
+  // A newly queued mutation wakes the driver while the browser remains
+  // nominally online (LUL-F05): a network-level API failure sets no
+  // unreachable state and fires no online event, so the first queue item
+  // could otherwise park indefinitely.
+  window.addEventListener("lullmail-mutation-queued", replay);
   return () => {
     stopped = true;
     window.removeEventListener("online", replay);
     window.removeEventListener("lullmail-auth-refreshed", retryWhenAuthenticated);
+    window.removeEventListener("lullmail-mutation-queued", replay);
     if (timer !== undefined) window.clearTimeout(timer);
   };
 }

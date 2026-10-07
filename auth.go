@@ -303,11 +303,54 @@ func (a *App) requireAuth(next http.Handler) http.Handler {
 					"this install is pinned to "+a.cfg.PublicURL+" — you are browsing from "+origin)
 				return
 			}
+			// The expected-owner fence: a replayed offline mutation names
+			// the offline namespace it was queued under. Comparing it here —
+			// inside the authenticated request, before any handler,
+			// idempotency admission, or side effect — refuses to apply a
+			// queued action when the session cookie now identifies a
+			// different owner, closing the window between the client's
+			// status confirmation and dispatch. Legacy clients send no
+			// header and are not enforced.
+			if expected := r.Header.Get("X-Lullmail-Owner"); expected != "" {
+				match, err := a.ownerNamespaceMatches(r.Context(), uid, expected)
+				if err != nil {
+					writeProblem(w, http.StatusServiceUnavailable, "Owner Check Failed",
+						"the signed-in account could not be verified — try again shortly")
+					return
+				}
+				if !match {
+					writeProblem(w, http.StatusConflict, "Owner Changed",
+						"this change was saved for a different account — reload before applying it")
+					return
+				}
+			}
 		}
 		ctx := context.WithValue(r.Context(), authContextKey{}, uid)
 		ctx = context.WithValue(ctx, sessionContextKey{}, session)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// ownerNamespaceMatches reports whether an X-Lullmail-Owner value names
+// this authenticated owner. The current offline namespace is
+// installation_id + "/" + user_id; the email namespace is still accepted
+// because clients queued before the identity pair existed (and servers
+// that predate it) namespace by email. A lookup failure is an error, not
+// a mismatch: refusing with 503 beats applying a possibly-wrong-owner
+// action.
+func (a *App) ownerNamespaceMatches(ctx context.Context, uid, expected string) (bool, error) {
+	instID, err := a.installationID(ctx)
+	if err != nil {
+		return false, err
+	}
+	if expected == instID+"/"+uid {
+		return true, nil
+	}
+	var email string
+	if err := a.db.QueryRowContext(ctx, `SELECT email FROM users WHERE id=$1`, uid).Scan(&email); err != nil {
+		return false, err
+	}
+	return email != "" && strings.EqualFold(expected, email), nil
 }
 
 func (a *App) mountAuth(mux *http.ServeMux) {

@@ -2,7 +2,7 @@
 // session cookie; JavaScript never sees a long-lived authentication secret.
 import { signal } from "@preact/signals";
 import {
-  cacheResponse, cachedResponse, canQueue, captureOfflineContext, generationCurrent, newMutationKey, offlineEmail, OfflineOwnerChangedError,
+  cacheResponse, cachedResponse, canQueue, captureOfflineContext, clearReplayAdmission, generationCurrent, newMutationKey, offlineEmail, OfflineOwnerChangedError,
   offlineGeneration, offlineOwner, prepareOfflineOwner, queueMutation, snapshotGeneration, suspendOfflineStorage,
 } from "./offline";
 
@@ -164,6 +164,9 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
   assertCurrent();
   if (res.status === 401 && protectedRoute) {
     authed.value = false;
+    // A rejected session is not a confirmed identity: queued work must
+    // not replay under it (LUL-D02).
+    clearReplayAdmission();
     throw new ApiError("unauthorized", 401);
   }
   if (res.status === 204) return null as T;
@@ -248,6 +251,10 @@ export async function refreshAuth(): Promise<AuthStatus> {
     // mailbox open; a fresh device waits for the server rather than being
     // told to sign in to something it cannot reach.
     unreachable.value = true;
+    // The identity is NOT confirmed: the synthesized offline display
+    // state below must not carry replay authority (LUL-D02). Queued work
+    // waits for a successful status read and owner preparation.
+    clearReplayAdmission();
     const owner = offlineEmail();
     if (owner && !authStatus.value) {
       authStatus.value = { configured: true, authenticated: true, email: owner, bootstrap_available: false, passkey_supported: true };
@@ -272,6 +279,7 @@ if (typeof window !== "undefined") {
     authStatus.value = null;
     authed.value = false;
     authReady.value = false;
+    clearReplayAdmission();
     void refreshAuth().catch(() => { /* the normal auth state reports reachability */ });
   });
 }

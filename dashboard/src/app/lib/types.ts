@@ -87,6 +87,11 @@ export interface Message {
       it came from one of the owner's addresses. Empty means "ask the
       user" (audit 4 F06). */
   reply_to?: string;
+  /** The dated snooze's exact return instant on the thread's newest
+      message (LUL-F04): carried verbatim into reader rows so an Undo
+      restores the exact deadline instead of the three-day default.
+      Never parsed or re-rounded in JavaScript. */
+  snooze_until?: string;
 }
 
 export interface ScreenerSender {

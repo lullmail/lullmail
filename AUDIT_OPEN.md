@@ -584,3 +584,72 @@ claim a strict bound on browser heap overhead or native filesystem durability.
 
 - Evidence: Confirmed — the engine records Content-ID values and the sanitizer preserves `cid:` references, but the thread response exposes no inline-part mapping and the renderer has no path from a cid to authenticated bytes, so embedded images render broken.
 - Deferral: a cross-layer feature (engine inline-parts array + authenticated part endpoint + Blob-URL renderer with revoke discipline + CSP allowances), explicitly scoped in the report as new functionality rather than a defect repair; tracked as reader work.
+
+## Deeper correctness pass (2026-10-06) — LUL-D01/D02/D10, LUL-F01/F05/F06, LUL-F02/F03/F04 all FIXED
+
+Phases 1–2 of the deeper correctness review (report AUDIT-CHATGPT-9
+follow-up material consolidated at landing). Every fix shipped with
+fail-before/pass-after regressions; suites: go build/vet + full go test
+-race against local PostgreSQL (51s, incl. new PG admission/owner-fence
+tests), mail-engine + mcp -race green, dashboard 31 files/304 tests x3
+runs, tsc clean, build clean, Chromium selection + 24 keybind scenarios,
+outbox e2e S1–S7.
+
+- **LUL-D01 (High) FIXED — durable logout erasure.** clearOfflineData
+  retains mirror setItem failures, always attempts the authoritative IDB
+  wipe, and reports the erase outcome from what actually committed;
+  SecurityView surfaces erase failure as erase failure, never as
+  "sign-out failed". Baseline reproduced quota-exceeded skipping the wipe
+  with rows restorable after reload.
+- **LUL-D02 (High) FIXED — confirmed replay identity.** ReplayAdmission
+  {owner, generation, sessionEpoch} published only after a successful
+  status read plus committed preparation; cleared on failed status/401/
+  invalidation/suspension and every prepare (epoch bump); guards before
+  work selection and before each send. Server: X-Lullmail-Owner compared
+  against the authenticated identity in requireAuth before handlers,
+  idempotency or side effects (absent = legacy unenforced; email
+  namespace accepted; lookup failure = 503). Baseline replayed account
+  A's queue into B's offline display; server accepted another owner's
+  namespace with 204.
+- **LUL-D10 (High) FIXED — disconnect/admission ordering.** Per-account
+  context-aware admission gate (stable registry, never deleted while
+  held); acceptOutbox holds it from before the account lease through
+  saveOutbox commit; deleteAccount takes it before the initial count and
+  holds through disconnect, unsealing before unlock. Baseline reproduced
+  an accepted send erased unsent (deletion=200, rows=0, delivered=0) and
+  a 409 refusal that cancelled the send it protected. accountLifetimeKey
+  and the PR-22 lock orders untouched; race + count=2 flake checks green.
+- **LUL-F01 FIXED — draft revision CAS.** tx.oncomplete splits
+  sessionCurrent (owner/generation/suspension) from snapshot liveness so
+  a committed own write advances draftRevisions even when a newer local
+  edit superseded the payload; pre-write/tombstone/CAS checks unchanged;
+  cross-tab rejection retained.
+- **LUL-F05 + LUL-F06 FIXED — replay wakeups + ordered queue admission.**
+  queueMutation signals lullmail-mutation-queued only after the verified
+  committed result; driver coalesces, keeps wakes pending on
+  lock-unavailable, never bypasses head backoff. DB v4→v5: sequences
+  allocated from the shared META counter inside the same readwrite tx
+  (legacy rows sequenced in historical order, strays swept, mixed-version
+  writers fenced); replayPlan sorts by sequence. Baseline replayed
+  equal-timestamp entries newest-first and never fired wakes on newly
+  queued work (5s timeouts).
+- **LUL-F02 + LUL-F03 FIXED — reply defaults + identity.** Shared
+  loadReplySeed performs the owner-fenced thread read; loaded-reader r
+  uses reply_to with empty = ask; row-only r and Today resolve the seed
+  async with list-key/owner guards and never substitute From;
+  matchesOpen requires the row account to equal the reader account.
+  Baseline sent to From when Reply-To differed and could draft against
+  account A while B was highlighted.
+- **LUL-F04 FIXED — snooze deadline in reader Undo.** Thread query
+  returns set_aside_until verbatim (RFC3339Nano) through a shared
+  readerRow conversion used by both targetRows and Thread.tsx; restore()
+  declines to undo a set_aside with an unknown deadline with a visible
+  error rather than silently applying a default. Baseline dropped the
+  deadline (undo sent undated set_aside).
+
+Owner-gated (not implemented): the send-confirmation ambiguity for
+draft-edited known-ambiguous sends is a product decision. Phase-3 items
+(migrated-draft hydration D03, Gmail MIME preflight D11, native reply
+thread context D12, Graph request budget GRAPH-01, staged-scan cleanup
+B01, Sent-copy schema fence B02, account-detail policy versions B03,
+documentation reconciliation DOC-01) remain queued.

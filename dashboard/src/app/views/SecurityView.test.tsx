@@ -55,6 +55,54 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("logout and account deletion erase reporting", () => {
+  it("reports a local erase failure as itself, not as a sign-out failure", async () => {
+    resetSelection();
+    setList({ kind: "none", key: "security", loading: false, error: null, rows: [], senders: [], origin: null });
+    vi.unstubAllGlobals();
+    const logoutFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method || (init?.body ? "POST" : "GET")).toUpperCase();
+      if (url.endsWith("/api/auth/logout") && method === "POST") return jsonResponse(200, { ok: true });
+      if (url.endsWith("/api/auth/status")) {
+        return jsonResponse(200, { configured: true, authenticated: false, email: "", bootstrap_available: false, passkey_supported: true });
+      }
+      if (url.endsWith("/api/security") && method === "GET") {
+        return jsonResponse(200, { email: "owner@example.test", passkeys: [], totp_enabled: false, password_set: true, recovery_codes_remaining: 10 });
+      }
+      if (url.endsWith("/api/security/sessions")) return jsonResponse(200, []);
+      if (url.endsWith("/api/push")) return jsonResponse(200, { configured: false, subscribed: false, public_key: "" });
+      if (url.endsWith("/api/security/agent-tokens")) return jsonResponse(200, []);
+      return jsonResponse(404, { title: "Not Found" });
+    });
+    vi.stubGlobal("fetch", logoutFetch);
+    const { authed } = await import("../lib/api");
+    const { toast } = await import("../lib/store");
+    authed.value = true;
+
+    render(<SecurityView />, host);
+    await act(async () => { await settle(); });
+    // Every localStorage write fails: the logout's mirror writes cannot
+    // publish, so only the durable erase keeps the promise (LUL-D01).
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("localStorage blocked");
+    });
+    await act(async () => {
+      const signOut = [...host.querySelectorAll("button")].find((b) => /sign out/i.test(b.textContent || ""))!;
+      signOut.click();
+      await settle(50);
+    });
+
+    expect(logoutFetch).toHaveBeenCalled();
+    // The server sign-out succeeded; the reported problem is the local
+    // erase, never "sign-out failed" (which would invite retrying a
+    // logout that already happened).
+    expect(toast.value?.tone).toBe("error");
+    expect(toast.value?.message).toContain("could not be erased");
+    expect(toast.value?.message).not.toContain("Sign-out failed");
+  });
+});
+
 describe("re-authentication prompt", () => {
   it("opens the password dialog on 428, confirms, and retries the parked action", async () => {
     resetSelection();

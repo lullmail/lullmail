@@ -1,6 +1,6 @@
 import { useState } from "preact/hooks";
 import { download } from "../lib/api";
-import { closeReader, openCompose, reader, showError } from "../lib/store";
+import { closeReader, openCompose, reader, readerRow, showError } from "../lib/store";
 import { BUCKET_LABEL, markDone, markRead, moveTo, openThread, pinThreads, snooze } from "../lib/actions";
 import type { Bucket, ListBucket, Message, Row } from "../lib/types";
 import { countOf, fmtFull, splitFrom } from "../lib/fmt";
@@ -9,24 +9,6 @@ import { Icon } from "../ui/Icon";
 import { SnoozeMenu } from "../ui/SnoozeMenu";
 import { MessageBody } from "./Body";
 import { Attachments } from "./Attachments";
-
-/** The verbs act on threads; the API acts on messages. The newest message
-    carries the thread's bucket, so it is the one to address. */
-function rowFor(messages: Message[], threadId: string, bucket: ListBucket | null): Row | null {
-  const last = messages[messages.length - 1];
-  if (!last) return null;
-  return {
-    account: last.account,
-    thread_id: threadId,
-    message_id: last.id,
-    subject: last.subject,
-    from: last.from,
-    received_at: last.received_at,
-    read: true,
-    preview: "",
-    bucket: (last.bucket as Bucket) || (bucket === "snoozed" ? "set_aside" : bucket) || undefined,
-  };
-}
 
 /** One message. A body that is missing or failed offers its own reload —
     a plain "sync in progress" label promised progress that was not
@@ -175,7 +157,7 @@ export function Thread({ backTo, variant = "page" }: { backTo: string; variant?:
 
   const messages = state.messages;
   const last = messages[messages.length - 1];
-  const row = rowFor(messages, state.threadId || "", state.bucket);
+  const row = readerRow(messages, state.threadId, state.bucket);
   const people = new Set(messages.map((m) => splitFrom(m.from).email));
   // Refetch the open thread (bypassing the in-memory cache) so a missing or
   // failed body gets another eager-fetch pass (audit 4 F19).

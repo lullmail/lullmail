@@ -450,28 +450,39 @@ export function readerOwnsPage(): boolean {
     (typeof window !== "undefined" && typeof window.matchMedia === "function" && !window.matchMedia("(min-width: 1080px)").matches));
 }
 
+/** The reader's row projection of a thread's newest message: the verbs,
+ *  the thread bar, and undo snapshots all address it. ONE shared
+ *  conversion (LUL-F04): separate constructors dropped snooze_until, so a
+ *  reader Undo of a dated snooze sent {action:"set_aside"} with no
+ *  deadline and the server answered with its three-day default. The
+ *  timestamp is carried verbatim — never parsed or re-rounded. */
+export function readerRow(messages: Message[], threadId: string | null, bucket: ListBucket | null): Row | null {
+  const last = messages[messages.length - 1];
+  if (!last) return null;
+  return {
+    account: last.account,
+    thread_id: threadId || "",
+    message_id: last.id,
+    subject: last.subject,
+    from: last.from,
+    received_at: last.received_at,
+    read: true,
+    preview: "",
+    bucket: (last.bucket as Bucket) || (bucket === "snoozed" ? "set_aside" : bucket) || undefined,
+    snooze_until: last.snooze_until,
+  };
+}
+
 /** Rows the verbs apply to: the explicit checkbox selection, else the cursor
     row. In document mode an open thread owns the page, so the verbs target
     it — otherwise j/k silently moved a cursor nobody can see, and the next
     e/s/i/p acted on a different thread than the one on screen. */
 export function targetRows(): Row[] {
-  const l = list.value;
   if (readerOwnsPage()) {
-    const messages = reader.value.messages;
-    const last = messages[messages.length - 1];
-    if (!last) return [];
-    return [{
-      account: last.account,
-      thread_id: reader.value.threadId!,
-      message_id: last.id,
-      subject: last.subject,
-      from: last.from,
-      received_at: last.received_at,
-      read: true,
-      preview: "",
-      bucket: last.bucket as Row["bucket"],
-    }];
+    const row = readerRow(reader.value.messages, reader.value.threadId, reader.value.bucket);
+    return row ? [row] : [];
   }
+  const l = list.value;
   if (l.kind !== "rows") return [];
   if (checked.value.size) return l.rows.filter((r) => checked.value.has(rowIdentity(r)));
   const at = l.rows[cursor.value];

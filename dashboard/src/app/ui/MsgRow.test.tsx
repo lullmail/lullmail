@@ -12,6 +12,10 @@ import { BulkBar } from "./BulkBar";
 vi.mock("../lib/actions", () => ({
   markDone: vi.fn(), markRead: vi.fn(), moveTo: vi.fn(), openThread: vi.fn(),
   pinThreads: vi.fn(), snooze: vi.fn(), decide: vi.fn(),
+  // The row-only reply path resolves the server's stored-envelope default
+  // (LUL-F02); this harness has no thread endpoint, so the mock controls
+  // it per test.
+  loadReplySeed: vi.fn(async () => { throw new Error("no thread read in this harness"); }),
 }));
 
 const rows: Row[] = Array.from({ length: 6 }, (_, n) => ({
@@ -396,24 +400,80 @@ describe("selection reconciliation", () => {
 });
 
 describe("reply follows the highlighted row", () => {
-  const open = (threadId: string) => {
-    reader.value = { ...reader.value, threadId, account: "account", messages: [
-      { id: "open-latest", account: "account", from: "Opened <opened@example.test>", subject: "Open subject", received_at: "2026-09-29T12:00:00Z" },
+  const open = (threadId: string, account = "account") => {
+    reader.value = { ...reader.value, threadId, account, messages: [
+      { id: "open-latest", account, from: "Opened <opened@example.test>", subject: "Open subject", received_at: "2026-09-29T12:00:00Z" },
     ] as never };
   };
   afterEach(() => { closeCompose(); });
 
-  it("replies to the cursor row once the cursor leaves the open thread (wide classic layout)", () => {
+  it("replies to the cursor row once the cursor leaves the open thread (wide classic layout)", async () => {
     layout.value = "classic";
     open("thread-0");
     key("j"); key("j");
     expect(cursor.value).toBe(1);
-    key("r");
+    await act(async () => { key("r"); });
     expect(compose.value?.replyToId).toBe("1");
-    expect(compose.value?.to).toBe("sender@example.test");
+    // The row-only path resolves the server's reply default; with no
+    // thread endpoint reachable the composer asks for a recipient instead
+    // of substituting From (LUL-F02).
+    expect(compose.value?.to).toBe("");
+    expect(compose.value?.accountId).toBe("account");
   });
 
   it("replies to the open thread's latest message while the cursor is on that thread", () => {
+    layout.value = "classic";
+    open("thread-0");
+    key("j"); key("k");
+    expect(cursor.value).toBe(0);
+    key("r");
+    expect(compose.value?.replyToId).toBe("open-latest");
+  });
+
+  it("uses the server-computed reply default for the loaded open message (Reply-To honored)", () => {
+    reader.value = { ...reader.value, threadId: "thread-0", account: "account", messages: [
+      { id: "open-latest", account: "account", from: "Sender <sender@example.test>", subject: "Subject", received_at: "2026-09-29T12:00:00Z", reply_to: "replies@example.test" },
+    ] as never };
+    key("r");
+    expect(compose.value?.to).toBe("replies@example.test");
+    expect(compose.value?.replyToId).toBe("open-latest");
+  });
+
+  it("resolves the row's reply seed through the thread endpoint, never From", async () => {
+    const { loadReplySeed } = await import("../lib/actions");
+    vi.mocked(loadReplySeed).mockImplementationOnce(async () => ({
+      to: "replies@example.test", subject: "Re: Subject 0", accountId: "account",
+      replyToId: "0", context: "Replying to Sender",
+    }));
+    key("j");
+    await act(async () => { key("r"); });
+    expect(loadReplySeed).toHaveBeenCalledWith("account", "thread-0", "0");
+    expect(compose.value?.to).toBe("replies@example.test");
+    expect(compose.value?.replyToId).toBe("0");
+  });
+
+  it("keyboard Reply targets the highlighted row's account when two accounts share a thread id (LUL-F03)", async () => {
+    // Wide classic layout: account A's thread is open in the reader while
+    // the highlighted row belongs to account B with the SAME provider-local
+    // thread id.
+    const sameThread = rows.map((row) => ({ ...row }));
+    sameThread[1] = { ...sameThread[1], account: "other", thread_id: "thread-0" };
+    publish(sameThread);
+    layout.value = "classic";
+    open("thread-0");
+    key("j"); key("j");
+    expect(cursor.value).toBe(1);
+    // The open message must NOT be used: its account differs from the
+    // highlighted row's.
+    await act(async () => { key("r"); });
+    expect(compose.value?.replyToId).not.toBe("open-latest");
+    expect(compose.value?.accountId).toBe("other");
+  });
+
+  it("still uses the open message when the highlighted row matches its account and thread", async () => {
+    const sameThread = rows.map((row) => ({ ...row }));
+    sameThread[0] = { ...sameThread[0], thread_id: "thread-0" };
+    publish(sameThread);
     layout.value = "classic";
     open("thread-0");
     key("j"); key("k");

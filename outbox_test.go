@@ -321,3 +321,65 @@ func TestOutboxSentFilingPreservesIntegratedAccountCancellation(t *testing.T) {
 		t.Fatalf("filing cancellation changed submission outcome or hid uncertainty: %+v", last)
 	}
 }
+
+// LUL-D10: the per-account admission gate primitive. It must be
+// context-aware (a caller whose request is gone does not queue forever),
+// mutually exclusive, and released exactly once — and the registry must
+// hand out one stable gate per account while anyone holds or waits on it.
+func TestAccountAdmissionGatePrimitive(t *testing.T) {
+	gate := newAccountAdmissionGate()
+	ctx, cancel := context.WithCancel(context.Background())
+	release, err := gate.Lock(ctx)
+	if err != nil {
+		t.Fatalf("uncontended lock: %v", err)
+	}
+
+	// A canceled waiter fails instead of queueing.
+	waitCtx, waitCancel := context.WithCancel(context.Background())
+	waitCancel()
+	if _, err := gate.Lock(waitCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled lock=%v", err)
+	}
+
+	// A blocked waiter proceeds once the holder releases.
+	acquired := make(chan struct{})
+	go func() {
+		rel, err := gate.Lock(context.Background())
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		close(acquired)
+		rel()
+	}()
+	select {
+	case <-acquired:
+		t.Fatal("gate was not mutually exclusive")
+	case <-time.After(20 * time.Millisecond):
+	}
+	release()
+	select {
+	case <-acquired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter never acquired after release")
+	}
+	cancel()
+
+	// The registry returns the same gate while it is held, so a waiter
+	// cannot end up queued on a replaced lock.
+	app := &App{}
+	first, err := app.outboxAdmissionGateOf("acct-a").Lock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.outboxAdmissionGateOf("acct-a") != app.outboxAdmissionGateOf("acct-a") {
+		t.Fatal("registry handed out different gates for one account")
+	}
+	if app.outboxAdmissionGateOf("acct-b") == app.outboxAdmissionGateOf("acct-a") {
+		t.Fatal("registry shared one gate across accounts")
+	}
+	first()
+	if _, err := app.outboxAdmissionGateOf("acct-a").Lock(context.Background()); err != nil {
+		t.Fatalf("gate not reusable after release: %v", err)
+	}
+}

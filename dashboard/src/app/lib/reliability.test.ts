@@ -206,13 +206,17 @@ describe("account snapshot removal", () => {
 });
 
 describe("live private-state teardown", () => {
-  it("tears down memory even when writing the localStorage generation throws", async () => {
+  it("erases durable stores and tears down memory even when writing the localStorage generation throws", async () => {
+    await saveDraftFields("d01", { to: input.to, body: input.text });
     openCompose({ to: input.to, body: input.text });
     vi.spyOn(Storage.prototype, "setItem").mockImplementationOnce(() => { throw new Error("localStorage blocked"); });
-    await expect(clearOfflineData()).rejects.toThrow("localStorage blocked");
+    // LUL-D01: the mirror failure is reported distinctly, but the
+    // authoritative IndexedDB erase still commits.
+    await expect(clearOfflineData()).rejects.toThrow(/mirror could not be updated/);
     expect(draftStack.value).toEqual([]);
     expect(composeOpen.value).toBe(false);
     expect(offlineStorageSuspended()).toBe(true);
+    expect(await loadDrafts()).toEqual([]);
   });
   it("clears live drafts synchronously and cancels autosave before logout's disk wipe", async () => {
     openCompose({ to: input.to, subject: input.subject, body: input.text });

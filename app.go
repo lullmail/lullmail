@@ -37,6 +37,10 @@ type App struct {
 	accountOwnerMu    sync.RWMutex
 	accountStatesMu   sync.Mutex
 	accountStates     map[mail.AccountID]*accountLifecycle
+	// outboxAdmissionMu guards outboxAdmission, the registry of per-account
+	// send-admission gates (see outboxAdmissionGateOf).
+	outboxAdmissionMu sync.Mutex
+	outboxAdmission   map[mail.AccountID]*accountAdmissionGate
 	tasksMu           sync.Mutex
 	tasks             *backgroundTasks
 	instIDMu          sync.Mutex
@@ -96,6 +100,52 @@ func (a *App) accountState(acct mail.AccountID) *accountLifecycle {
 		a.accountStates[acct] = state
 	}
 	return state
+}
+
+// accountAdmissionGate is a context-aware, per-account mutex serializing
+// outbox send acceptance against account deletion's initial-count/seal
+// pair. It is deliberately separate from the cancellable account-work
+// lease: deletion drains that lease while holding only this gate, so an
+// already-admitted send can finish its commit and neither side can wait
+// on the other (no lock-order cycle).
+type accountAdmissionGate struct {
+	// held has capacity one: sending locks, receiving unlocks. A channel
+	// makes the acquisition selectable against request cancellation.
+	held chan struct{}
+}
+
+func newAccountAdmissionGate() *accountAdmissionGate {
+	return &accountAdmissionGate{held: make(chan struct{}, 1)}
+}
+
+// Lock acquires the gate, or fails when the caller's context is done
+// first. The returned release must be called exactly once.
+func (g *accountAdmissionGate) Lock(ctx context.Context) (func(), error) {
+	select {
+	case g.held <- struct{}{}:
+		return func() { <-g.held }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// outboxAdmissionGateOf returns the account's stable admission gate. The
+// registry never deletes entries: replacing a lock while a waiter sits on
+// the old one would recreate the exact race the gate closes. It is bounded
+// by the accounts this process has served, like accountStates, and
+// deleting an account never un-deletes it, so a stale entry is inert.
+func (a *App) outboxAdmissionGateOf(acct mail.AccountID) *accountAdmissionGate {
+	a.outboxAdmissionMu.Lock()
+	defer a.outboxAdmissionMu.Unlock()
+	if a.outboxAdmission == nil {
+		a.outboxAdmission = make(map[mail.AccountID]*accountAdmissionGate)
+	}
+	gate := a.outboxAdmission[acct]
+	if gate == nil {
+		gate = newAccountAdmissionGate()
+		a.outboxAdmission[acct] = gate
+	}
+	return gate
 }
 
 // beginAccountUse admits one operation under the account's gate, failing
@@ -173,6 +223,9 @@ func (a *App) beginAccountDeletion(ctx context.Context, acct mail.AccountID) (fu
 	if !state.seal() {
 		return nil, false
 	}
+	// Observational boundary for the admission tests: the account is now
+	// sealed (its work cancelled) but nothing has drained yet.
+	_ = a.outboxPoint("delete:sealed")
 	waitCtx, cancelWait := context.WithTimeout(ctx, accountDeletionDrainTimeout)
 	defer cancelWait()
 	select {

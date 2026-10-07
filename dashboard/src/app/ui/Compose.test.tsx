@@ -258,7 +258,7 @@ const thread = {
 describe("Today inline reply retries", () => {
   it("coalesces same-tick activation, reuses the retry key, and changes it on edits", async () => {
     const onDone = vi.fn();
-    render(<InlineReply thread={thread} onDone={onDone} />, host);
+    render(<InlineReply thread={thread} to="person@example.test" onDone={onDone} />, host);
     await edit("textarea", "My reply");
     await act(async () => {
       button("Send").click();
@@ -280,7 +280,7 @@ describe("Today inline reply retries", () => {
 
   it("asks before an edited reply could send a second copy of an unconfirmed one", async () => {
     const onDone = vi.fn();
-    render(<InlineReply thread={thread} onDone={onDone} />, host);
+    render(<InlineReply thread={thread} to="person@example.test" onDone={onDone} />, host);
     await edit("textarea", "My reply");
     await clickSend();
     expect(fetcher).toHaveBeenCalledTimes(1);
@@ -294,7 +294,7 @@ describe("Today inline reply retries", () => {
   });
 
   it("a stale mounted inline reply cannot send into the new session", async () => {
-    render(<InlineReply thread={thread} onDone={() => {}} />, host);
+    render(<InlineReply thread={thread} to="person@example.test" onDone={() => {}} />, host);
     await edit("textarea", "Old private reply");
     await prepareOfflineOwner({ installation_id: "inst", user_id: "b", email: "b@example.test" });
     await clickSend();

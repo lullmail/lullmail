@@ -6,6 +6,7 @@
 // state it replaced and hands it to the toast.
 import { api, ApiError, clearMemoryCache, QueuedOffline, StaleOwnerError } from "./api";
 import { generationCurrent, offlineGeneration, offlineOwner, offlineStorageSuspended } from "./offline";
+import { splitFrom } from "./fmt";
 import type { BoardCard, Bucket, Counts, ListBucket, Message, Row, StickyNote } from "./types";
 import {
   accountCount, accountsFailed, accountFilter, accountQS, accounts, closeReader, counts, list, type Mailbox, mailboxes, openCompose, reader, rememberListScroll, resetSelection, screeningEnabled, setAccountFilter, showError, showToast, undoSeconds,
@@ -156,6 +157,42 @@ function describe(rows: Row[], verbPhrase: string): string {
 
 /* ---- verbs ---- */
 
+/** The composer seed for one reply: recipients from the SERVER's stored
+ *  envelope (audit 4 F06) — Reply-To honored, own sent mail followed up
+ *  to its recipients. Empty means "ask": the composer opens with a
+ *  blank To; From is never substituted (LUL-F02). */
+export interface ReplySeed {
+  to: string;
+  subject: string;
+  accountId: string;
+  replyToId: string;
+  context: string;
+}
+
+export function replySeedFor(message: Pick<Message, "id" | "account" | "subject" | "from" | "reply_to">): ReplySeed {
+  const who = splitFrom(message.from);
+  return {
+    to: message.reply_to || "",
+    subject: /^re:/i.test(message.subject) ? message.subject : "Re: " + (message.subject || ""),
+    accountId: message.account,
+    replyToId: message.id,
+    context: "Replying to " + (who.name || who.email),
+  };
+}
+
+/** Resolve the authoritative reply seed for a row (LUL-F02/F03): an
+ *  owner-fenced thread read finds the EXACT account/message parent —
+ *  provider-local thread ids are not globally unique — and asks the
+ *  stored envelope for the default recipients. Callers guard the late
+ *  completion against navigation and owner changes. */
+export async function loadReplySeed(account: string, threadId: string, messageId: string): Promise<ReplySeed> {
+  const messages = await api<Message[]>(`/threads/${encodeURIComponent(threadId)}?account=${encodeURIComponent(account)}`);
+  const exact = messages.find((m) => m.account === account && m.id === messageId)
+    ?? [...messages].reverse().find((m) => m.account === account);
+  if (!exact) throw new Error("The message being replied to is no longer available");
+  return replySeedFor(exact);
+}
+
 /** Done = read and out of the way. The inverse is exact, so the undo is honest. */
 export async function markDone(rows: Row[]) {
   if (!rows.length) return;
@@ -214,9 +251,7 @@ function snoozeUndoState(r: Row): { from: Bucket; until?: string } {
   const from = originOf(r);
   if (from === "set_aside" && r.snooze_until) return { from, until: r.snooze_until };
   return { from };
-}
-
-export async function moveTo(rows: Row[], to: Bucket) {
+}export async function moveTo(rows: Row[], to: Bucket) {
   if (!rows.length) return;
   const before = new Map(rows.map((r) => [r, snoozeUndoState(r)] as const));
   const { changed, failed, queued } = await actManySettled(rows, to);
@@ -246,12 +281,24 @@ export async function snooze(rows: Row[], days: number) {
 }
 
 async function restore(before: Before[]) {
+  // Mixed-version guard (LUL-F04): a dated snooze whose exact deadline the
+  // response did not carry (an older server's thread endpoint) cannot be
+  // restored exactly. Decline the undo for those rows rather than
+  // silently applying the server's three-day default.
+  const exact = before.filter((entry) => !(entry.from === "set_aside" && entry.until === undefined));
+  const declined = before.length - exact.length;
   try {
-    await Promise.all(before.map(({ row, from, until }) =>
+    await Promise.all(exact.map(({ row, from, until }) =>
       actOn(row.account, row.message_id, from, from === "set_aside" ? until : undefined)));
     afterMutation();
   } catch (e) {
     fail(e, "Could not undo");
+    return;
+  }
+  if (declined > 0) {
+    showError(declined === 1
+      ? "That snooze's exact return date isn't reported by this server version — the move was kept rather than resetting it to the default three days"
+      : `${declined} snoozed threads' exact return dates aren't reported by this server version — the move was kept rather than resetting them to the default three days`);
   }
 }
 
