@@ -9,6 +9,7 @@ export type ListBucket = Bucket | "snoozed";
 
 /** Shared row shape: /buckets/{b}, /search, /recent, /folder. */
 export interface Row {
+  undo_token?: string;
   account: string;
   thread_id: string;
   message_id: string;
@@ -17,6 +18,7 @@ export interface Row {
   received_at: string;
   read: boolean;
   has_attachment?: boolean;
+  attachment_presence?: "unknown" | "present" | "absent";
   preview: string;
   bucket?: string;
   thread_len?: number;
@@ -79,6 +81,7 @@ export interface Message {
   body: string;
   html?: string;
   attachments?: Attachment[];
+  inline_parts?: { part_id: string; content_id: string; type: string; size: number }[];
   /** "ready" | "missing" (not fetched yet) | "failed" (fetch errored).
       Empty content with status "ready" is a genuinely empty message. */
   body_status?: "ready" | "missing" | "failed";
@@ -150,3 +153,5 @@ export interface Mailbox {
 }
 
 export type Counts = Partial<Record<ListBucket, number>>;
+
+export interface ThreadPage { rows: Message[]; has_more: boolean; next_cursor?: string }

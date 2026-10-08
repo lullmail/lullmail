@@ -92,7 +92,7 @@ type ActionName = Bucket | "read" | "unread";
  *  applies the exact intended deadline whenever it runs, and undo sends
  *  the row's exact prior instant. */
 async function actOn(account: string, messageId: string, action: ActionName, until?: string) {
-  await api("/messages/" + encodeURIComponent(messageId) + "/action?account=" + encodeURIComponent(account), {
+  return await api<{undo?: unknown[]; undo_token?: string}>("/messages/" + encodeURIComponent(messageId) + "/action?account=" + encodeURIComponent(account), {
     body: until ? { action, until } : { action },
   });
 }
@@ -112,7 +112,7 @@ async function actManySettled(rows: Row[], action: ActionName, until?: string) {
   const failed: Row[] = [];
   const queued: Row[] = [];
   results.forEach((res, i) => {
-    if (res.status === "fulfilled") changed.push(rows[i]);
+    if (res.status === "fulfilled") changed.push(Object.assign({...rows[i]}, {undo_token: res.value?.undo_token}));
     else if (res.reason instanceof QueuedOffline) queued.push(rows[i]);
     else failed.push(rows[i]);
   });
@@ -186,7 +186,9 @@ export function replySeedFor(message: Pick<Message, "id" | "account" | "subject"
  *  stored envelope for the default recipients. Callers guard the late
  *  completion against navigation and owner changes. */
 export async function loadReplySeed(account: string, threadId: string, messageId: string): Promise<ReplySeed> {
-  const messages = await api<Message[]>(`/threads/${encodeURIComponent(threadId)}?account=${encodeURIComponent(account)}`);
+  const result = await api<Message | Message[]>(`/messages/${encodeURIComponent(messageId)}/body?account=${encodeURIComponent(account)}`);
+  const messages = Array.isArray(result) ? result : [result];
+  if (!messages[0]) throw new Error("The message being replied to is no longer available");
   const exact = messages.find((m) => m.account === account && m.id === messageId)
     ?? [...messages].reverse().find((m) => m.account === account);
   if (!exact) throw new Error("The message being replied to is no longer available");
@@ -203,14 +205,14 @@ export async function markDone(rows: Row[]) {
   // Only rows that were unread before the action flip back on undo; rows
   // already read must stay read, and rows whose request failed were never
   // marked and must not be touched at all.
-  const undoRows = done.filter((r) => !r.read);
-  showToast(describe(done, "Done"), () => undoRead(undoRows));
+  const undoRows = done.filter((r) => undoSnapshot(r));
+  showToast(describe(done, "Done"), undoRows.length ? () => undoRead(undoRows) : undefined);
 }
 
 async function undoRead(rows: Row[]) {
   if (!rows.length) return;
   try {
-    await actMany(rows, "unread");
+    await Promise.all(rows.map(r => restoreSnapshot(r)));
     afterMutation();
   } catch (e) {
     fail(e, "Could not undo");
@@ -227,15 +229,15 @@ export async function markRead(rows: Row[], read: boolean) {
   // already read before the action. Rows already in the target state, or
   // whose request failed, are not captured and stay untouched by undo.
   const before = done
-    .filter((row) => !!row.read !== read)
+    .filter((row) => undoSnapshot(row))
     .map((row) => ({ row, was: !!row.read }));
-  showToast(describe(done, read ? "Marked read" : "Marked unread"), () => undoMarkRead(before));
+  showToast(describe(done, read ? "Marked read" : "Marked unread"), before.length ? () => undoMarkRead(before) : undefined);
 }
 
 async function undoMarkRead(before: { row: Row; was: boolean }[]) {
   if (!before.length) return;
   try {
-    await Promise.all(before.map(({ row, was }) => actOn(row.account, row.message_id, was ? "read" : "unread")));
+    await Promise.all(before.map(({ row }) => restoreSnapshot(row)));
     afterMutation();
   } catch (e) {
     fail(e, "Could not undo");
@@ -251,15 +253,17 @@ function snoozeUndoState(r: Row): { from: Bucket; until?: string } {
   const from = originOf(r);
   if (from === "set_aside" && r.snooze_until) return { from, until: r.snooze_until };
   return { from };
-}export async function moveTo(rows: Row[], to: Bucket) {
+}
+
+export async function moveTo(rows: Row[], to: Bucket) {
   if (!rows.length) return;
-  const before = new Map(rows.map((r) => [r, snoozeUndoState(r)] as const));
+  const before = new Map(rows.map((r) => [r.account + "\0" + r.message_id, snoozeUndoState(r)] as const));
   const { changed, failed, queued } = await actManySettled(rows, to);
   const { done } = settleMutation(changed, failed, queued, "move");
   if (!done.length) return;
   if (rows.some((r) => r.thread_id === reader.value.threadId && r.account === reader.value.account)) closeReader();
   showToast(describe(done, "Moved to " + BUCKET_LABEL[to]), () =>
-    restore(done.map((row) => ({ row, ...before.get(row)! })))
+    restore(done.map((row) => ({ row, ...before.get(row.account + "\0" + row.message_id)! })))
   );
 }
 
@@ -269,36 +273,31 @@ function snoozeUndoState(r: Row): { from: Bucket; until?: string } {
 export async function snooze(rows: Row[], days: number) {
   if (!rows.length) return;
   const until = days > 0 ? new Date(Date.now() + days * 86400000).toISOString() : undefined;
-  const before = new Map(rows.map((r) => [r, snoozeUndoState(r)] as const));
+  const before = new Map(rows.map((r) => [r.account + "\0" + r.message_id, snoozeUndoState(r)] as const));
   const { changed, failed, queued } = await actManySettled(rows, days > 0 ? "set_aside" : "later", until);
   const { done } = settleMutation(changed, failed, queued, "snooze");
   if (!done.length) return;
   if (rows.some((r) => r.thread_id === reader.value.threadId && r.account === reader.value.account)) closeReader();
   const when = days === 0 ? "for someday" : days === 1 ? "until tomorrow" : "for " + days + " days";
   showToast(describe(done, "Snoozed " + when), () =>
-    restore(done.map((row) => ({ row, ...before.get(row)! })))
+    restore(done.map((row) => ({ row, ...before.get(row.account + "\0" + row.message_id)! })))
   );
 }
 
 async function restore(before: Before[]) {
-  // Mixed-version guard (LUL-F04): a dated snooze whose exact deadline the
-  // response did not carry (an older server's thread endpoint) cannot be
-  // restored exactly. Decline the undo for those rows rather than
-  // silently applying the server's three-day default.
-  const exact = before.filter((entry) => !(entry.from === "set_aside" && entry.until === undefined));
+  // Older servers without durable authority cannot offer an exact undo.
+  const exact = before.filter((entry) => !!undoSnapshot(entry.row));
   const declined = before.length - exact.length;
   try {
-    await Promise.all(exact.map(({ row, from, until }) =>
-      actOn(row.account, row.message_id, from, from === "set_aside" ? until : undefined)));
+    await Promise.all(exact.map(({ row }) =>
+      restoreSnapshot(row)));
     afterMutation();
   } catch (e) {
     fail(e, "Could not undo");
     return;
   }
   if (declined > 0) {
-    showError(declined === 1
-      ? "That snooze's exact return date isn't reported by this server version — the move was kept rather than resetting it to the default three days"
-      : `${declined} snoozed threads' exact return dates aren't reported by this server version — the move was kept rather than resetting them to the default three days`);
+    showError("This server did not provide undo authority for " + declined + " thread(s)");
   }
 }
 
@@ -445,17 +444,21 @@ export async function undecide(sender: string, quiet = false) {
 
 /* ---- reader ---- */
 
+let readerRequest = 0;
 export async function openThread(threadId: string, account: string, bucket: ListBucket | null) {
+  const request = ++readerRequest;
   rememberListScroll();
   window.scrollTo({ top: 0 });
   reader.value = {
     threadId, account, bucket, loading: true, error: null, messages: [], imagesOk: new Set(),
   };
   try {
-    const messages = await api<Message[]>("/threads/" + encodeURIComponent(threadId) + "?account=" + encodeURIComponent(account));
-    if (reader.value.threadId !== threadId || reader.value.account !== account) return;
-    reader.value = { ...reader.value, loading: false, messages };
+    const result = await api<import("./types").ThreadPage | Message[]>("/threads/" + encodeURIComponent(threadId) + "?account=" + encodeURIComponent(account) + "&page=1");
+    const messages = Array.isArray(result) ? result : result.rows;
+    if (request !== readerRequest || reader.value.threadId !== threadId || reader.value.account !== account) return;
+    reader.value = { ...reader.value, loading: false, messages, nextCursor: Array.isArray(result) ? undefined : result.next_cursor };
     const last = messages[messages.length - 1];
+    if (last?.body_status === "missing") void loadMessageBody(last).catch(() => {});
     if (last) {
       try {
         await actOn(last.account, last.id, "read");
@@ -468,7 +471,7 @@ export async function openThread(threadId: string, account: string, bucket: List
       markRowRead(threadId, account);
     }
   } catch (e) {
-    if (reader.value.threadId !== threadId || reader.value.account !== account) return;
+    if (request !== readerRequest || reader.value.threadId !== threadId || reader.value.account !== account) return;
     reader.value = {
       ...reader.value, loading: false,
       error: e instanceof Error ? e.message : "Could not open that thread",
@@ -704,4 +707,32 @@ function fail(e: unknown, fallback: string) {
     return;
   }
   showError(e instanceof Error && e.message ? fallback + ": " + e.message : fallback);
+}
+
+export async function loadOlderMessages() {
+ const request = readerRequest;
+ const state = reader.value;
+ if (!state.nextCursor || state.loadingOlder || !state.threadId || !state.account) return;
+ reader.value = { ...state, loadingOlder: true };
+ try {
+  const page = await api<import("./types").ThreadPage>("/threads/" + encodeURIComponent(state.threadId) + "?account=" + encodeURIComponent(state.account) + "&page=1&cursor=" + encodeURIComponent(state.nextCursor));
+  if (request !== readerRequest || reader.value.threadId !== state.threadId || reader.value.account !== state.account || reader.value.nextCursor !== state.nextCursor) return;
+  const ids = new Set(reader.value.messages.map(m => m.id));
+  reader.value = {...reader.value, loadingOlder: false, nextCursor: page.next_cursor, messages: [...page.rows.filter(m => !ids.has(m.id)), ...reader.value.messages]};
+ } catch (e) {
+  if (reader.value.threadId === state.threadId && reader.value.account === state.account) { reader.value = {...reader.value, loadingOlder: false}; showError(e instanceof Error ? e.message : "Could not load older messages"); }
+ }
+}
+export async function loadMessageBody(message: Message) {
+ const request = readerRequest;
+ const state = reader.value;
+ const body = await api<Message>("/messages/" + encodeURIComponent(message.id) + "/body?account=" + encodeURIComponent(message.account), {fresh: true});
+ if (request !== readerRequest || reader.value.threadId !== state.threadId || reader.value.account !== state.account) return;
+ reader.value = {...reader.value, messages: reader.value.messages.map(m => m.id === message.id && m.account === message.account ? body : m)};
+}
+
+function undoSnapshot(row: Row): string | undefined { return row.undo_token; }
+async function restoreSnapshot(row: Row) {
+ if (!row.undo_token) throw new Error("This action has no undo authority");
+ return api("/messages/" + encodeURIComponent(row.message_id) + "/action?account=" + encodeURIComponent(row.account), {body: {action: "restore", undo_token: undoSnapshot(row)}});
 }

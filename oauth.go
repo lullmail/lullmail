@@ -35,23 +35,23 @@ func (a *App) mountOAuthCallbacks(mux *http.ServeMux) {
 func (a *App) oauthConfig(provider string) (*oauth2.Config, error) {
 	switch provider {
 	case "gmail":
-		if a.cfg.GoogleClientID == "" || a.cfg.GoogleClientSecret == "" {
+		if a.config().GoogleClientID == "" || a.config().GoogleClientSecret == "" {
 			return nil, fmt.Errorf("Google OAuth is not configured")
 		}
-		return &oauth2.Config{ClientID: a.cfg.GoogleClientID, ClientSecret: a.cfg.GoogleClientSecret, RedirectURL: a.cfg.PublicURL + "/api/oauth/google/callback", Endpoint: google.Endpoint, Scopes: []string{"openid", "email", "https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/gmail.send"}}, nil
+		return &oauth2.Config{ClientID: a.config().GoogleClientID, ClientSecret: a.config().GoogleClientSecret, RedirectURL: a.config().PublicURL + "/api/oauth/google/callback", Endpoint: google.Endpoint, Scopes: []string{"openid", "email", "https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/gmail.send"}}, nil
 	case "graph":
-		if a.cfg.MicrosoftClientID == "" || a.cfg.MicrosoftClientSecret == "" {
+		if a.config().MicrosoftClientID == "" || a.config().MicrosoftClientSecret == "" {
 			return nil, fmt.Errorf("Microsoft OAuth is not configured")
 		}
-		tenant := url.PathEscape(a.cfg.MicrosoftTenant)
-		return &oauth2.Config{ClientID: a.cfg.MicrosoftClientID, ClientSecret: a.cfg.MicrosoftClientSecret, RedirectURL: a.cfg.PublicURL + "/api/oauth/microsoft/callback", Endpoint: oauth2.Endpoint{AuthURL: "https://login.microsoftonline.com/" + tenant + "/oauth2/v2.0/authorize", TokenURL: "https://login.microsoftonline.com/" + tenant + "/oauth2/v2.0/token"}, Scopes: []string{"openid", "email", "offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send"}}, nil
+		tenant := url.PathEscape(a.config().MicrosoftTenant)
+		return &oauth2.Config{ClientID: a.config().MicrosoftClientID, ClientSecret: a.config().MicrosoftClientSecret, RedirectURL: a.config().PublicURL + "/api/oauth/microsoft/callback", Endpoint: oauth2.Endpoint{AuthURL: "https://login.microsoftonline.com/" + tenant + "/oauth2/v2.0/authorize", TokenURL: "https://login.microsoftonline.com/" + tenant + "/oauth2/v2.0/token"}, Scopes: []string{"openid", "email", "offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send"}}, nil
 	default:
 		return nil, fmt.Errorf("unsupported OAuth provider")
 	}
 }
 
 func (a *App) handleOAuthStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]bool{"google": a.cfg.GoogleClientID != "" && a.cfg.GoogleClientSecret != "", "microsoft": a.cfg.MicrosoftClientID != "" && a.cfg.MicrosoftClientSecret != ""})
+	writeJSON(w, map[string]bool{"google": a.config().GoogleClientID != "" && a.config().GoogleClientSecret != "", "microsoft": a.config().MicrosoftClientID != "" && a.config().MicrosoftClientSecret != ""})
 }
 
 func (a *App) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
@@ -117,7 +117,7 @@ func (a *App) handleOAuthCallback(w http.ResponseWriter, r *http.Request, provid
 		writeProblem(w, http.StatusBadGateway, "OAuth Exchange Failed", "the provider rejected the sign-in; start the connection again")
 		return
 	}
-	email, label, err := oauthIdentity(r.Context(), provider, config.Client(r.Context(), token))
+	email, label, mailboxKey, err := oauthIdentityWithMailbox(r.Context(), provider, config.Client(r.Context(), token))
 	if err != nil {
 		a.log.Error("oauth identity failed", "provider", provider, "err", err)
 		writeProblem(w, http.StatusBadGateway, "Identity Failed", "the provider did not return a usable identity; start the connection again")
@@ -138,7 +138,7 @@ func (a *App) handleOAuthCallback(w http.ResponseWriter, r *http.Request, provid
 		return
 	}
 	raw, _ := json.Marshal(token)
-	sealed, err := sealSecret(a.cfg, string(raw))
+	sealed, err := sealSecret(a.config(), string(raw))
 	if err != nil {
 		writeProblem(w, 500, "Encrypt Failed", err.Error())
 		return
@@ -177,7 +177,7 @@ func (a *App) handleOAuthCallback(w http.ResponseWriter, r *http.Request, provid
 		writeProblem(w, 500, "Mirror Failed", err.Error())
 		return
 	}
-	if _, err := tx.ExecContext(r.Context(), `INSERT INTO email_accounts(user_id,mirror_account_id,provider,address,label,username,host,port,smtp_host,smtp_port,cred_ciphertext,backfill_days) VALUES($1,$2,$3,$4,$5,$4,'',0,'',0,$6,90)`, uid, mirror, provider, email, label, sealed); err != nil {
+	if _, err := tx.ExecContext(r.Context(), `INSERT INTO email_accounts(user_id,mirror_account_id,provider,address,label,username,host,port,smtp_host,smtp_port,cred_ciphertext,backfill_days,graph_mailbox_key) VALUES($1,$2,$3,$4,$5,$4,'',0,'',0,$6,90,$7)`, uid, mirror, provider, email, label, sealed, mailboxKey); err != nil {
 		if isUniqueViolation(err) {
 			writeProblem(w, http.StatusConflict, "Already Connected", "that address is already connected")
 			return
@@ -200,21 +200,30 @@ func (a *App) handleOAuthCallback(w http.ResponseWriter, r *http.Request, provid
 const providerJSONLimit = 4 << 20
 
 func oauthIdentity(ctx context.Context, provider string, client *http.Client) (string, string, error) {
+	email, name, _, err := oauthIdentityWithMailbox(ctx, provider, client)
+	return email, name, err
+}
+
+func oauthIdentityWithMailbox(ctx context.Context, provider string, client *http.Client) (string, string, string, error) {
 	endpoint := "https://openidconnect.googleapis.com/v1/userinfo"
 	if provider == "graph" {
-		endpoint = "https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName,displayName"
+		endpoint = "https://graph.microsoft.com/v1.0/me?$select=id,mail,userPrincipalName,displayName"
 	}
+	boundedClient := *client
+	boundedClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client = &boundedClient
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	res, err := client.Do(req)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
-		return "", "", fmt.Errorf("identity status %d: %s", res.StatusCode, strings.TrimSpace(string(body)))
+		return "", "", "", fmt.Errorf("identity status %d: %s", res.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var data struct {
+		ID                string `json:"id"`
 		Email             string `json:"email"`
 		Mail              string `json:"mail"`
 		UserPrincipalName string `json:"userPrincipalName"`
@@ -222,7 +231,7 @@ func oauthIdentity(ctx context.Context, provider string, client *http.Client) (s
 		DisplayName       string `json:"displayName"`
 	}
 	if err := json.NewDecoder(io.LimitReader(res.Body, providerJSONLimit)).Decode(&data); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	email := data.Email
 	if email == "" {
@@ -236,9 +245,12 @@ func oauthIdentity(ctx context.Context, provider string, client *http.Client) (s
 		name = data.DisplayName
 	}
 	if email == "" {
-		return "", "", fmt.Errorf("provider returned no email address")
+		return "", "", "", fmt.Errorf("provider returned no email address")
 	}
-	return email, name, nil
+	if provider == "graph" && data.ID == "" {
+		return "", "", "", fmt.Errorf("Graph returned no verified mailbox key")
+	}
+	return email, name, data.ID, nil
 }
 
 func (a *App) oauthToken(ctx context.Context, provider, account, address, sealed string) (mail.Credential, error) {
@@ -272,7 +284,7 @@ func (a *App) oauthTokenAfterRejection(ctx context.Context, provider, account, a
 	if err := a.db.QueryRowContext(ctx, `SELECT cred_ciphertext FROM email_accounts WHERE mirror_account_id=$1`, account).Scan(&sealed); err != nil {
 		return mail.Credential{}, err
 	}
-	plain, err := openSecret(a.cfg, sealed)
+	plain, err := openSecret(a.config(), sealed)
 	if err != nil {
 		return mail.Credential{}, err
 	}
@@ -305,7 +317,7 @@ func (a *App) oauthTokenAfterRejection(ctx context.Context, provider, account, a
 	}
 	if fresh.AccessToken != token.AccessToken || fresh.RefreshToken != token.RefreshToken || !fresh.Expiry.Equal(token.Expiry) {
 		raw, _ := json.Marshal(fresh)
-		next, err := sealSecret(a.cfg, string(raw))
+		next, err := sealSecret(a.config(), string(raw))
 		if err != nil {
 			return mail.Credential{}, err
 		}
@@ -409,10 +421,10 @@ func graphDraftPatch(out *mail.Outgoing) map[string]any {
 		contentType, content = "HTML", out.HTML
 	}
 	return map[string]any{
-		"subject":      out.Subject,
-		"body":         map[string]string{"contentType": contentType, "content": content},
-		"toRecipients": graphRecipients(out.To),
-		"ccRecipients": graphRecipients(out.Cc),
+		"subject":       out.Subject,
+		"body":          map[string]string{"contentType": contentType, "content": content},
+		"toRecipients":  graphRecipients(out.To),
+		"ccRecipients":  graphRecipients(out.Cc),
 		"bccRecipients": graphRecipients(out.Bcc),
 	}
 }

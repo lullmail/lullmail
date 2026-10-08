@@ -4,7 +4,27 @@
 // opened the mail.
 import { useEffect, useRef, useState } from "preact/hooks";
 import { allowImages, allowSenderImages, imageSenders, reader, theme } from "../lib/store";
+import { offlineGeneration, generationCurrent } from "../lib/offline";
 import { Icon } from "../ui/Icon";
+
+import { parse, serializeOuter, type DefaultTreeAdapterMap } from "parse5";
+
+function parseMailDocument(html: string) {
+  const parsed = parse(html);
+  const root = parsed.childNodes.find((node) => "tagName" in node && node.tagName === "html") as DefaultTreeAdapterMap["element"];
+  const head = root.childNodes.find((node) => "tagName" in node && node.tagName === "head")!;
+  const body = root.childNodes.find((node) => "tagName" in node && node.tagName === "body")!;
+  const template = document.createElement("template");
+  template.innerHTML = serializeOuter(head).replace(/^<head/, '<div data-mail-head=""').replace(/<\/head>$/, "</div>") +
+    serializeOuter(body).replace(/^<body/, '<div data-mail-body=""').replace(/<\/body>$/, "</div>");
+  const fragment = template.content;
+  return {
+    head: fragment.querySelector<HTMLElement>("[data-mail-head]")!,
+    body: fragment.querySelector<HTMLElement>("[data-mail-body]")!,
+    querySelectorAll: <T extends Element = Element>(selector: string) => fragment.querySelectorAll<T>(selector),
+    createElement: (tag: string) => template.content.ownerDocument.createElement(tag),
+  };
+}
 
 const PLACEHOLDER =
   "<span style=\"display:inline-flex;align-items:center;justify-content:center;" +
@@ -14,7 +34,7 @@ const PLACEHOLDER =
 function imageUrlAllowed(value: string, allowRemote: boolean): boolean {
 	const url = value.trim().replace(/^(?:"([\s\S]*)"|'([\s\S]*)')$/, "$1$2");
 	if (!url) return true;
-	if (/^(?:data:|cid:|#)/i.test(url)) return true;
+	if (/^(?:data:|cid:|blob:|#)/i.test(url)) return true;
 	if (!allowRemote) return false;
 	try {
 		const parsed = new URL(url, "https://mail.invalid/");
@@ -54,7 +74,7 @@ function cssHasBlockedResource(css: string, allowRemote: boolean): boolean {
 	return false;
 }
 
-function sanitizeImageResources(doc: Document, allowRemote: boolean): number {
+function sanitizeImageResources(doc: ReturnType<typeof parseMailDocument>, allowRemote: boolean): number {
 	let blocked = 0;
 	doc.querySelectorAll<HTMLImageElement>("img").forEach((image) => {
 		const src = image.getAttribute("src");
@@ -105,8 +125,8 @@ function sanitizeImageResources(doc: Document, allowRemote: boolean): number {
 
 /** Strips every network-backed image source; `data:` and `cid:` stay local. */
 export function stripRemoteImages(html: string): { html: string; blocked: number } {
-	if (typeof DOMParser !== "undefined") {
-		const doc = new DOMParser().parseFromString(html, "text/html");
+	if (typeof document !== "undefined") {
+		const doc = parseMailDocument(html);
 		const blocked = sanitizeImageResources(doc, false);
 		return { html: doc.body.innerHTML, blocked };
 	}
@@ -135,8 +155,8 @@ const TRACKING_PARAMS = /^(utm_.+|mc_cid|mc_eid|mkt_tok|vero_id|oly_anon_id|oly_
     parameter name is not evidence of redirect semantics; a specific
     tracker unwrapper would need per-hostname tests. */
 export function cleanLinks(html: string): string {
-  if (typeof DOMParser === "undefined") return html;
-  const doc = new DOMParser().parseFromString(html, "text/html");
+  if (typeof document === "undefined") return html;
+  const doc = parseMailDocument(html);
   doc.querySelectorAll("script,object,embed,form,meta[http-equiv],base,iframe,frame,link,video,audio,source,track,input,button,textarea,select").forEach((node) => node.remove());
   doc.querySelectorAll<HTMLElement>("*").forEach((node) => {
     for (const attr of [...node.attributes]) if (/^on/i.test(attr.name)) node.removeAttribute(attr.name);
@@ -200,8 +220,8 @@ function cssVar(name: string): string {
     never force dark-theme ink onto a white-shipping email. Everything else
     is themed by us, ink and canvas both, so contrast is guaranteed. */
 export function emailHasOwnColors(html: string): boolean {
-  if (typeof DOMParser === "undefined") return false;
-  const doc = new DOMParser().parseFromString(html, "text/html");
+  if (typeof document === "undefined") return false;
+  const doc = parseMailDocument(html);
   // The body element itself is the classic canvas: <body bgcolor> merges its
   // attributes onto the frame body at srcdoc parse time, so it paints too.
   const paint = "[bgcolor], [background], [style*='background']";
@@ -216,7 +236,7 @@ export function frameDoc(html: string, themed: boolean, allowRemoteImages = fals
   const bg = themed ? (cssVar("--bg") || "transparent") : "#ffffff";
   const ink = themed ? cssVar("--ink") : "";
   const quoteInk = themed ? cssVar("--ink-2") : "";
-	const policy = "default-src 'none'; img-src data: cid:" + (allowRemoteImages ? " http: https:" : "") +
+	const policy = "default-src 'none'; img-src data: blob:" + (allowRemoteImages ? " http: https:" : "") +
 		"; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none'; font-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
   return (
     "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='Content-Security-Policy' content=\"" + policy + "\">" +
@@ -234,11 +254,117 @@ export function frameDoc(html: string, themed: boolean, allowRemoteImages = fals
   );
 }
 
-function HtmlBody({ html, messageId, sender }: { html: string; messageId: string; sender: string }) {
+export type InlinePart = { part_id: string; content_id: string; type: string; size: number };
+export const inlineImageCap = 10 * 1024 * 1024;
+export const inlineAggregateCap = 20 * 1024 * 1024;
+// MIME IDs remain case sensitive. Both metadata and references use this exact
+// normalization; malformed percent escapes and unmatched brackets are refused.
+export function normalizeCID(value: string): string | undefined {
+  let cid = value.trim();
+  try { cid = decodeURIComponent(cid); } catch { return undefined; }
+  if (cid.startsWith("<") && cid.endsWith(">")) cid = cid.slice(1, -1);
+  if (!cid || /[\s<>\u0000-\u001f\u007f]/.test(cid)) return undefined;
+  return cid;
+}
+export function referencedInlineParts(html: string, parts: InlinePart[]): InlinePart[] {
+  const references = new Set<string>();
+  parseMailDocument(cleanLinks(html)).querySelectorAll<HTMLImageElement>("img[src]").forEach(image => {
+    const src = image.getAttribute("src") || "";
+    if (/^cid:/i.test(src)) { const cid = normalizeCID(src.slice(4)); if (cid) references.add(cid); }
+  });
+  const selected = new Map<string, InlinePart>();
+  for (const part of parts) {
+    const cid = normalizeCID(part.content_id);
+    if (!cid || !references.has(cid) || selected.has(cid) || !part.part_id ||
+        !/^image\/(png|jpeg|gif|webp|avif)$/i.test(part.type) ||
+        !Number.isFinite(part.size) || part.size < 0 || part.size > inlineImageCap) continue;
+    // First eligible MIME part wins; later duplicate IDs are never fetched.
+    selected.set(cid, {...part, content_id: cid});
+    if (selected.size === 16) break;
+  }
+  return [...selected.values()];
+}
+export function replaceInlineImages(html: string, urls: Map<string, string>): string {
+  const doc = parseMailDocument(html);
+  doc.querySelectorAll<HTMLImageElement>("img[src]").forEach(image => {
+    const src = image.getAttribute("src") || "";
+    if (!/^cid:/i.test(src)) return;
+    const cid = normalizeCID(src.slice(4));
+    const url = cid ? urls.get(cid) : undefined;
+    if (url) image.setAttribute("src", url);
+    else { const holder = doc.createElement("span"); holder.textContent = "Inline image unavailable"; image.replaceWith(holder); }
+  });
+  return doc.body.innerHTML;
+}
+
+// Count actual delivered chunks, even rejected ones. A stream may overshoot by
+// one delivered chunk; no further read or request starts after aggregate exhaustion.
+export async function fetchInlineImages(parts: InlinePart[], messageId: string, account: string,
+  signal: AbortSignal, current: () => boolean, publish: (cid: string, blob: Blob) => void): Promise<void> {
+  let total = 0;
+  for (const part of parts) {
+    if (signal.aborted || !current() || total >= inlineAggregateCap) return;
+    try {
+      const response = await fetch("/api/messages/" + encodeURIComponent(messageId) + "/attachment/" + encodeURIComponent(part.part_id) + "?account=" + encodeURIComponent(account), {credentials: "same-origin", signal});
+      if (signal.aborted || !current()) { await response.body?.cancel(); return; }
+      if (!response.ok || !response.body) { await response.body?.cancel(); continue; }
+      const stream = response.body.getReader();
+      const chunks: Uint8Array<ArrayBuffer>[] = [];
+      let size = 0;
+      try {
+        while (true) {
+          if (signal.aborted || !current()) { await stream.cancel(); return; }
+          const result = await stream.read();
+          if (signal.aborted || !current()) { await stream.cancel(); return; }
+          if (result.done) break;
+          size += result.value.length;
+          total += result.value.length;
+          if (size > inlineImageCap || total > inlineAggregateCap) { await stream.cancel(); break; }
+          chunks.push(result.value);
+        }
+        if (size <= inlineImageCap && total <= inlineAggregateCap && !signal.aborted && current()) {
+          publish(part.content_id, new Blob(chunks, {type: part.type}));
+        }
+      } finally { stream.releaseLock(); }
+    } catch { if (signal.aborted || !current()) return; }
+  }
+}
+const noInlineParts: InlinePart[] = [];
+function HtmlBody({ html, messageId, sender, account, inlineParts = noInlineParts }: { html: string; messageId: string; sender: string; account?: string; inlineParts?: InlinePart[] }) {
   const ref = useRef<HTMLIFrameElement>(null);
   const senderKey = sender.trim().toLowerCase();
   const ok = reader.value.imagesOk.has(messageId) || imageSenders.value.has(senderKey);
-  const cleaned = cleanLinks(html);
+  const [inlineUrls, setInlineUrls] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    const context = offlineGeneration();
+    const abort = new AbortController();
+    const urls = new Map<string, string>();
+    let disposed = false;
+    setInlineUrls(new Map());
+    const allocated = new Set<string>();
+    const revokeAllocated = () => { for (const url of allocated) URL.revokeObjectURL(url); allocated.clear(); };
+    const current = () => {
+      if (disposed) return false;
+      if (!generationCurrent(context)) { abort.abort(); revokeAllocated(); return false; }
+      return true;
+    };
+    if (account) void fetchInlineImages(referencedInlineParts(html, inlineParts), messageId, account, abort.signal, current, (cid, blob) => {
+      if (!current()) return;
+      const url = URL.createObjectURL(blob);
+      allocated.add(url);
+      if (!current()) { URL.revokeObjectURL(url); allocated.delete(url); return; }
+      const previous = urls.get(cid);
+      if (previous) { URL.revokeObjectURL(previous); allocated.delete(previous); }
+      urls.set(cid, url);
+      setInlineUrls(new Map(urls));
+    });
+    return () => {
+      disposed = true;
+      abort.abort();
+      revokeAllocated();
+    };
+  }, [account, messageId, html, inlineParts, offlineGeneration()]);
+  const cleaned = replaceInlineImages(cleanLinks(html), inlineUrls);
   const { html: safe, blocked } = ok ? { html: cleaned, blocked: 0 } : stripRemoteImages(cleaned);
   const themed = !emailHasOwnColors(safe);
   // Read as a signal, not off the DOM: the injected colours are literals baked
@@ -355,8 +481,8 @@ function TextBody({ text }: { text: string }) {
   );
 }
 
-export function MessageBody({ html, text, messageId, sender, bodyStatus = "ready", onRetry }: {
-  html?: string; text: string; messageId: string; sender: string;
+export function MessageBody({ html, text, messageId, sender, account, inlineParts, bodyStatus = "ready", onRetry }: {
+  html?: string; text: string; messageId: string; sender: string; account?: string; inlineParts?: InlinePart[];
   bodyStatus?: "ready" | "missing" | "failed"; onRetry?: () => void;
 }) {
   // body_status decides before the content does: a failed fetch offers a
@@ -383,7 +509,7 @@ export function MessageBody({ html, text, messageId, sender, bodyStatus = "ready
       </div>
     );
   }
-  if (html) return <HtmlBody html={html} messageId={messageId} sender={sender} />;
+  if (html) return <HtmlBody html={html} messageId={messageId} sender={sender} account={account} inlineParts={inlineParts} />;
   if (!text) return <div class="msg-empty"><div class="empty-big">This message has an empty body.</div></div>;
   return <TextBody text={text} />;
 }

@@ -37,7 +37,7 @@ async function undo() {
   await act(async () => { toast.value?.undo?.(); });
 }
 beforeEach(() => {
-  state.api.mockReset().mockResolvedValue({});
+  state.api.mockReset().mockResolvedValue({ undo_token: "board-receipt" });
   dismissReader(); dismissToast(); resetSelection(); snoozePickerRows.value = [];
   HTMLElement.prototype.scrollIntoView = vi.fn();
   window.scrollTo = vi.fn();
@@ -50,24 +50,27 @@ afterEach(() => {
 });
 
 describe("Board keyboard undo state", () => {
-  it("does not unread an already-read pin when Done is undone", async () => {
+  it("undoes Done through its one-use receipt, never a blanket unread", async () => {
     await mount([pin]); await key("j"); await key("e"); await undo();
-    expect(mutations().map(([, options]) => options.body)).toEqual([{ action: "read" }]);
+    // The exact preimage (an already-read row stays read) lives in the
+    // server's durable snapshot; the client only presents the receipt.
+    expect(mutations().map(([, options]) => options.body)).toEqual([{ action: "read" }, { action: "restore", undo_token: "board-receipt" }]);
   });
 
   it("restores a pin's real non-Inbox bucket on move undo", async () => {
     await mount([pin]); await key("j"); await key("i"); await undo();
-    expect(mutations().map(([, options]) => options.body)).toEqual([{ action: "imbox" }, { action: "feed" }]);
+    expect(mutations().map(([, options]) => options.body)).toEqual([{ action: "imbox" }, { action: "restore", undo_token: "board-receipt" }]);
   });
 
-  it("restores the exact date and bucket of an already-snoozed pin", async () => {
+  it("undoes an already-snoozed pin through its one-use receipt", async () => {
     const until = "2027-01-15T09:45:00.123456Z";
     await mount([{ ...pin, bucket: "set_aside", snooze_until: until }]);
     await key("j"); await key("s");
     const tomorrow = [...host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((button) => button.textContent?.startsWith("Tomorrow"))!;
     await act(async () => { tomorrow.click(); });
     await undo();
-    expect(mutations().at(-1)?.[1].body).toEqual({ action: "set_aside", until });
+    // The server's snapshot restores the exact prior instant and bucket.
+    expect(mutations().at(-1)?.[1].body).toEqual({ action: "restore", undo_token: "board-receipt" });
   });
 
   it("never publishes unknown-state or disconnected pins as keyboard mutation targets", async () => {
@@ -131,7 +134,7 @@ describe("Board keyboard undo state", () => {
   it("retains the known unread Inbox contract of old derived cards", async () => {
     const { card_id, read, bucket, ...derived } = pin;
     await mount([derived]); await key("j"); await key("e"); await undo();
-    expect(mutations().map(([, options]) => options.body)).toEqual([{ action: "read" }, { action: "unread" }]);
+    expect(mutations().map(([, options]) => options.body)).toEqual([{ action: "read" }, { action: "restore", undo_token: "board-receipt" }]);
   });
 
   it("opens once on a focused card Enter and ignores repetition, composition and handled events", async () => {

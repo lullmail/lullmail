@@ -81,7 +81,7 @@ describe("logout and account deletion erase reporting", () => {
     authed.value = true;
 
     render(<SecurityView />, host);
-    await act(async () => { await settle(); });
+    await vi.waitFor(() => expect(host.textContent).toContain("Authenticator app"));
     // Every localStorage write fails: the logout's mirror writes cannot
     // publish, so only the durable erase keeps the promise (LUL-D01).
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
@@ -108,7 +108,7 @@ describe("re-authentication prompt", () => {
     resetSelection();
     setList({ kind: "none", key: "security", loading: false, error: null, rows: [], senders: [], origin: null });
     render(<SecurityView />, host);
-    await act(async () => { await settle(); });
+    await vi.waitFor(() => expect(host.textContent).toContain("Authenticator app"));
     if (!host.textContent!.includes("Authenticator app")) throw new Error("view did not load: " + host.textContent!.slice(0, 120));
 
     // The gated enrollment is refused with 428 and becomes a dialog, not
@@ -170,7 +170,7 @@ describe("re-authentication prompt", () => {
     vi.stubGlobal("fetch", wrongFetch);
 
     render(<SecurityView />, host);
-    await act(async () => { await settle(); });
+    await vi.waitFor(() => expect(host.textContent).toContain("Authenticator app"));
     if (!host.textContent!.includes("Authenticator app")) throw new Error("view did not load: " + host.textContent!.slice(0, 120));
     await act(async () => {
       const setUp = [...host.querySelectorAll("button")].find((b) => b.textContent === "Set up")!;

@@ -129,6 +129,8 @@ var productMigrations = []productMigration{
 		`ALTER TABLE api_mutations ADD COLUMN IF NOT EXISTS response_headers text NOT NULL DEFAULT '{}'`,
 	}},
 	{Version: 8, Name: "durable outbound submissions", Statements: outboxStatements},
+	{Version: 9, Name: "versioned one-use message undo", Statements: messageUndoStatements},
+	{Version: 10, Name: "verified Graph mailbox binding", Statements: []string{`ALTER TABLE email_accounts ADD COLUMN graph_mailbox_key text NOT NULL DEFAULT ''`}},
 }
 
 // reconcileClaimStatements stamps account_reconcile_jobs with the claim

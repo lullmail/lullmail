@@ -492,6 +492,8 @@ export function targetRows(): Row[] {
 /* ---- reader ---- */
 
 export interface ReaderState {
+  nextCursor?: string;
+  loadingOlder?: boolean;
   threadId: string | null;
   account: string | null;
   bucket: ListBucket | null;

@@ -86,7 +86,8 @@ export function MsgRow({ row, index, q }: { row: Row; index: number; q?: string 
       <div class="row-top">
         <span class="row-sender">{who.name || who.email}</span>
         <span class="row-meta">
-          {row.has_attachment && <span class="chip"><Icon name="clip" size={11} /></span>}
+          {(row.attachment_presence === "present" || (!row.attachment_presence && row.has_attachment)) && <span class="chip" title="Has attachments"><Icon name="clip" size={11} /></span>}
+          {row.attachment_presence === "unknown" && <span class="chip" title="Attachments have not been checked" aria-label="Attachments not yet checked">?</span>}
           {(row.thread_len || 0) > 1 && <span class="chip">{row.thread_len}</span>}
           <span class="row-date">{fmtDate(row.received_at)}</span>
         </span>

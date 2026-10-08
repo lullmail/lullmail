@@ -238,7 +238,7 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusConflict, "Already Connected", "that address is already connected")
 		return
 	}
-	ciphertext, err := sealSecret(a.cfg, req.Password)
+	ciphertext, err := sealSecret(a.config(), req.Password)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Encrypt Failed", err.Error())
 		return

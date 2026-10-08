@@ -48,7 +48,7 @@ beforeEach(async () => {
     const url = String(input);
     if (url.includes("/api/briefing")) return jsonResponse(brief);
     if (url.includes("/api/screener")) return jsonResponse([]);
-    if (url.includes("/api/threads/")) return threadResponse();
+    if (url.includes("/body?account=")) return threadResponse();
     return jsonResponse([]);
   }));
 });

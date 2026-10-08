@@ -147,6 +147,12 @@ func (a *App) acceptOutbox(w http.ResponseWriter, r *http.Request, uid, account,
 		writeProblem(w, 503, "Shutting Down", "the message was not queued; retry with the same submission key")
 		return
 	}
+	// Use the production renderer before durable acceptance so unsplittable
+	// RFC headers are refused without an outbox row or a provider request.
+	if _, err := outgoing.Render(); err != nil {
+		writeProblem(w, 422, "Message Rejected", err.Error())
+		return
+	}
 	key := r.Header.Get("Idempotency-Key")
 	if key == "" {
 		key = newID()
@@ -160,7 +166,7 @@ func (a *App) acceptOutbox(w http.ResponseWriter, r *http.Request, uid, account,
 	// The row id is chosen first because it is part of what the ciphertext is
 	// bound to. A replay discards this blob and answers with the original row.
 	id := uuid.NewString()
-	encrypted, err := sealBound(a.cfg, "payload", uid, id, string(payload))
+	encrypted, err := sealBound(a.config(), "payload", uid, id, string(payload))
 	if err != nil {
 		writeProblem(w, 503, "Queue Unavailable", "composition could not be encrypted; the draft was not queued")
 		return
@@ -606,7 +612,7 @@ func (a *App) deliverOutbox(ctx context.Context, job outboxAttempt, account, cip
 	// Nothing has reached a provider yet, so a composition that cannot be
 	// opened ends as a visible failure that keeps its ciphertext: restoring
 	// the key makes it recoverable. It is never sent, and never retried.
-	plaintext, err := openBound(a.cfg, "payload", job.UserID, job.ID, ciphertext)
+	plaintext, err := openBound(a.config(), "payload", job.UserID, job.ID, ciphertext)
 	if err != nil {
 		state, code = "failed", outboxSealCode(err)
 		a.log.Error("outbox composition cannot be opened; not sent", "id", job.ID, "code", code)
@@ -648,7 +654,7 @@ func (a *App) deliverOutbox(ctx context.Context, job outboxAttempt, account, cip
 // SMTP transport acceptance and the exact Sent-copy bytes commit together.
 // A failed commit stays ambiguous, with the original recoverable composition.
 func (a *App) recordOutboxAccepted(job outboxAttempt, raw []byte) error {
-	cipher, err := sealBound(a.cfg, "sent", job.UserID, job.ID, string(raw))
+	cipher, err := sealBound(a.config(), "sent", job.UserID, job.ID, string(raw))
 	if err != nil {
 		return err
 	}
@@ -714,7 +720,7 @@ func (a *App) fileSentCopy(ctx context.Context, c sentCopyClaim) error {
 			a.log.Error("Sent-copy outcome save failed", "id", id, "err", e)
 		}
 	}()
-	raw, err := openBound(a.cfg, "sent", owner, id, ciphertext)
+	raw, err := openBound(a.config(), "sent", owner, id, ciphertext)
 	if err != nil {
 		// No append was attempted. The filing stays unconfirmed, and the saved
 		// copy remains downloadable once the key is restored.
@@ -877,7 +883,7 @@ func (a *App) handleOutboxDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	if r.URL.Query().Get("format") == "eml" && sent != "" {
-		raw, e := openBound(a.cfg, "sent", uid, row, sent)
+		raw, e := openBound(a.config(), "sent", uid, row, sent)
 		if e != nil {
 			writeSealProblem(w, e, "saved Sent copy")
 			return
@@ -891,7 +897,7 @@ func (a *App) handleOutboxDetail(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, 410, "Composition Retired", "no recoverable composition remains for this entry; its recorded status is "+state)
 		return
 	}
-	raw, err := openBound(a.cfg, "payload", uid, row, cipher)
+	raw, err := openBound(a.config(), "payload", uid, row, cipher)
 	if err != nil {
 		writeSealProblem(w, err, "saved composition")
 		return

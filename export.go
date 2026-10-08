@@ -133,7 +133,7 @@ func (a *App) handleAccountExport(w http.ResponseWriter, r *http.Request) {
 	var resolveErr error
 	if cred, credErr := a.Token(r.Context(), nmail.AccountID(mirrorID)); credErr != nil {
 		resolveErr = credErr
-	} else if adapter, release, resolveErr = newResolver()(r.Context(), nmail.AccountID(mirrorID), cred); resolveErr == nil {
+	} else if adapter, release, resolveErr = a.accountResolver()(r.Context(), nmail.AccountID(mirrorID), cred); resolveErr == nil {
 		defer release()
 	}
 	if resolveErr != nil {
@@ -355,7 +355,7 @@ func (a *App) handleMessageEML(w http.ResponseWriter, r *http.Request) {
 	var fallback bool
 	cred, credErr := a.Token(r.Context(), nmail.AccountID(mirrorID))
 	if credErr == nil {
-		adapter, release, resolveErr := newResolver()(r.Context(), nmail.AccountID(mirrorID), cred)
+		adapter, release, resolveErr := a.accountResolver()(r.Context(), nmail.AccountID(mirrorID), cred)
 		if resolveErr == nil {
 			if adapter.Provider() == nmail.ProviderIMAP {
 				var boxID nmail.MailboxID

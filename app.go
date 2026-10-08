@@ -19,6 +19,7 @@ import (
 
 type App struct {
 	cfg               *Config
+	pushClient        *http.Client
 	db                *sql.DB
 	log               *slog.Logger
 	store             *mail.PgStore
@@ -538,7 +539,7 @@ func (a *App) Token(ctx context.Context, acct mail.AccountID) (mail.Credential, 
 	if provider == "gmail" || provider == "graph" {
 		return a.oauthToken(ctx, provider, string(acct), address, ciphertext)
 	}
-	password, err := openSecret(a.cfg, ciphertext)
+	password, err := openSecret(a.config(), ciphertext)
 	if err != nil {
 		return mail.Credential{}, fmt.Errorf("stored credential could not be unsealed (was SECRET_KEY changed? reconnect the account): %w", err)
 	}
@@ -618,7 +619,7 @@ func (a *App) SMTPFor(ctx context.Context, acct mail.AccountID) (*mail.Sender, m
 	if err != nil {
 		return nil, mail.Address{}, false
 	}
-	password, err := openSecret(a.cfg, ciphertext)
+	password, err := openSecret(a.config(), ciphertext)
 	if err != nil || password == "" {
 		return nil, mail.Address{}, false
 	}

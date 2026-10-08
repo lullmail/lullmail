@@ -11,6 +11,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -77,8 +78,18 @@ func TestPushClaimsPerSubscriptionAndRetriesOnlyFailures(t *testing.T) {
 	}))
 	t.Cleanup(serviceB.Close)
 
-	subA := subscriptionJSON(t, serviceA.URL)
-	subB := subscriptionJSON(t, serviceB.URL)
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		target := serviceA.URL
+		if r.URL.Hostname() == "push-b.example.test" {
+			target = serviceB.URL
+		}
+		u, _ := url.Parse(target)
+		copy := r.Clone(r.Context())
+		copy.URL = u
+		return http.DefaultTransport.RoundTrip(copy)
+	})}
+	subA := subscriptionJSON(t, "https://push-a.example.test/")
+	subB := subscriptionJSON(t, "https://push-b.example.test/")
 	sealedA, err := sealSecret(cfg, subA)
 	if err != nil {
 		t.Fatal(err)
@@ -110,7 +121,7 @@ func TestPushClaimsPerSubscriptionAndRetriesOnlyFailures(t *testing.T) {
 		claim(), // A delivered
 		claim(), // claim B
 		claim()) // B failed: claim released
-	a := &App{cfg: cfg, log: discardLogger(), db: db1}
+	a := &App{cfg: cfg, log: discardLogger(), db: db1, pushClient: client}
 	a.sendPushForUser(context.Background(), "owner-1")
 	if hits := hitsA.Load(); hits != 1 {
 		t.Fatalf("device A submissions = %d, want 1", hits)
@@ -134,7 +145,7 @@ func TestPushClaimsPerSubscriptionAndRetriesOnlyFailures(t *testing.T) {
 		claimDenied(), // A: already delivered
 		claim(),       // claim B
 		claim())       // B delivered
-	a = &App{cfg: cfg, log: discardLogger(), db: db2}
+	a = &App{cfg: cfg, log: discardLogger(), db: db2, pushClient: client}
 	a.sendPushForUser(context.Background(), "owner-1")
 	if hits := hitsA.Load(); hits != 1 {
 		t.Fatalf("device A was re-sent after a successful delivery: %d submissions", hits)

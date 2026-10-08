@@ -145,17 +145,36 @@ func registerTools(s *mcp.Server, c *client) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "read_thread",
-		Description: "Read every message in one thread, oldest first, including bodies.",
+		Description: "Read a bounded envelope page from the newest end of a thread, oldest first within each page. Pass next_cursor as cursor for older messages; read_message fetches one body.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
 		ThreadID  string `json:"thread_id" jsonschema:"thread id from list_bucket or search_mail"`
 		AccountID string `json:"account_id" jsonschema:"account id from list_accounts or account from the message row"`
+		Limit     int    `json:"limit,omitempty" jsonschema:"page size 1-50"`
+		Cursor    string `json:"cursor,omitempty" jsonschema:"next_cursor from previous page"`
 	}) (*mcp.CallToolResult, any, error) {
 		if args.ThreadID == "" || args.AccountID == "" {
 			return nil, nil, errArgs("thread_id and account_id are required")
 		}
 		// Thread ids may contain "/" (GitHub notification pattern); the
 		// server route is a suffix wildcard, so encoding is the only need.
-		return text(c.get(ctx, "/threads/"+url.PathEscape(args.ThreadID), url.Values{"account": {args.AccountID}}))
+		q := url.Values{"account": {args.AccountID}, "page": {"1"}}
+		if args.Limit > 0 {
+			q.Set("limit", strconv.Itoa(args.Limit))
+		}
+		if args.Cursor != "" {
+			q.Set("cursor", args.Cursor)
+		}
+		return text(c.get(ctx, "/threads/"+url.PathEscape(args.ThreadID), q))
+	})
+
+	mcp.AddTool(s, &mcp.Tool{Name: "read_message", Description: "Fetch one message body, attachments and inline image metadata."}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
+		MessageID string `json:"message_id"`
+		AccountID string `json:"account_id"`
+	}) (*mcp.CallToolResult, any, error) {
+		if args.MessageID == "" || args.AccountID == "" {
+			return nil, nil, errArgs("message_id and account_id are required")
+		}
+		return text(c.get(ctx, "/messages/"+url.PathEscape(args.MessageID)+"/body", url.Values{"account": {args.AccountID}}))
 	})
 
 	mcp.AddTool(s, &mcp.Tool{

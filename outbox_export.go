@@ -94,7 +94,7 @@ func (a *App) writeOutboxExport(ctx context.Context, zw *zip.Writer, uid string)
 			return nil
 		}
 		if payload != "" {
-			plain, openErr := openBound(a.cfg, "payload", uid, id, payload)
+			plain, openErr := openBound(a.config(), "payload", uid, id, payload)
 			if openErr != nil {
 				summary.Unreadable = append(summary.Unreadable, outboxExportUnreadable{ID: id, Status: state, Reason: exportSealReason(openErr, "composition")})
 			} else if files, err := composeOutboxExport(plain); err != nil {
@@ -108,7 +108,7 @@ func (a *App) writeOutboxExport(ctx context.Context, zw *zip.Writer, uid string)
 			}
 		}
 		if sent != "" {
-			plain, openErr := openBound(a.cfg, "sent", uid, id, sent)
+			plain, openErr := openBound(a.config(), "sent", uid, id, sent)
 			if openErr != nil {
 				summary.Unreadable = append(summary.Unreadable, outboxExportUnreadable{ID: id, Status: state, Reason: exportSealReason(openErr, "saved Sent copy")})
 			} else if err := add("submitted-message.eml", []byte(plain)); err != nil {

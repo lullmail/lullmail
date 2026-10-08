@@ -75,7 +75,7 @@ describe("bulk action undo and partial-success reconciliation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api).mockReset();
-    vi.mocked(api).mockResolvedValue({} as never);
+    vi.mocked(api).mockResolvedValue({undo_token:"receipt"} as never);
   });
 
   it("restores per-row read state on undo, not a blanket inverse (lullmail-17)", async () => {
@@ -93,7 +93,8 @@ describe("bulk action undo and partial-success reconciliation", () => {
     expect(requests()).toEqual([
       ["m1", "read"],
       ["m2", "read"],
-      ["m2", "unread"],
+      ["m1", "restore"],
+      ["m2", "restore"],
     ]);
     expect(showError).not.toHaveBeenCalled();
   });
@@ -101,7 +102,7 @@ describe("bulk action undo and partial-success reconciliation", () => {
   it("reconciles partial success and undoes only the changed subset (lullmail-18)", async () => {
     vi.mocked(api).mockImplementation(async (url: string) => {
       if (url.includes("m1")) throw new Error("boom");
-      return {} as never;
+      return {undo_token:"receipt"} as never;
     });
     const a = row("m1", false);
     const b = row("m2", false);
@@ -116,7 +117,7 @@ describe("bulk action undo and partial-success reconciliation", () => {
     expect(requests()).toEqual([
       ["m1", "read"],
       ["m2", "read"],
-      ["m2", "unread"],
+      ["m2", "restore"],
     ]);
   });
 
@@ -124,7 +125,7 @@ describe("bulk action undo and partial-success reconciliation", () => {
     vi.mocked(api).mockImplementation(async (url: string) => {
       if (url.includes("m1")) {
         await new Promise((r) => setTimeout(r, 25));
-        return {} as never;
+        return {undo_token:"receipt"} as never;
       }
       throw new Error("boom");
     });
@@ -139,7 +140,7 @@ describe("bulk action undo and partial-success reconciliation", () => {
     expect(requests()).toEqual([
       ["m1", "read"],
       ["m2", "read"],
-      ["m1", "unread"],
+      ["m1", "restore"],
     ]);
   });
 
@@ -152,4 +153,26 @@ describe("bulk action undo and partial-success reconciliation", () => {
     expect(showError).toHaveBeenCalled();
     expect(requests()).toEqual([["m1", "read"]]);
   });
+});
+
+it("uses the server's mixed-message snapshot even when the representative was already read", async () => {
+ const undo = [{id: "m1", before: {bucket:"feed",read_at:"2026-01-01T00:00:00Z",until:null},after:{bucket:"feed",read_at:"2026-01-02T00:00:00Z",until:null}}, {id:"m2",before:{bucket:"set_aside",read_at:null,until:"2026-10-20T09:30:00.123456Z"},after:{bucket:"set_aside",read_at:"2026-01-02T00:00:00Z",until:"2026-10-20T09:30:00.123456Z"}}];
+ vi.clearAllMocks(); vi.mocked(api).mockReset(); vi.mocked(api).mockResolvedValue({undo,undo_token:"mixed-receipt"} as never);
+ await markDone([row("m1", true)]);
+ await lastToastUndo()();
+ expect(vi.mocked(api).mock.calls.find(([,opts]) => (opts?.body as {action?: string})?.action === "restore")?.[1]?.body).toEqual({action:"restore",undo_token:"mixed-receipt"});
+});
+
+it("loads an older envelope page once and discards it after another thread opens", async () => {
+ const { reader } = await import("./store");
+ const { loadOlderMessages } = await import("./actions");
+ let resolve!: (value: unknown) => void;
+ vi.mocked(api).mockReset(); vi.mocked(api).mockImplementation(() => new Promise(r => {resolve=r}) as never);
+ reader.value = {threadId:"first",account:"acct-a",nextCursor:"older",messages:[],loadingOlder:false} as never;
+ const pending = loadOlderMessages();
+ await loadOlderMessages();
+ expect(vi.mocked(api).mock.calls).toHaveLength(1);
+ reader.value = {threadId:"second",account:"acct-a",messages:[]} as never;
+ resolve({rows:[{id:"late"}],has_more:false}); await pending;
+ expect((reader.value as unknown as {messages: unknown[]}).messages).toEqual([]);
 });

@@ -47,6 +47,8 @@ function makeApi({ twoAccounts = false } = {}) {
   });
   const inBucket = (name) => msgs.filter((m) => name === "snoozed" ? m.bucket === "set_aside" || m.bucket === "later" : m.bucket === name);
 
+  const undoReceipts = new Map();
+  let undoSequence = 0;
   async function handle(route) {
     const req = route.request();
     const url = new URL(req.url());
@@ -74,26 +76,41 @@ function makeApi({ twoAccounts = false } = {}) {
       if (path === "/board") return ok({ needs_you: [], waiting_on: [], done: [] });
       if (path === "/notes" || path === "/people") return ok([]);
       if ((m = path.match(/^\/buckets\/([a-z_]+)$/))) return ok({ rows: inBucket(m[1]).map(row), has_more: false });
+      const message = (x) => ({
+        id: x.id, account: x.account, subject: x.subject, from: x.from, to: "owner@example.test",
+        received_at: x.received_at, bucket: x.bucket, body: "Synthetic body only.", body_status: "ready",
+        reply_to: x.from.match(/<(.+)>/)[1],
+      });
       if ((m = path.match(/^\/threads\/([^/]+)$/))) {
         const found = msgs.filter((x) => x.thread === decodeURIComponent(m[1]));
-        return ok(found.map((x) => ({
-          id: x.id, account: x.account, subject: x.subject, from: x.from, to: "owner@example.test",
-          received_at: x.received_at, bucket: x.bucket, body: "Synthetic body only.",
-          reply_to: x.from.match(/<(.+)>/)[1],
-        })));
+        return ok({rows: found.map(message), has_more: false});
+      }
+      if ((m = path.match(/^\/messages\/([^/]+)\/body$/))) {
+        const found = msgs.find((x) => x.id === decodeURIComponent(m[1]) && x.account === query.account);
+        return ok(found ? message(found) : {});
       }
     } else if (method === "POST") {
       if ((m = path.match(/^\/messages\/([^/]+)\/action$/))) {
         const target = msgs.find((x) => x.id === decodeURIComponent(m[1]));
-        if (target) {
-          if (body.action === "read") target.read = true;
-          else if (body.action === "unread") target.read = false;
-          else {
-            target.bucket = body.action;
-            if (body.until) target.snooze_until = body.until; else delete target.snooze_until;
-          }
+        if (!target) return ok({});
+        if (body.action === "restore") {
+          const receipt = undoReceipts.get(body.undo_token);
+          if (!receipt || receipt.id !== target.id) throw new Error("invalid synthetic undo authority");
+          Object.assign(target, receipt.before);
+          if (!("snooze_until" in receipt.before)) delete target.snooze_until;
+          undoReceipts.delete(body.undo_token);
+          return ok({});
         }
-        return ok({});
+        const before = {...target};
+        if (body.action === "read") target.read = true;
+        else if (body.action === "unread") target.read = false;
+        else {
+          target.bucket = body.action;
+          if (body.until) target.snooze_until = body.until; else delete target.snooze_until;
+        }
+        const undo_token = "receipt-" + (++undoSequence);
+        undoReceipts.set(undo_token, {id:target.id,before});
+        return ok({undo_token});
       }
       if (path === "/board/pin") return ok({ card_id: "card-" + body.thread_id, created: true, subject: "pinned" });
       if (path === "/board/unpin") return ok({});
@@ -118,11 +135,14 @@ function makeApi({ twoAccounts = false } = {}) {
     handle, calls, unhandled,
     mark: () => calls.length,
     since: (mark) => calls.slice(mark),
-    mutations: (mark) => calls.slice(mark).filter((c) => c.method !== "GET"),
+    mutations: (mark) => calls.slice(mark).filter((c) => c.method !== "GET")
+      // A restore carries the server-issued one-use receipt; assertions
+      // match the action and the presence of a receipt, not a specific one.
+      .map((c) => c.body?.action === "restore" && c.body.undo_token ? {...c, body: {...c.body, undo_token: "receipt"}} : c),
   };
 }
 
-const act = (id, action, extra = {}) => ({ method: "POST", path: `/messages/${id}/action`, query: { account: ACCOUNT }, body: { action, ...extra } });
+const act = (id, action, extra = {}) => ({ method: "POST", path: `/messages/${id}/action`, query: { account: ACCOUNT }, body: { action, ...(action === "restore" ? { undo_token: "receipt" } : {}), ...extra } });
 const decide = (sender, allow, route) => ({ method: "POST", path: "/screener/decide", body: { sender, allow, route } });
 const byPath = (a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 
@@ -371,7 +391,7 @@ try {
     await expect(t.page.locator(".thread-title")).toHaveText("Lunch on Friday");
     await expect(t.page.locator(".msg-list")).toHaveCount(0);
     expect(t.api.since(mark).filter((c) => c.method === "GET" && c.path === "/threads/t1")).toEqual([
-      { method: "GET", path: "/threads/t1", query: { account: ACCOUNT } },
+      { method: "GET", path: "/threads/t1", query: { account: ACCOUNT, page: "1" } },
     ]);
     await t.expectMutations(mark, [act("m1", "read")]);
     // With the reader owning the page, list keys do nothing.
@@ -461,9 +481,9 @@ try {
     await t.expectPicked([]);
     mark = t.api.mark();
     await t.toast.getByRole("button", { name: "Undo" }).click();
-    await t.expectMutations(mark, [act("m0", "unread"), act("m1", "unread")], true);
+    await t.expectMutations(mark, [act("m0", "restore"), act("m1", "restore")], true);
     await expect(t.toast).toHaveCount(0);
-    // A row that was already read stays read: undo has nothing to send.
+    // A row that was already read uses its receipt to restore that exact preimage.
     await t.ready();
     await t.press("j");
     await t.press("j");
@@ -475,7 +495,7 @@ try {
     await expect(t.toast).toContainText("Done");
     mark = t.api.mark();
     await t.toast.getByRole("button", { name: "Undo" }).click();
-    await t.expectNoMutations(mark);
+    await t.expectMutations(mark, [act("m2", "restore")]);
     // Escape dismisses a toast without undoing anything.
     await t.ready();
     await t.press("j");
@@ -521,7 +541,7 @@ try {
     // Undo returns the row to where it came from, with no deadline.
     mark = t.api.mark();
     await t.toast.getByRole("button", { name: "Undo" }).click();
-    await t.expectMutations(mark, [act("m0", "imbox")]);
+    await t.expectMutations(mark, [act("m0", "restore")]);
     await t.ready(5);
     // Someday carries no date. A selection is snoozed as a whole.
     await t.press("j");
@@ -546,7 +566,7 @@ try {
     await t.ready(1);
     mark = t.api.mark();
     await t.toast.getByRole("button", { name: "Undo" }).click();
-    await t.expectMutations(mark, [act("m5", "feed")]);
+    await t.expectMutations(mark, [act("m5", "restore")]);
     await t.ready(2);
   }, { path: "/reading" });
 

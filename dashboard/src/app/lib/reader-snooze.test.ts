@@ -15,10 +15,14 @@ vi.mock("./api", () => ({
   api: vi.fn(),
 }));
 
-// LUL-F04: both reader row constructors dropped snooze_until (and the
-// thread API did not return it), so an Undo of a single-message dated
+// LUL-F04 lineage: both reader row constructors dropped snooze_until (and
+// the thread API did not return it), so an Undo of a single-message dated
 // snooze sent {action:"set_aside"} with no deadline — the server answered
-// with its three-day default and silently changed a known deadline.
+// with its three-day default and silently changed a known deadline. The
+// durable one-use undo authority now carries the exact preimage server-side;
+// these tests pin the client half of that contract: undo presents the
+// action's receipt, and a server that offers no authority is declined
+// visibly instead of guessed at.
 
 import { moveTo, snooze } from "./actions";
 import { api } from "./api";
@@ -56,23 +60,26 @@ beforeEach(() => {
 });
 
 describe("reader snooze undo keeps the exact deadline (LUL-F04)", () => {
-  it("restores a dated snooze verbatim after a reader move", async () => {
+  it("restores a dated snooze through its one-use receipt after a reader move", async () => {
     openSnoozedThread(until);
     const rows = targetRows();
     // The reader row carries the deadline through (baseline dropped it).
     expect(rows[0].snooze_until).toBe(until);
 
+    vi.mocked(api).mockResolvedValue({ undo_token: "receipt" } as never);
     await moveTo(rows, "imbox");
     expect(sentBodies()).toEqual([{ action: "imbox" }]);
     await toast.value!.undo!();
-    // The undo restores the EXACT microsecond instant — never the
-    // server's three-day default.
-    expect(sentBodies()[1]).toEqual({ action: "set_aside", until });
+    // The receipt's server-side snapshot restores the EXACT microsecond
+    // instant — never the server's three-day default, and never a
+    // reconstructed set_aside the client could get wrong.
+    expect(sentBodies()[1]).toEqual({ action: "restore", undo_token: "receipt" });
   });
 
-  it("restores the original deadline after a reader snooze change", async () => {
+  it("restores the original deadline through the receipt after a reader snooze change", async () => {
     openSnoozedThread(until);
     const rows = targetRows();
+    vi.mocked(api).mockResolvedValue({ undo_token: "receipt" } as never);
     await snooze(rows, 1);
     const applied = sentBodies()[0] as { action: string; until: string };
     expect(applied.action).toBe("set_aside");
@@ -80,22 +87,23 @@ describe("reader snooze undo keeps the exact deadline (LUL-F04)", () => {
     expect(Date.parse(applied.until)).toBeGreaterThan(Date.now());
     expect(applied.until).not.toBe(until);
     await toast.value!.undo!();
-    expect(sentBodies()[1]).toEqual({ action: "set_aside", until });
+    expect(sentBodies()[1]).toEqual({ action: "restore", undo_token: "receipt" });
   });
 
-  it("declines the undo instead of applying the default when the deadline is unknown (mixed version)", async () => {
-    // An older server's thread endpoint returns no snooze_until.
+  it("declines the undo when the server offers no undo authority (mixed version)", async () => {
+    // An older server's action response returns no undo_token.
     openSnoozedThread(undefined);
     const rows = targetRows();
     expect(rows[0].snooze_until).toBeUndefined();
+    vi.mocked(api).mockResolvedValue({} as never);
     await moveTo(rows, "imbox");
     expect(sentBodies()).toEqual([{ action: "imbox" }]);
     await toast.value!.undo!();
-    // No set_aside was issued: an exact restore is impossible, so the
-    // undo declines visibly rather than silently applying the default
-    // three days.
+    // No restore was issued and no set_aside was reconstructed: an exact
+    // restore is impossible without authority, so the undo declines
+    // visibly rather than silently applying the default three days.
     expect(sentBodies()).toEqual([{ action: "imbox" }]);
     expect(toast.value?.tone).toBe("error");
-    expect(toast.value?.message).toMatch(/return date/i);
+    expect(toast.value?.message).toMatch(/undo authority/i);
   });
 });

@@ -294,6 +294,9 @@ func (a *App) setOriginForSetup(origin string) bool {
 	if origin == "" {
 		return false
 	}
+	if a.cfg.RPID != "" {
+		return a.cfg.PublicURL == origin
+	}
 	candidate := *a.cfg
 	if !applyOrigin(&candidate, origin) {
 		return false
@@ -319,6 +322,8 @@ func (a *App) webAuthn() *webauthn.WebAuthn {
 // still inside its lifetime. A zero Created means the token came from the
 // environment (explicit config, no expiry) or does not exist.
 func (a *App) setupTokenValid() bool {
+	a.waMu.Lock()
+	defer a.waMu.Unlock()
 	if a.cfg.APIToken == "" {
 		return false
 	}
@@ -332,6 +337,8 @@ func (a *App) setupTokenValid() bool {
 // the running process. An env-supplied LULL_TOKEN is left in memory but is
 // inert once ownerConfigured is true.
 func (a *App) retireSetupToken() {
+	a.waMu.Lock()
+	defer a.waMu.Unlock()
 	if a.cfg.DataDir != "" && !a.tokenFromEnv {
 		deleteSetupToken(a.cfg.DataDir)
 	}
@@ -343,7 +350,7 @@ func (a *App) retireSetupToken() {
 
 // constantTimeBearer matches "Bearer <token>" against the configured value.
 func constantTimeBearer(got, want string) bool {
-	return subtle.ConstantTimeCompare([]byte(got), []byte("Bearer "+want)) == 1
+	return want != "" && subtle.ConstantTimeCompare([]byte(got), []byte("Bearer "+want)) == 1
 }
 
 // prepareSetup runs at boot after the database is reachable: restore a
@@ -389,4 +396,17 @@ func (a *App) prepareSetup() {
 			"=======================================================================",
 			a.cfg.APIToken, expires)
 	}
+}
+
+// config returns a coherent value while setup publishes its configuration.
+func (a *App) config() *Config {
+	a.waMu.Lock()
+	defer a.waMu.Unlock()
+	copy := *a.cfg
+	return &copy
+}
+func (a *App) setUserEmail(email string) {
+	a.waMu.Lock()
+	defer a.waMu.Unlock()
+	a.cfg.UserEmail = email
 }

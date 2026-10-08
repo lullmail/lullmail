@@ -861,6 +861,16 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	limit, cursor, err := pageParams(r, 50)
+	if err != nil {
+		writeProblem(w, 400, "Bad Cursor", err.Error())
+		return
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	paged := r.URL.Query().Get("page") == "1"
+	message := r.URL.Query().Get("message")
 	threadQuery := `
 		SELECT m.id, m.account_id, m.subject, m.from_addrs, m.to_addrs, m.reply_to_addrs, m.received_at,
 		       COALESCE(h.bucket,''), h.set_aside_until, b.text_body, b.html_body, b.parts, b.fetched_at
@@ -870,7 +880,18 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN mail_bodies b ON b.account_id = m.account_id AND b.message_id = m.id
 		WHERE m.thread_id = $2 AND (m.account_id = $3 OR ea.id::text = $3)`
 	threadArgs := []any{uid, thread, account}
-	threadQuery += ` ORDER BY m.received_at ASC NULLS LAST`
+	if message != "" {
+		threadQuery += ` AND m.id = $4`
+		threadArgs = append(threadArgs, message)
+	} else if cursor.ID != "" {
+		threadQuery += cursorPredicate("$4", "$5", "$6")
+		threadArgs = append(threadArgs, cursorArgs(cursor)...)
+	}
+	threadQuery += ` ORDER BY m.received_at DESC NULLS LAST, m.id DESC, m.account_id DESC LIMIT $` + strconv.Itoa(len(threadArgs)+1)
+	threadArgs = append(threadArgs, limit+1)
+	if paged && message == "" {
+		threadQuery = strings.Replace(threadQuery, "b.text_body, b.html_body, b.parts, b.fetched_at", "NULL::text, NULL::text, b.parts, NULL::timestamp", 1)
+	}
 	rows, err := a.db.QueryContext(r.Context(), threadQuery, threadArgs...)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
@@ -889,6 +910,7 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		Body        string       `json:"body"`
 		HTML        string       `json:"html,omitempty"`
 		Attachments []attachment `json:"attachments,omitempty"`
+		InlineParts []inlinePart `json:"inline_parts,omitempty"`
 		// "ready" (cached or fetched now), "missing" (never fetched; the
 		// eager pass was capped or skipped), "failed" (an eager fetch
 		// errored). Empty content with status "ready" is authoritative —
@@ -912,6 +934,7 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		id, acct string
 	}
 	var refs []ref
+	var keys []listCursor
 	for rows.Next() {
 		var row msgRow
 		var fromJSON, toJSON, replyToJSON, parts sql.NullString
@@ -932,6 +955,7 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 			row.BodyStatus = "missing"
 		}
 		row.Attachments = parseAttachments(parts)
+		row.InlineParts = parseInlineParts(parts)
 		row.From = firstSenderName(fromJSON.String)
 		var to []mail.Address
 		if json.Unmarshal([]byte(toJSON.String), &to) == nil && len(to) > 0 {
@@ -949,11 +973,26 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		if !fetched.Valid {
 			refs = append(refs, ref{len(out), row.ID, row.Account})
 		}
+		keys = append(keys, listCursor{ID: row.ID, Account: row.Account})
+		if received.Valid {
+			t := received.Time.UTC()
+			keys[len(keys)-1].ReceivedAt = &t
+		}
 		out = append(out, row)
 	}
 	if err := rows.Err(); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return
+	}
+	if err := rows.Close(); err != nil {
+		writeProblem(w, 500, "Query Failed", err.Error())
+		return
+	}
+	hasMore := len(out) > limit
+	var next listCursor
+	if hasMore {
+		out = out[:limit]
+		next = keys[limit-1]
 	}
 	if len(out) == 0 {
 		writeProblem(w, http.StatusNotFound, "Not Found", "no such thread")
@@ -967,7 +1006,7 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 	// or an explicit open (audit DATA-05). The engine selects the message's
 	// mailbox first on IMAP (mail.MailboxSelector), so a freshly dialed
 	// adapter works here.
-	if len(refs) > 0 {
+	if (!paged || message != "") && len(refs) > 0 {
 		fetchCtx, cancelFetch := context.WithTimeout(r.Context(), 8*time.Second)
 		defer cancelFetch()
 		adapters := map[string]mail.Adapter{}
@@ -979,6 +1018,9 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		}()
 		fetched := 0
 		for _, rf := range refs {
+			if rf.idx >= len(out) {
+				break
+			}
 			if fetched >= threadEagerBodyLimit || fetchCtx.Err() != nil {
 				break
 			}
@@ -993,7 +1035,7 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 					out[rf.idx].BodyStatus = "failed"
 					continue
 				}
-				resolve := newResolver()
+				resolve := a.accountResolver()
 				var release func()
 				ad, release, err = resolve(fetchCtx, mail.AccountID(rf.acct), cred)
 				if err != nil {
@@ -1011,6 +1053,8 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 				out[rf.idx].BodyStatus = "failed"
 				continue
 			}
+			partsJSON, _ := json.Marshal(b.Parts)
+			out[rf.idx].InlineParts = parseInlineParts(sql.NullString{String: string(partsJSON), Valid: true})
 			out[rf.idx].Body = b.Text
 			out[rf.idx].HTML = b.HTML
 			out[rf.idx].BodyStatus = "ready"
@@ -1025,6 +1069,21 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 				out[rf.idx].Attachments = list
 			}
 		}
+	}
+	if message != "" {
+		writeJSON(w, out[0])
+		return
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	if paged {
+		writeRowsPage(w, out, hasMore, next)
+		return
+	}
+	// Legacy callers retain the array shape, with an explicit bounded tail.
+	if hasMore {
+		w.Header().Set("X-Lullmail-Next-Cursor", encodeListCursor(next))
 	}
 	writeJSON(w, out)
 }
@@ -1130,7 +1189,7 @@ func (a *App) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Credential Failed", err.Error())
 		return
 	}
-	resolve := newResolver()
+	resolve := a.accountResolver()
 	ad, release, err := resolve(r.Context(), mail.AccountID(acct), cred)
 	if err != nil {
 		writeProblem(w, http.StatusBadGateway, "Connect Failed", err.Error())
@@ -1242,8 +1301,10 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 		Action    string          `json:"action"`
 		Until     json.RawMessage `json:"until"`
 		UntilDays int             `json:"until_days"`
+		Restore   []messageUndo   `json:"restore,omitempty"`
+		UndoToken string          `json:"undo_token,omitempty"`
 	}
-	if err := decodeJSON(w, r, &req); err != nil {
+	if err := decodeJSONLimit(w, r, &req, idempotencyBodyLimit); err != nil {
 		writeDecodeProblem(w, err)
 		return
 	}
@@ -1276,6 +1337,54 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tx, err := a.beginMutation(r.Context())
+	if err != nil {
+		writeProblem(w, 500, "Begin Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+	if _, err = lockAuthUser(r.Context(), tx.Tx, uid); err != nil {
+		writeProblem(w, 500, "Lock Failed", err.Error())
+		return
+	}
+	if req.Action == "restore" {
+		if req.UndoToken == "" || len(req.UndoToken) != 64 || len(req.Restore) != 0 {
+			writeProblem(w, 422, "Invalid Restore", "restore requires only the action's undo_token")
+			return
+		}
+		if err := restoreMessageUndo(r.Context(), tx.Tx, uid, acct, msg, thread, req.UndoToken); err != nil {
+			if errors.Is(err, errUndoConflict) {
+				writeProblem(w, 409, "State Changed", err.Error())
+			} else {
+				writeProblem(w, 500, "Restore Failed", err.Error())
+			}
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			writeProblem(w, 500, "Commit Failed", err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true})
+		return
+	}
+	before, err := threadUndoStates(r.Context(), tx.Tx, uid, acct, thread)
+	if err != nil {
+		writeProblem(w, 500, "Snapshot Failed", err.Error())
+		return
+	}
+	if len(before) == 0 || len(before) > 2000 {
+		writeProblem(w, 422, "Thread Too Large", "thread actions support at most 2000 retained messages")
+		return
+	}
+	var members int
+	if err := tx.QueryRowContext(r.Context(), `SELECT count(*) FROM mail_messages WHERE account_id=$1 AND thread_id=$2`, acct, thread).Scan(&members); err != nil {
+		writeProblem(w, 500, "Snapshot Failed", err.Error())
+		return
+	}
+	if members != len(before) {
+		writeProblem(w, 409, "State Changed", "thread classification is incomplete; retry after sync")
+		return
+	}
 	// parseSnoozeUntil resolves the set_aside deadline: absolute instant,
 	// explicit null (someday), or the deprecated relative forms.
 	parseSnoozeUntil := func() (until any, someday bool, problem string) {
@@ -1365,7 +1474,7 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusUnprocessableEntity, "Unknown Action", req.Action)
 		return
 	}
-	res, err := a.mutationDB(r.Context()).ExecContext(r.Context(), q, args...)
+	res, err := tx.ExecContext(r.Context(), q, args...)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Update Failed", err.Error())
 		return
@@ -1378,14 +1487,50 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 	// can see what landed (audit DATA-07).
 	var bucket string
 	var appliedUntil sql.NullTime
-	if err := a.mutationDB(r.Context()).QueryRowContext(r.Context(),
+	if err := tx.QueryRowContext(r.Context(),
 		`SELECT bucket, set_aside_until FROM hey_messages h
 		 WHERE h.user_id=$1 AND h.account_id=$2 AND h.message_id=$3`, uid, acct, msg).
 		Scan(&bucket, &appliedUntil); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
 		return
 	}
-	out := map[string]any{"ok": true, "bucket": bucket}
+	after, err := threadUndoStates(r.Context(), tx.Tx, uid, acct, thread)
+	if err != nil {
+		writeProblem(w, 500, "Snapshot Failed", err.Error())
+		return
+	}
+	if len(before) != len(after) {
+		writeProblem(w, 409, "State Changed", "thread membership changed during the action; no action was applied")
+		return
+	}
+	undo := []messageUndo{}
+	for i, state := range before {
+		if state.ID != after[i].ID {
+			writeProblem(w, 409, "State Changed", "thread membership changed")
+			return
+		}
+		undo = append(undo, messageUndo{ID: state.ID, Before: state.Before, After: after[i].Before})
+	}
+	rawUndo, snapshotErr := undoSnapshotBytes(undo)
+	if snapshotErr != nil {
+		writeProblem(w, 422, "Thread Too Large", "the undo snapshot exceeds the request budget; no action was applied")
+		return
+	}
+	random, err := randomBytes(32)
+	if err != nil {
+		writeProblem(w, 500, "Undo Failed", err.Error())
+		return
+	}
+	token := fmt.Sprintf("%x", random)
+	if _, err := tx.ExecContext(r.Context(), `INSERT INTO message_action_undo(token,user_id,account_id,message_id,thread_id,action,snapshot) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)`, token, uid, acct, msg, thread, req.Action, string(rawUndo)); err != nil {
+		writeProblem(w, 500, "Undo Failed", err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeProblem(w, 500, "Commit Failed", err.Error())
+		return
+	}
+	out := map[string]any{"ok": true, "bucket": bucket, "undo": undo, "undo_token": token}
 	if appliedUntil.Valid {
 		out["snooze_until"] = appliedUntil.Time.UTC().Format(time.RFC3339Nano)
 	}
@@ -1490,3 +1635,87 @@ func (a *App) handlePrefs(w http.ResponseWriter, r *http.Request) {
 // threadEagerBodyLimit caps how many uncached bodies one thread open will
 // fetch before answering; the rest stay lazy (audit DATA-05).
 const threadEagerBodyLimit = 8
+
+// handleMessageBody selects one owned envelope before any provider access.
+func (a *App) handleMessageBody(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	if q.Get("account") == "" {
+		writeProblem(w, 400, "Missing Account", "account is required for message bodies")
+		return
+	}
+	q.Set("message", r.PathValue("message"))
+	r.URL.RawQuery = q.Encode()
+	// Resolve the thread inside the same account/owner scope as the reader.
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, 500, "Lookup Failed", err.Error())
+		return
+	}
+	var thread string
+	err = a.db.QueryRowContext(r.Context(), `SELECT m.thread_id FROM mail_messages m JOIN email_accounts ea ON ea.mirror_account_id=m.account_id WHERE ea.user_id=$1 AND (m.account_id=$2 OR ea.id::text=$2) AND m.id=$3`, uid, q.Get("account"), q.Get("message")).Scan(&thread)
+	if err != nil {
+		writeLookupProblem(w, err, "message")
+		return
+	}
+	r.SetPathValue("thread", thread)
+	a.handleThread(w, r)
+}
+
+type inlinePart struct {
+	PartID    string `json:"part_id"`
+	ContentID string `json:"content_id"`
+	Type      string `json:"type"`
+	Size      int64  `json:"size"`
+}
+
+func parseInlineParts(raw sql.NullString) []inlinePart {
+	var parts []mail.BodyPart
+	if json.Unmarshal([]byte(raw.String), &parts) != nil {
+		return nil
+	}
+	var out []inlinePart
+	for _, p := range parts {
+		if p.ContentID != "" && strings.HasPrefix(strings.ToLower(p.Type), "image/") && !p.IsAttachment() {
+			out = append(out, inlinePart{p.PartID, strings.Trim(p.ContentID, "<>"), p.Type, p.Size})
+		}
+	}
+	return out
+}
+
+type messageState struct {
+	Revision int64   `json:"revision,string"`
+	Bucket   string  `json:"bucket"`
+	ReadAt   *string `json:"read_at"`
+	Until    *string `json:"until"`
+}
+type messageUndo struct {
+	ID     string       `json:"id"`
+	Before messageState `json:"before"`
+	After  messageState `json:"after"`
+}
+
+func threadUndoStates(ctx context.Context, tx *sql.Tx, uid, acct, thread string) ([]messageUndo, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT h.message_id,h.bucket,h.read_at,h.set_aside_until,h.mutation_revision FROM hey_messages h JOIN mail_messages m ON m.account_id=h.account_id AND m.id=h.message_id WHERE h.user_id=$1 AND h.account_id=$2 AND m.thread_id=$3 ORDER BY h.message_id LIMIT 2001 FOR UPDATE OF h, m`, uid, acct, thread)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []messageUndo{}
+	for rows.Next() {
+		var state messageUndo
+		var read, until sql.NullTime
+		if err := rows.Scan(&state.ID, &state.Before.Bucket, &read, &until, &state.Before.Revision); err != nil {
+			return nil, err
+		}
+		if read.Valid {
+			s := read.Time.UTC().Format(time.RFC3339Nano)
+			state.Before.ReadAt = &s
+		}
+		if until.Valid {
+			s := until.Time.UTC().Format(time.RFC3339Nano)
+			state.Before.Until = &s
+		}
+		out = append(out, state)
+	}
+	return out, rows.Err()
+}

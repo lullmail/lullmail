@@ -39,12 +39,12 @@ func needsRetentionExpansion(oldDays, newDays int) bool {
 }
 
 type reconcileJob struct {
-	AccountID        string
-	PolicyVersion    int64
-	State            string
+	AccountID       string
+	PolicyVersion   int64
+	State           string
 	FullEnumeration bool
-	LastError        string
-	HasError         bool
+	LastError       string
+	HasError        bool
 }
 
 func (j *reconcileJob) asJSON() map[string]any {

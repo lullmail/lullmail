@@ -84,6 +84,9 @@ func connectApp(cfg *Config) *App {
 		}
 	}
 
+	// Identity promotion hooks (identity.go) are product-side and transaction-
+	// scoped; the vendored engine has no promotion callback yet (review R2-02:
+	// atomic remap is upstream work first, then re-vendor and wire it here).
 	store, err := mail.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		db.Close()
@@ -248,6 +251,7 @@ func (a *App) purgeExpired(ctx context.Context) {
 	for _, q := range []string{
 		`DELETE FROM auth_challenges WHERE expires_at < now()`,
 		`DELETE FROM oauth_states WHERE expires_at < now()`,
+		`DELETE FROM message_action_undo WHERE expires_at < now()`,
 		`DELETE FROM auth_sessions WHERE expires_at < now()`,
 		`DELETE FROM push_deliveries WHERE delivered_at IS NULL AND claimed_at < now() - interval '10 minutes'`,
 		// Idempotency answers outlive the request by design (a parked
@@ -414,6 +418,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	api.HandleFunc("GET /buckets/{bucket}", a.handleBucket)
 	// GitHub-derived thread ids contain "/" (repo/check-suites/...@github.com),
 	// so the segment is a suffix wildcard, not a single path element.
+	api.Handle("GET /messages/{message}/body", a.accountWorkLifecycle(http.HandlerFunc(a.handleMessageBody)))
 	api.Handle("GET /threads/{thread...}", a.accountWorkLifecycle(http.HandlerFunc(a.handleThread)))
 	api.HandleFunc("POST /messages/{message}/action", a.withIdempotency(a.handleMessageAction))
 	api.Handle("GET /messages/{message}/attachment/{part}", a.accountWorkLifecycle(http.HandlerFunc(a.handleAttachment)))

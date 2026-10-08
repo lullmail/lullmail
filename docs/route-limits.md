@@ -45,8 +45,9 @@ is the register the audit asked for: route, auth, body bound, notes.
 | `POST /api/notes`, `POST /api/notes/{id}`, `DELETE /api/notes/{id}` | session/agent | 64 KiB | idempotent |
 | `POST /api/screener/decide`, `undecide` | session/agent | 64 KiB | idempotent |
 | `GET /api/buckets/{bucket}` | session/agent | — | `limit` 1–200 (default 200), keyset `cursor` |
-| `GET /api/threads/{thread}` | session/agent | — | account param required; eager body fetch ≤8 messages / 8 s |
-| `POST /api/messages/{message}/action` | session/agent | 64 KiB | idempotent; snooze `until` absolute RFC3339 or null (audit DATA-07) |
+| `GET /api/messages/{message}/body` | session/agent | — | one owned message; body fetch deadline 8 s |
+| `GET /api/threads/{thread}` | session/agent | — | account required; newest envelope page ≤50, keyset cursor for older pages; legacy array bounded to 50 with X-Lullmail-Next-Cursor |
+| `POST /api/messages/{message}/action` | session/agent | 1 MiB | idempotent; snooze `until` absolute RFC3339 or null (audit DATA-07) |
 | `GET /api/messages/{message}/attachment/{part}` | session/agent | — | streams; aborts the connection on a mid-stream error |
 | `GET /api/messages/{message}/eml` | session/agent | — | provider read ≤128 MiB, mirror fallback beyond |
 | `POST /api/classify` | session/agent | — | |
@@ -100,3 +101,18 @@ Every provider HTTP client carries a request timeout (15 s tokens, 60 s
 Graph/JMAP, 30 s IMAP I/O); the send queue additionally enforces an
 aggregate admission budget (8 jobs / 128 MiB retained, audit 3 SEND-03,
 4 F14).
+
+Thread readers use `?page=1&account=...` and receive `rows`, `has_more`,
+`next_cursor`. Rows are oldest first within a page; the initial page covers
+the newest end of the thread. Continue toward older envelopes with `cursor`.
+Envelope pages omit body content; fetch a body with the message route above.
+MCP `read_thread` uses the page contract and `read_message` fetches a body.
+
+Message actions return per-message `undo` states (bucket, read timestamp,
+snooze timestamp before and after). Submit these as `restore` with action
+`restore` on the same account/thread representative. Restoration is atomic
+and refuses with 409 if any expected state changed. The snapshot/action bound
+is 2000 retained messages; a larger thread receives 422 before mutation.
+
+Undo snapshots are also bounded by the 1 MiB request budget. If a snapshot
+would exceed it, the action transaction rolls back and returns 422.

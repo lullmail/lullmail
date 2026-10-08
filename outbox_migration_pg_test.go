@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // revertToSchema7 returns the database to exactly what a pre-outbox release
@@ -23,7 +25,7 @@ func revertToSchema7(t *testing.T, p productPG) {
 func outboxObjects(t *testing.T, p productPG) (columns, indexes map[string]bool) {
 	t.Helper()
 	columns, indexes = map[string]bool{}, map[string]bool{}
-	rows, err := p.db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name='outbox_jobs'`)
+	rows, err := p.db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name='outbox_jobs' AND table_schema=current_schema()`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +35,7 @@ func outboxObjects(t *testing.T, p productPG) (columns, indexes map[string]bool)
 		columns[c] = true
 	}
 	rows.Close()
-	rows, err = p.db.Query(`SELECT indexname FROM pg_indexes WHERE tablename='outbox_jobs'`)
+	rows, err = p.db.Query(`SELECT indexname FROM pg_indexes WHERE tablename='outbox_jobs' AND schemaname=current_schema()`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,9 +50,29 @@ func outboxObjects(t *testing.T, p productPG) (columns, indexes map[string]bool)
 
 func TestMigration8UpgradesASchema7DatabaseAndIsIdempotent(t *testing.T) {
 	p := newProductPG(t)
+	schema := fmt.Sprintf("outbox_catalog_%d", time.Now().UnixNano())
+	if _, err := p.db.Exec(`CREATE SCHEMA ` + schema); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := p.db.Exec(`DROP SCHEMA ` + schema + ` CASCADE`); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := p.db.Exec(`CREATE TABLE ` + schema + `.outbox_jobs(unrelated_marker text)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.db.Exec(`CREATE INDEX unrelated_outbox_index ON ` + schema + `.outbox_jobs(unrelated_marker)`); err != nil {
+		t.Fatal(err)
+	}
+	cols, indexes := outboxObjects(t, p)
+	if cols["unrelated_marker"] || indexes["unrelated_outbox_index"] {
+		t.Fatal("catalog lookup included another schema")
+	}
+
 	ctx := context.Background()
-	if productMigrations[len(productMigrations)-1].Version != 8 {
-		t.Fatalf("this test is written for the outbox as the newest migration")
+	if productMigrations[7].Version != 8 {
+		t.Fatalf("outbox migration position changed")
 	}
 	if _, err := p.db.Exec(`INSERT INTO sticky_notes(user_id,x,y,text,color) VALUES($1,1,2,'survives the upgrade',0)`, p.uid); err != nil {
 		t.Fatal(err)
@@ -173,14 +195,14 @@ func TestMigration8RollbackAndReapply(t *testing.T) {
 	}
 	var top int64
 	p.db.QueryRow(`SELECT max(version) FROM app_migrations`).Scan(&top)
-	if top != 7 {
+	if top != productMigrations[len(productMigrations)-1].Version {
 		t.Fatalf("ledger after rollback ends at %d", top)
 	}
 	if err := runProductMigrations(context.Background(), p.db); err != nil {
 		t.Fatal(err)
 	}
 	p.db.QueryRow(`SELECT max(version) FROM app_migrations`).Scan(&top)
-	if top != 8 || tables() != before {
+	if top != productMigrations[len(productMigrations)-1].Version || tables() != before {
 		t.Fatalf("reapply: ledger %d, tables %d/%d", top, tables(), before)
 	}
 }

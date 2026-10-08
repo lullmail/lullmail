@@ -323,7 +323,7 @@ Standing decision, updated: **SEND-01 = SEND-03 (pass 6) = lullmail-10 below** �
 one item across three reports, previously this register's only recorded product
 deferral; that deferral is now discharged by PRs 21/22 as above.
 
-## F07 (round 3) - Medium - PARTIALLY FIXED (contained guard landed), submission transport DEFERRED (product)
+## F07 (round 3) - Medium - DELIBERATE READ-ONLY JMAP TRANSPORT (synchronous refusal preserved)
 
 **JMAP accounts have no verified send transport**
 
@@ -367,20 +367,22 @@ deferral; that deferral is now discharged by PRs 21/22 as above.
 - Evidence: Confirmed — replay protection exists (step consumption) and the per-peer limiter is the repaired fail-closed parser, but guesses from many peers against one account share no budget. TOTP is an intentional alternative credential, not a second factor.
 - Fixed (`b9c1027`): the report's `auth_factor_windows` design landed with product migration 5 — a durable per-user fixed five-minute window (server-computed boundaries, never client values) counts every failed standalone-TOTP guess through an atomic upsert; ten failures from any set of peers exhaust the window and further attempts — including the correct code — answer 429 with `Retry-After` to the boundary. The fixed deadline never extends on new failures, spent windows prune after a day in the housekeeping purge, the per-peer limiter stays in front, and the password/passkey/recovery paths are untouched (a shared budget is still a denial-of-service lever against the owner — the window is short and bounded for exactly that reason; ingress rate limiting for exposed deployments remains the deployment-policy item it was under OPS-05/OPS-06 below). Regressions: distributed exhaustion across distinct peers, correct-code refusal, rollover after the window passes, per-user isolation (`TestIntegrationTOTPPerUserBudgetExhaustion`, `TestIntegrationTOTPBudgetIsPerUser`).
 
-## AUTH-07 (remainder) / AUTH-03 (pass 7) - Medium - DEFERRED (contained fix landed, installation design deferred)
+## AUTH-07 (remainder) / AUTH-03 (pass 7) - Medium - IMPLEMENTED (installation-scoped initialization, 2026-10-07)
 
 **First-run completion is not a single transactional installation transition**
 
 - Kind: Concurrency gap (remainder)
 - Evidence: The pass-7 report proved the pass-6 recheck was insufficient for the no-owner case: two ceremonies with different names create different owner rows, lock different rows, and the global `ownerConfiguredDB` check under a row lock cannot serialize them. FIXED in pass 7: both bootstrap finish paths now take a transaction-scoped installation-wide advisory lock before the configured check, so two concurrent ceremonies can no longer both install a first credential (commit tagged `audit 3-AUTH-03`).
-- Deferral (remainder): `ensureUser` can still leave a credential-less second user row behind when two begins race or `LULL_USER_EMAIL` changes between boots, and the report's fuller design (users-single-owner unique index after operator reconciliation, ceremony-bound setup epochs, transaction-aware owner initializer, provisional ceremony input) is a startup/config architecture change. The residual is stray rows with no sign-in capability behind a setup token that retires on first completion.
 
-## AUTH-04 (remainder) - Medium - DEFERRED (contained fix landed, runtime snapshot deferred)
+- Implementation (2026-10-07): Owner initialization now holds the installation advisory lock and inserts only when the installation has no user. Setup passes its provisional email directly rather than mutating shared config. Existing historical extra rows are preserved for operator reconciliation; no uniqueness migration deletes them.
+
+## AUTH-04 (remainder) - Medium - IMPLEMENTED (synchronized configuration reads, 2026-10-07)
 
 **Setup mutates shared configuration without a consistent synchronization boundary**
 
 - Evidence: Confirmed. FIXED in pass 7: `setOriginForSetup` now validates the candidate on a Config copy and publishes origin + WebAuthn instance together only after construction succeeds, and `handleLoginFinish` reads the instance through the locked accessor (commit tagged `audit 3-AUTH-04`). Bootstrap token retirement already mutates under waMu.
-- Deferral (remainder): Other request handlers still read `a.cfg` fields directly rather than one immutable published snapshot, so a reader can mix pre- and post-swap values mid-request. The report's `atomic.Pointer[runtimeAuth]` migration of every reader is a cross-cutting refactor of the auth/config surface; defer as its own pass. The contained fix removed the dangerous case (a failed setup leaving a half-updated live config).
+
+- Implementation (2026-10-07): Runtime readers take configuration copies under the publication lock. Origin initialization is pinned once; configuration reads, WebAuthn publication and setup-token retirement share the same lock. A race regression exercises concurrent readers during publication.
 
 ## WEB-04 (pass 6) / WEB-03 (pass 7) / R07 (round 3) - Medium - FIXED (idempotency + offline-v2 pass, 2026-09-18)
 
@@ -415,12 +417,13 @@ deferral; that deferral is now discharged by PRs 21/22 as above.
 - Evidence: Confirmed — snoozes store server-relative day counts; replay applies them later; undo reconstructs a prior snooze through rounded remaining days. Pass 7 did not change this.
 - Fixed (`0e294ef`): `set_aside` takes `until` — an absolute RFC3339 instant captured at user-intent time and stored verbatim, so offline replay applies the exact intended deadline no matter when it runs; `until: null` parks the thread as someday (the later bucket, no date); `until_days` stays as deprecated server-relative compat. The response echoes the applied bucket and `snooze_until` so undo snapshots are exact: the dashboard captures the row's prior instant verbatim and restores it (the old path re-derived rounded day counts from remaining time), and the SnoozeMenu deadline is computed at click time. MCP `message_action` takes `until` (or null) with the legacy days form still accepted. Regressions: `TestIntegrationSnoozeUntilAbsoluteAndUndoExactness` (microsecond equality through move-and-restore), `TestIntegrationSnoozeUntilNullIsSomeday`, `TestIntegrationSnoozeValidationAndLegacyPath` (garbage-until 422, legacy bounds).
 
-## DATA-04 (pass 7) / R11+F20 remainder (round 3) - Medium - DEFERRED (product design)
+## DATA-04 (pass 7) / R11+F20 remainder (round 3) - Medium - IMPLEMENTED (conditional mixed-thread restore, 2026-10-07)
 
 **Thread-wide mutations cannot be undone exactly from one summary row**
 
 - Evidence: Confirmed — the action handler mutates every message in the resolved thread while the browser inverse is computed from one list row's flags, so mixed read/bucket state inside a thread is lost on undo. (Per-row snapshots already make single-row read/unread undo exact.) Round 3 removed the adjacent board-pin variant's worst case: re-pins no longer clobber the standing card and the undo deletes only cards the pin created (F20, commits tagged `audit 4-F20`); an edit landing between a pin and its undo is still not conflict-detected.
-- Deferral: Exact undo needs server-side preimage capture (row versions, one-use undo records, conflict rejection) — the report's `message_action_undo` design is a schema + API + client change across the same surface as the idempotency work in WEB-04. Deferred as product redesign; the current undo is documented as approximate for mixed threads.
+
+- Implementation (2026-10-07): Message actions capture each retained message’s bucket, read timestamp and snooze instant in the mutation transaction. The dashboard submits that snapshot for atomic conditional restoration; changed post-action state returns 409. Actions above 2000 retained messages refuse before mutation. Board card removal/edit conflicts remain separate from mail-state restoration.
 
 ## DATA-08 (pass 7) - Medium - FIXED (staged reconciliation pass, 2026-09-18)
 
@@ -450,7 +453,7 @@ deferral; that deferral is now discharged by PRs 21/22 as above.
 - Evidence: Confirmed — an incremental provider will not re-report unchanged old messages after local retention removed them; widening the window changes policy only.
 - Fixed: `needsRetentionExpansion(old, new)` gates a `full_enumeration` reconcile job (old bounded AND (new unbounded OR wider)); the worker drives `Engine.RequestRescan` — staged scans for every mailbox, the same non-destructive machinery as SYNC-03, never the destructive reset — and the job is consumed (state complete, `applied_policy_version` advanced) only after every scan finished under the new policy. An interrupted rebuild leaves the request pending with its staged progress durable. Regression: `TestIntegrationRetentionIncreaseRestoresOlderMessages` (prune an unchanged month-old message at 7 days, widen to 90, provider reports no delta — the message returns), plus the interruption/resume case.
 
-## SYNC-03 (pass 7) - High - PARTIALLY FIXED (ordering), cross-pool promotion migration DEFERRED (needs OPS-03 bridge)
+## SYNC-03 (pass 7) - High - ORDERING FIXED; ATOMIC PRODUCT-STATE PROMOTION REQUIRES UPSTREAM INTERFACE
 
 **Identity promotion deletes the old message before its replacement is written**
 
@@ -477,14 +480,14 @@ introduced, and the body-prefetch default is unchanged. Google quota profiles
 can differ for grandfathered projects. PostgreSQL, live-provider and Neutron
 upstream/re-vendor requirements remain separate release gates.
 
-## GMAIL-03 - Low - DEFERRED
+## GMAIL-03 - Low - UPSTREAM MODEL REQUIREMENT
 
 **Attachment flags are inferred from MIME structure excluded by metadata requests**
 
 - Evidence: Confirmed — envelope requests use format=metadata, which does not return the part tree that `payloadHasAttachment` walks.
 - Deferral: The honest fix is a tri-state attachment property (unknown/present/absent) flowing through the envelope model, the mirror schema and the dashboard badge — a model change. Requesting format=full for every envelope would multiply quota cost for every sync; the report itself says not to deploy that without measurement.
 
-## GRAPH-02 / PROVIDER-01 (pass 7) - Medium - DEFERRED
+## GRAPH-02 / PROVIDER-01 (pass 7) - Medium - BLOCKED ON LIVE ID-TRANSLATION MIGRATION
 
 **Graph message identity changes on folder moves because immutable IDs are not requested**
 
@@ -520,29 +523,29 @@ upstream/re-vendor requirements remain separate release gates.
 - Evidence: Confirmed — the lifecycle gate was one global owner RWMutex; a long read on account A delays account B's deletion, and engine/OAuth refresh mutexes do not observe cancellation.
 - Fixed (`c341e02`): per-account admission gates replace the global lock on the work path — an active-operation counter sealed by deletion plus a per-account context derived from the background root. Deletion seals the gate (new admissions fail), CANCELS the account context so in-flight provider I/O aborts, and waits for the count to drain bounded by the request context plus a hard cap; an uncommitted deletion resurrects the gate. The global owner lock survives only around full-owner deletion (which enumerates, seals, and drains every account while blocking creation and gated requests), account creation, and the middleware that holds a request's per-account lease. Duplicate manual syncs coalesce on a context-aware per-account lock: a queued waiter returns immediately on cancellation without another provider connection (the engine's own per-account mutex is unchanged — its critical sections are ctx-aware provider calls). Regressions: `TestIntegrationAccountDeletionIndependentAndCancelling` (B deletes while A's sync is parked; A's deletion cancels A's provider call and drains), `TestIntegrationDuplicateSyncCoalescesOnContextGate`, plus the offline gate-matrix in `accounts_test.go`.
 
-## OPS-05 (pass 6) / OPS-06 (pass 7) - Medium - DEFERRED
+## OPS-05 (pass 6) / OPS-06 (pass 7) - Medium - DELIBERATE LOCAL/PRIVATE DEPLOYMENT COMPATIBILITY
 
 **Default port publication and URL configuration permit unintended plaintext exposure**
 
 - Evidence: Confirmed per both reports (deployment hardening, not an unauthenticated-login finding): compose publishes 8080 on all interfaces, HTTP origins away from loopback are accepted, origin detection trusts forwarded headers without a proxy-peer check.
 - Deferral: Binding the compose default to loopback silently breaks every existing deployment whose ingress dials the published port, and enforcing HTTPS-only origins plus trusted-proxy forwarded parsing needs the same deployment-policy decision as pass-6 AUTH-01. The dashboard already surfaces a public-exposure warning; the enforcement change belongs to a release-noted deployment-policy update, not a sweep.
 
-## OPS-07 (remainder) - Medium - PARTIALLY FIXED (product harness and migration tests landed), per-suite isolation DEFERRED
+## OPS-07 (remainder) - Medium - IMPLEMENTED (separate CI suite databases, 2026-10-07)
 
 **CI lacks real SQL integration coverage**
 
 - Evidence: Confirmed — engine integration tests skip without `NEUTRON_MAIL_TEST_DATABASE_URL`. FIXED in pass 7: CI now runs a disposable postgres:17 service job that executes the engine store integration suite and race runs for all three Go modules (commit tagged `audit 3-OPS-07`); the normal green build no longer excludes every database test.
 - Fixed (remainder pass, 2026-09-18, `556e272`): `LULL_TEST_DATABASE_URL` gates a product-side integration suite with the same skip-offline contract as the engine's — it resets only product-owned tables, re-runs the real schema migration entry point inside one transaction, and executes the production push candidate SQL (hoisted to `pushCandidateSQL` so the suite runs the shipped statement, not a copy) plus the auth-epoch schema/lookup sync checks. The CI postgres job runs it with `-race` alongside the engine and MCP modules; the harness was verified end-to-end against a live local PostgreSQL (disposable database, created and dropped for the run).
-- Deferral (remainder): Isolated per-suite databases for potentially destructive suites remain CI infrastructure work. Migration-convergence, migration-advisory-lock and concurrent-runner regressions already exist in both modules; they are not missing implementation, but their PostgreSQL execution is unavailable in this environment. The harness precondition this register recorded was met — AUTH-01's race regression tests landed through it (`4fbd4f6`) and the staged reconciliation pass (SYNC-03/04/05, DATA-08/09, OPS-02) landed through it with kill-between-pages, concurrency, and migration-convergence regressions on both suites — so no open finding still waits on the harness.
+- Implementation (2026-10-07): CI creates a product_mailtest database separate from the engine mailtest database. Both real PostgreSQL suites execute sequentially; their destructive resets do not share a database. Remote execution of this new workflow remains pending.
 
-## OPS-09 (pass 6) / OPS-09+PROVIDER-03-remainder (pass 7) - Medium/Low - DEFERRED
+## OPS-09 (pass 6) / OPS-09+PROVIDER-03-remainder (pass 7) - Medium/Low - PUSH FIXED; PRIVATE MAIL HOSTS SUPPORTED; JMAP POLICY UPSTREAM
 
 **Outbound URL trust boundaries are implicit, including push endpoints and authenticated continuations**
 
 - Evidence: Confirmed as conditional hardening — push registration accepts arbitrary endpoints; JMAP sends tokens to session-advertised origins. Pass 7 landed the Graph half: continuation URLs are now validated against the configured origin/path before any request (PROVIDER-02 fix), and OAuth account creation joined the owner lifecycle gate with duplicate-address rejection (the contained half of PROVIDER-03).
 - Deferral (remainder): Provider-specific HTTPS allowlists, redirect policies, and resolved-address validation for configurable hosts is a deliberate egress-policy design (and user-selected private mail servers are an intentional feature, so a blanket ban is wrong). The cross-pool transactional account creation both reports describe needs the OPS-03 bridge. Deferred with the deployment-policy pass (OPS-05 above).
 
-## OPS-10 - Low - DEFERRED
+## OPS-10 - Low - DELIBERATE KEY COMPATIBILITY AND TRUSTED AGENT POLICY
 
 **Secret-key overrides, local privacy and agent credentials need explicit security policies**
 
@@ -557,7 +560,7 @@ upstream/re-vendor requirements remain separate release gates.
 - Resolution (2026-10-07): the durable outbox this entry required is merged (PRs 21/22) — durable states and undo deadline, recoverable compositions until a definite outcome, an owner-scoped status endpoint, and no automatic retry across uncertain outcomes. Deployment of the outbox build is not independently verified.
 - Contained hardening (audit 5 SEND-02/LIFE-03, extended in the reliability follow-up), retained as history: acceptance claims are atomic, and completion/ambiguous/cancelled receipts retain the request hash and original token for up to 24 hours, bounded to 4096 keys. A different body under a retained key is 409. Shutdown-refused work unrolls reservations and answers 503; accepted work cancelled before submission retains a cancelled receipt. The dashboard carries stable submission keys and does not offer undo after a replayed zero-second window. The restart, receipt-expiry, and capacity-eviction gaps this hardening could not close are exactly what the merged outbox now covers.
 
-## SYNC-02 (audit 5) - High - DEFERRED (standing GRAPH-02/PROVIDER-01 decision)
+## SYNC-02 (audit 5) - High - BLOCKED ON LIVE GRAPH ID-TRANSLATION MIGRATION
 
 **Graph message identities are not made stable across folder moves**
 
@@ -622,12 +625,13 @@ fences late reads and saves; sending waits for admitted reads and prevents
 incompatible edits/discard. Unit/component tests pass; these estimates do not
 claim a strict bound on browser heap overhead or native filesystem durability.
 
-## DATA-04 (audit 5) - Medium - DEFERRED (API pagination redesign)
+## DATA-04 (audit 5) - Medium - IMPLEMENTED (bounded envelope pages and targeted bodies, 2026-10-07)
 
 **Thread reads return unbounded cached message bodies despite a bounded eager-fetch count**
 
 - Evidence: Confirmed — the thread endpoint selects and serializes every message and cached body in a thread with no envelope-page bound; the eight-message eager-fetch limit bounds only NEW provider fetches.
-- Deferral: the fix is a response-contract change (paginated envelopes + per-message body endpoint + has_more semantics) across the server route, the dashboard reader, and the MCP read_thread tool — a redesign of the thread surface, not a repair. Single-operator installs hold bounded bodies per the mirror's retention; the reader already renders lazily per message. Deferred as its own API pass.
+
+- Implementation (2026-10-07): Thread pages carry at most 50 envelopes and an account-qualified keyset cursor; the dashboard loads older pages and targeted bodies, and MCP exposes the same contract. Legacy array reads are bounded to 50 and advertise continuation in a response header. See docs/route-limits.md.
 
 ## WEB-01 (audit 5) - Medium - RECONCILED (existing fix present at reviewed baseline)
 
@@ -636,19 +640,21 @@ claim a strict bound on browser heap overhead or native filesystem durability.
 - The earlier register entry inspected the source placeholder but missed the production serving path. `shellRenderer.worker` in `cmd_serve.go` already hashes the built shell and replaces that placeholder in the served worker; activation deletes older Lull Mail and legacy shell caches. This behavior is present in baseline `7e3ba75`, not a new fix in this pass.
 - `TestServiceWorkerVersionCoversAllShellAssets` passes under the race detector, including icon-only and manifest-only changes. The browser reinstall/activation/offline lifecycle still needs real-browser execution; synthetic code tests do not claim that end-to-end result.
 
-## WEB-02 (audit 5) - Medium - DEFERRED (conditional; verified sanitization pipeline needed)
+## WEB-02 (audit 5) - Medium - IMPLEMENTED (network-inert preprocessing, 2026-10-07)
 
 **Raw email HTML is parsed before remote-content removal can be guaranteed**
 
 - Evidence: Conditional per the report itself — the reader sanitizes by parsing with DOMParser and stripping/removing remote sources afterward, and MDN documents that a parsed inert document can still request resources; the report explicitly did not browser-verify any actual tracking request, and neither can this pass.
-- Deferral: the fail-safe fix (render stored plain text only, never parsing raw HTML, until consent) visibly degrades the default reading experience for every HTML message — a product decision about the privacy/UX trade, and the permanent fix (network-free server-side sanitizer before any browser parse) is its own pipeline. The iframe CSP keeps scripts and (pre-consent) images fenced; what is NOT proven is zero network requests during preprocessing.
 
-## WEB-03 (audit 5) - Medium - DEFERRED (cross-layer feature)
+- Implementation (2026-10-07): The reader uses parse5 followed by an inert template, so sender HTML never enters DOMParser. Native browser evidence shows readable text and zero pre-consent tracking requests; consent permits image requests while scripts, frames, imports and preloads remain removed.
+
+## WEB-03 (audit 5) - Medium - IMPLEMENTED (authenticated inline raster images, 2026-10-07)
 
 **Inline cid images have no complete metadata-to-rendering path**
 
 - Evidence: Confirmed — the engine records Content-ID values and the sanitizer preserves `cid:` references, but the thread response exposes no inline-part mapping and the renderer has no path from a cid to authenticated bytes, so embedded images render broken.
-- Deferral: a cross-layer feature (engine inline-parts array + authenticated part endpoint + Blob-URL renderer with revoke discipline + CSP allowances), explicitly scoped in the report as new functionality rather than a defect repair; tracked as reader work.
+
+- Implementation (2026-10-07): Reader responses expose existing MIME Content-ID metadata. The client resolves img cid references through account-scoped authenticated attachment fetches into raster blobs, capped at 16 parts, 10 MiB each and 20 MiB total, with abort and revoke on teardown. Native browser evidence shows an inline PNG decoded before remote-image consent. Inline SVG is excluded because it can contain external resource references.
 
 ## Deeper correctness pass (2026-10-06) — LUL-D01/D02/D10, LUL-F01/F05/F06, LUL-F02/F03/F04 all FIXED
 
@@ -857,3 +863,149 @@ budget deliberately does not touch persisted Graph identities. Gmail's
 JSON-route submission still sends the same rendered bytes the media-upload
 budget bounds; a measured JSON-route threshold, live-mailbox acceptance,
 and the standing WEB-02/WEB-03/OFF-02/DRAFT-02 matrices stay separate.
+
+## Final engineering reconciliation (2026-10-07)
+
+OPS-07: the PostgreSQL CI job now creates a separate product test database;
+engine and product resets cannot contaminate the other suite. New workflow
+execution remains a remote CI gate.
+
+OPS-09: browser push subscriptions require public HTTPS endpoints, port 443,
+no userinfo or fragment, no redirects, and public resolved dial addresses.
+The transport pins each validated address at dial time. Private mail servers
+remain an intentional supported configuration; JMAP advertised-origin policy
+belongs upstream. Cross-pool account creation is already atomic through
+putMirrorAccountTx; the older bridge deferral does not describe that path.
+
+OPS-10: generated keys remain 32 random bytes and private key files remain
+0600. Text overrides are compatibility inputs and are SHA-256-derived by the
+cipher implementation; they are not treated as evidence of entropy. Operators
+must retain the effective key with backups. Agent credentials intentionally
+represent trusted full mail access within the existing auth-route denylist;
+scoped automation principals and online key rotation are separate features.
+
+F07 remains the deliberate JMAP read-only transport contract: unsupported
+sending is rejected before acceptance and keeps the draft. GRAPH-02,
+PROVIDER-01 and SYNC-02 still require a live Graph ID-translation migration;
+GMAIL-03 and promotion-state migration require upstream engine interfaces.
+No vendored engine changes were made in this pass. Live provider delivery,
+production rollout and exhaustive browser crash/quota matrices are external
+acceptance gates, not claims from synthetic fixtures.
+
+Product migration assertions now scope columns and indexes to current_schema;
+a foreign-schema outbox fixture verifies that unrelated tables cannot make a
+rollback or upgrade assertion fail. This complements suite database isolation.
+
+Final local verification for the 2026-10-07 tail: product PostgreSQL race run
+passed 261 top-level tests (433 including subtests), with GOMAXPROCS=2 and
+-p 1; engine PostgreSQL race run passed 246 top-level tests (310 including
+subtests), with six live-IMAP oracle tests skipped for absent live configuration.
+MCP race: 9 tests passed. Dashboard: 33 files / 316 tests, typecheck and build
+passed. Chromium selection, all 24 keybind scenarios and outbox S1–S7 passed.
+All three Go modules passed vet/build. These local receipts supersede the
+historical PostgreSQL-pending labels; live provider and deployment gates remain.
+
+## Product review round 3 (2026-10-07) — exact Undo, CID lifecycle, public push, product promotion hooks
+
+Round 2 (lullmail-review-r2.md, aggregate patch cab452637a4453e0c94857f79079965738f9e10de9253b2673280d2476273771)
+requested changes on three product items and separated upstream work from
+product work. This round completes the product half in the working tree. The
+tree was verified against that seal first: every one of the 36 candidate
+paths matched byte-for-byte before this round's edits, and the vendored
+mail-engine still has a zero-line diff.
+
+R2-03 exact Undo — IMPLEMENTED (supersedes the tuple-equality closure wording
+in the DATA-04/DATA-12 pass-7 entry above). Thread actions now capture a
+durable, owner/account/message/thread/action-bound receipt (migration v9:
+message_action_undo plus a mutation_revision sequence and BEFORE UPDATE
+trigger on hey_messages bucket/read_at/set_aside_until). Restore accepts only
+the action's 64-hex undo_token — client-supplied restore arrays are refused
+with 422 — and consumes the authority in the same transaction that verifies
+every message's revision against the snapshot's postimage. Revisions are
+monotonic across all SQL writers, so an intentional same-value write still
+advances authority: the A→B→C→B stale undo, consumed-token reuse, one
+conflicting row (zero rows restored, authority retained), forged snapshots,
+unclassified arrivals, thread/action mismatch, expiry and the 2000/2001 plus
+snapshot-byte boundaries are all covered by real-PostgreSQL regressions
+(message_undo_pg_test.go). The dashboard carries and presents only the token
+(reader-snooze, BoardView, actions and keybind tests updated to the receipt
+contract; a server that returns no authority is declined visibly, never
+reconstructed client-side).
+
+R2-04 CID lifecycle/bounds — IMPLEMENTED for inline raster references.
+Body.tsx collects only CIDs the sanitized HTML actually references (exact
+case-sensitive normalization; malformed percent-escapes and unmatched
+brackets refused), selects the first eligible MIME part per CID deterministically,
+tracks every allocated blob URL independently, revokes overwritten and
+discarded URLs immediately and on teardown, and stops issuing further
+requests once the 20 MiB aggregate or 10 MiB per-image budget is exhausted
+(streaming may overshoot by the just-delivered chunk; that practical bound is
+documented in code). Tests cover duplicate IDs, unreferenced parts, lying
+metadata at cap−1/cap/cap+1, aggregate exhaustion stopping the next fetch,
+abort/owner-change cancelling before publication, and navigation reclaiming
+every allocation.
+
+R2-05 public push-address policy — IMPLEMENTED. push_egress.go now rejects
+0.0.0.0/8 (including nonzero 0/8 hosts), 6to4 2002::/16 and Teredo 2001::/32
+alongside the prior special-use set, keeps HTTPS/443, no userinfo/fragment,
+no redirects, no environment proxies, and pins dial to the validated
+addresses. The DNS validation and checked-IP dial paths are exercised through
+injected lookup/dial seams: mixed public/private answers in either order
+refuse before dialing, redirects are refused, and rejected URLs never reach
+DNS or dial.
+
+Graph identity promotion, product half — IMPLEMENTED AS PRODUCT HOOKS, ENGINE
+CONTRACT PENDING (supersedes any impression that R2-01/R2-02 closed).
+identity.go carries admitIdentityWrite (owner/account fence inside the
+caller's transaction), remapProductIdentity (hey_messages, push_deliveries,
+message_action_undo rows plus canonical re-sort of undo snapshots, refusing
+thread-identity changes), graphReferenceInventory (every retained reference
+including undo snapshot members and sealed outbox ReplyParent/request
+payloads; non-Graph namespaces refuse), and bindGraphMailbox (verified-key
+binding that refuses closed until the upstream verification contract exists).
+New Graph connections capture the /me immutable id at OAuth time (redirect
+hardened, id-less providers refused; migration v10 stores graph_mailbox_key).
+These hooks run on an explicit product-owned transaction interface satisfied
+by *sql.Tx today; the previous session had drafted them against engine APIs
+(mail.OpenWithGraphIdentityPolicy, dialer.Policy, store.ResolveIdentity/
+GraphIdentityFormat/MigrateGraphIdentity, graph.WithIdentityPreference) that
+do not exist in the vendored engine. Those phantom-contract call sites were
+removed — including the outbox GraphIdentityFormat gate and the alias-
+resolving adapter/HTTP plumbing — because the vendored engine is never
+edited in this repo and Neutron is outside this lane. Real-PostgreSQL
+regressions (identity_pg_test.go) drive the hooks through one transaction in
+the engine's replacement-before-retirement shape: all product references move
+with the replacement envelope, a refused thread change rolls back mirror and
+product state together, remapped undo receipts still restore their exact
+preimage, and the inventory/binding refusals hold. Atomic promotion itself
+(R2-02), bounded translateExchangeIds with per-account format state (R2-01)
+and JMAP advertised-origin enforcement (R2-06) remain upstream-first work:
+implement in Neutron, re-vendor under mail-engine/VENDOR.md, then wire the
+hooks in mail.go. R2-07 (constraint OID scoping), R2-08 (gray-matter chain)
+and R2-09 (attachment tri-state; the dashboard renders an honest unknown chip
+once the server can send it — the engine column does not exist yet) also
+remain upstream. R2-10's product half landed: outbox admission renders through
+the production renderer and refuses unsplittable headers with 422 before any
+durable row exists.
+
+Fail-before evidence for this round, run against the preserved r2 candidate
+tree: the push predicate accepted 0.1.2.3, ::ffff:0.1.2.3, 2002::1 and
+2001::1; the ABA sequence (imbox→feed, then later→feed, then the stale
+restore array) silently overwrote the later deliberate Feed choice; and the
+reader leaked the overwritten duplicate-CID blob (three allocations, two
+revocations) while also fetching an unreferenced part. All three now fail
+their r3 regressions and pass on this tree.
+
+Validation (this round, GOMAXPROCS=2, -p 1, count=1): product
+LULL_TEST_DATABASE_URL PostgreSQL race run passed all tests including the
+new undo/identity regressions; engine NEUTRON_MAIL_TEST_DATABASE_URL race
+run passed all six modules with the six live-IMAP oracles still skipped for
+absent live configuration; MCP race passed 9/9; go vet/build clean for all
+three modules; dashboard 33 files / 325 tests passed three consecutive runs,
+typecheck and the 16-page static build passed; Chromium selection passed,
+all 24 keybind scenarios and 23 help rows passed with the receipt-based
+undo expectations, and outbox S1–S7 including S5b/S5c passed (one S5b
+sign-in-gate click timed out under a concurrently loaded host and passed
+cleanly on the two following runs; the failed receipt is retained, not
+counted). No commits, pushes or engine edits; live provider, deployment and
+upstream-engine gates remain external.

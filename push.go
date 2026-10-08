@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 )
@@ -35,7 +34,7 @@ func endpointHash(endpoint string) string {
 	return hex.EncodeToString(sum[:])
 }
 func (a *App) pushConfigured() bool {
-	return a.cfg.VAPIDPublic != "" && a.cfg.VAPIDPrivate != "" && a.cfg.VAPIDSubject != ""
+	return a.config().VAPIDPublic != "" && a.config().VAPIDPrivate != "" && a.config().VAPIDSubject != ""
 }
 
 func (a *App) handlePush(w http.ResponseWriter, r *http.Request) {
@@ -52,7 +51,7 @@ func (a *App) handlePush(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, http.StatusServiceUnavailable, "Status Unavailable", "notification status could not be checked — try again shortly")
 			return
 		}
-		writeJSON(w, map[string]any{"configured": a.pushConfigured(), "subscribed": count > 0, "public_key": a.cfg.VAPIDPublic})
+		writeJSON(w, map[string]any{"configured": a.pushConfigured(), "subscribed": count > 0, "public_key": a.config().VAPIDPublic})
 	case http.MethodPost:
 		if !a.pushConfigured() {
 			writeProblem(w, 503, "Push Not Configured", "set VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, and VAPID_SUBJECT")
@@ -64,11 +63,11 @@ func (a *App) handlePush(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var subscription webpush.Subscription
-		if json.Unmarshal(body, &subscription) != nil || subscription.Endpoint == "" || subscription.Keys.Auth == "" || subscription.Keys.P256dh == "" {
+		if json.Unmarshal(body, &subscription) != nil || !publicPushEndpoint(subscription.Endpoint) || subscription.Keys.Auth == "" || subscription.Keys.P256dh == "" {
 			writeProblem(w, 422, "Bad Subscription", "endpoint and browser keys are required")
 			return
 		}
-		sealed, err := sealSecret(a.cfg, string(body))
+		sealed, err := sealSecret(a.config(), string(body))
 		if err != nil {
 			writeProblem(w, 500, "Push Failed", err.Error())
 			return
@@ -116,7 +115,7 @@ func (a *App) sendPushForUser(ctx context.Context, uid string) {
 		if rows.Scan(&sealed) != nil {
 			continue
 		}
-		plain, err := openSecret(a.cfg, sealed)
+		plain, err := openSecret(a.config(), sealed)
 		if err != nil {
 			continue
 		}
@@ -149,7 +148,12 @@ func (a *App) sendPushForUser(ctx context.Context, uid string) {
 		return
 	}
 	payload, _ := json.Marshal(map[string]string{"title": "New mail needs you", "body": "Open Lull Mail to read it.", "path": "/today", "thread": threadID, "account": accountID})
+	client := a.pushHTTPClient()
+	defer client.CloseIdleConnections()
 	for _, item := range subs {
+		if !publicPushEndpoint(item.sub.Endpoint) {
+			continue
+		}
 		// Claim the delivery before submitting: the background loop and a
 		// manual classify can dispatch concurrently, and both would
 		// otherwise select this message and double-notify. The claim is a
@@ -171,7 +175,7 @@ func (a *App) sendPushForUser(ctx context.Context, uid string) {
 				WHERE user_id=$1 AND account_id=$2 AND message_id=$3 AND subscription_hash=$4 AND delivered_at IS NULL`,
 				uid, accountID, messageID, item.hash)
 		}
-		response, err := webpush.SendNotificationWithContext(ctx, payload, &item.sub, &webpush.Options{HTTPClient: &http.Client{Timeout: 15 * time.Second}, Subscriber: a.cfg.VAPIDSubject, VAPIDPublicKey: a.cfg.VAPIDPublic, VAPIDPrivateKey: a.cfg.VAPIDPrivate, TTL: 3600, Topic: "new-mail", Urgency: webpush.UrgencyNormal})
+		response, err := webpush.SendNotificationWithContext(ctx, payload, &item.sub, &webpush.Options{HTTPClient: client, Subscriber: a.config().VAPIDSubject, VAPIDPublicKey: a.config().VAPIDPublic, VAPIDPrivateKey: a.config().VAPIDPrivate, TTL: 3600, Topic: "new-mail", Urgency: webpush.UrgencyNormal})
 		if err != nil {
 			releaseClaim()
 			continue

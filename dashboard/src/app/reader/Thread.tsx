@@ -1,7 +1,7 @@
 import { useState } from "preact/hooks";
 import { download } from "../lib/api";
 import { closeReader, openCompose, reader, readerRow, showError } from "../lib/store";
-import { BUCKET_LABEL, markDone, markRead, moveTo, openThread, pinThreads, snooze } from "../lib/actions";
+import { BUCKET_LABEL, loadMessageBody, loadOlderMessages, markDone, markRead, moveTo, pinThreads, snooze } from "../lib/actions";
 import type { Bucket, ListBucket, Message, Row } from "../lib/types";
 import { countOf, fmtFull, splitFrom } from "../lib/fmt";
 import { Avatar } from "../ui/bits";
@@ -13,7 +13,13 @@ import { Attachments } from "./Attachments";
 /** One message. A body that is missing or failed offers its own reload —
     a plain "sync in progress" label promised progress that was not
     happening (audit 4 F19). */
-function ThreadMessage({ message, onRetry }: { message: Message; onRetry: () => void }) {
+function ThreadMessage({ message }: { message: Message }) {
+  const [loadingBody, setLoadingBody] = useState(false);
+  const onRetry = async () => {
+    if (loadingBody) return;
+    setLoadingBody(true);
+    try { await loadMessageBody(message); } catch (e) { showError(e instanceof Error ? e.message : "Could not load message"); } finally { setLoadingBody(false); }
+  };
   const who = splitFrom(message.from);
   const [exporting, setExporting] = useState(false);
   return (
@@ -50,7 +56,7 @@ function ThreadMessage({ message, onRetry }: { message: Message; onRetry: () => 
       <div class="thread-msg-body">
         <MessageBody
           html={message.html} text={message.body} messageId={message.id} sender={who.email}
-          bodyStatus={message.body_status} onRetry={onRetry}
+          bodyStatus={message.body_status} onRetry={onRetry} account={message.account} inlineParts={message.inline_parts}
         />
         <Attachments account={message.account} messageId={message.id} items={message.attachments || []} />
       </div>
@@ -159,11 +165,6 @@ export function Thread({ backTo, variant = "page" }: { backTo: string; variant?:
   const last = messages[messages.length - 1];
   const row = readerRow(messages, state.threadId, state.bucket);
   const people = new Set(messages.map((m) => splitFrom(m.from).email));
-  // Refetch the open thread (bypassing the in-memory cache) so a missing or
-  // failed body gets another eager-fetch pass (audit 4 F19).
-  const retryBody = () => {
-    if (state.threadId && state.account) openThread(state.threadId, state.account, state.bucket);
-  };
 
   return (
     <>
@@ -174,7 +175,8 @@ export function Thread({ backTo, variant = "page" }: { backTo: string; variant?:
           {countOf(messages.length, "message")}
           {people.size > 1 && " · " + countOf(people.size, "person", "people")}
         </div>
-        {messages.map((m) => <ThreadMessage message={m} key={m.id} onRetry={retryBody} />)}
+        {state.nextCursor && <button class="btn btn-outline" disabled={state.loadingOlder} onClick={loadOlderMessages}>{state.loadingOlder ? "Loading…" : "Load older messages"}</button>}
+        {messages.map((m) => <ThreadMessage message={m} key={m.account + "\0" + m.id} />)}
       </div>
       {row && <Bar row={row} />}
     </>
