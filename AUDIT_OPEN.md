@@ -5,20 +5,20 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
 - Passes 1-5 (2026-09-09 through 2026-09-11): every P0/P1 fixed; the P2
   tail was 12-of-13 fixed in commits `83e0dee`..`025a979`, each tagged
   `audit lullmail-NN`.
-- Pass 6 (2026-09-17, `AUDIT-CHATGPT-2.md`, 63 findings): 37 findings
+- Pass 6 (2026-09-17, `docs/audits/AUDIT-CHATGPT-2.md`, 63 findings): 37 findings
   fixed across commits `4948829`..`6252e15` (each message carries the
   report's IDs); 24 findings deferred below against recorded decisions;
   2 findings partially fixed with a remainder deferred. No finding was
   assessed as a false positive — every spot-checked finding reproduced
   against the pinned source.
-- Pass 7 (2026-09-17, `AUDIT-CHATGPT-3.md`, 50 findings pinned at `f172169`): 30 findings fixed (19 fully, 11 partially with the
+- Pass 7 (2026-09-17, `docs/audits/AUDIT-CHATGPT-3.md`, 50 findings pinned at `f172169`): 30 findings fixed (19 fully, 11 partially with the
   remainder explicitly deferred below) across commits `ec8563d`..`4aef9e2`
   (each message tagged `audit 3-<ID>`); 20 findings deferred against
   standing or newly recorded decisions. No finding was assessed as a
   false positive; several supplied materially new information that
   narrowed or split an existing deferral (noted per entry).
 - Round 3 / third pass of the fix series (2026-09-17,
-  `AUDIT-CHATGPT-4.md`, 23 new findings F01-F23 plus 26 carried-forward
+  `docs/audits/AUDIT-CHATGPT-4.md`, 23 new findings F01-F23 plus 26 carried-forward
   risk items R01-R26, pinned at `52fe475`): 17 findings fixed fully and 6
   partially (each remainder explicitly deferred below) across commits
   `e0d58a9`..`9fba00c` (each message tagged `audit 4-<ID>`); the
@@ -66,7 +66,7 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   re-authentication ceremony and AUTH-06 (pass 7) as the durable per-user
   TOTP budget (`b9c1027` server, `b889d95` dashboard) — all three leave
   this register.
-- Round 6 / audit 6 (2026-10-04, `AUDIT-CHATGPT-6.md`, 14 findings pinned
+- Round 6 / audit 6 (2026-10-04, `docs/audits/AUDIT-CHATGPT-6.md`, 14 findings pinned
   at `c0a5f70`): 5 findings fixed — F01 request-init TDZ guard (with typed
   fetch-mock regression tests), F08 offline send logic, F11 oversize Graph
   upload sessions (terminal pre-send failure, draft cleanup, no bearer on
@@ -82,7 +82,7 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   as a false positive; every spot-checked finding reproduced against the
   pinned source.
 
-- Round 5 / audit 5 (2026-09-19, `AUDIT-CHATGPT-5.md`, 42 findings — 20
+- Round 5 / audit 5 (2026-09-19, `docs/audits/AUDIT-CHATGPT-5.md`, 42 findings — 20
   High, 19 Medium, 3 Low — pinned at `39e2518`, the first audit of the
   offline-v2/lifecycle/re-auth/IMAP-threading surface): 34 findings fixed
   across commits `806ace7`..`f4c44b8` (each message tagged `audit 5-<ID>`);
@@ -93,7 +93,7 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   JMAP enumeration hole, the destructive rescan retry, and the owner-delete
   busy-connection failure all reproduced exactly as reported.
 
-- Round 7 / audit 7 (2026-10-04, `AUDIT-CHATGPT-7.md`, follow-up review of
+- Round 7 / audit 7 (2026-10-04, `docs/audits/AUDIT-CHATGPT-7.md`, follow-up review of
   the audit-6 delta at `02b1c8a`): 2 findings, both High, both confirmed
   and fixed — AUDIT7-F01 Graph oversize upload PUT followed redirects with
   no origin pin (now `validateGraphUploadURL` https + `outlook.office.com`
@@ -108,7 +108,7 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   failure stays ambiguous). Register read first; standing deferrals
   untouched. Race suites, dashboard 268 tests, typecheck + build green.
 
-- Round 8 / audit 8 (2026-10-04, `AUDIT-CHATGPT-8.md`, follow-up review of
+- Round 8 / audit 8 (2026-10-04, `docs/audits/AUDIT-CHATGPT-8.md`, follow-up review of
   the audit-7 delta at `7cbe476`): 4 findings, all confirmed and fixed —
   F01 non-final 2xx upload chunks advanced offset without a matching
   `nextExpectedRanges` continuation (now exactly-one-range match required;

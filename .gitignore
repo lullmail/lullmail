@@ -26,4 +26,3 @@ go.work
 data/
 
 # --- GPT-web audit working dir ---
-/_gpt-audit/

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Open audit items, deferred findings and their reasons live in `AUDIT_OPEN.md` at the repo root (2026-09-09→12 audit sweep). Read it before treating related work as done; update it when you close, defer, or upstream-report an item.
+Open audit items, deferred findings and their reasons live in `AUDIT_OPEN.md` at the repo root (2026-09-09→12 audit sweep). Read it before treating related work as done; update it when you close, defer, or upstream-report an item. The frozen round reports live under `docs/audits/` — cite a report and finding ID in the commit that closes it.
 
 This repository is **public** and mirrored to GitHub at https://github.com/lullmail/lullmail.
 Product site: https://lullmail.com. Every commit is publicly visible — treat all work as public-facing.
