@@ -399,6 +399,30 @@ describe("selection reconciliation", () => {
   });
 });
 
+describe("attachment indicator (tri-state)", () => {
+  // The wire field is the honest string tri-state: only "present" is a
+  // badge-worthy claim. "unknown" (a metadata envelope that could not see
+  // the part tree) renders NOTHING — same visual as absent, because an
+  // honest no-claim and a claim of absence differ in the data, not the
+  // pixels.
+  const stateRows: Row[] = ["present", "unknown", "absent"].map((state, n) => ({
+    account: "account", message_id: String(n), thread_id: "thread-attach-" + n,
+    from: "sender@example.test", subject: "Attachment " + state,
+    received_at: "2026-09-29T12:00:00Z", preview: "Preview", read: true,
+    attachment_state: state,
+  } as Row));
+
+  it("renders the clip only on present; unknown stays blank like absent", () => {
+    publish(stateRows, "attachment");
+    expect(row(0).querySelector('.chip[title="Has attachments"]')).not.toBeNull();
+    for (const n of [1, 2]) {
+      expect(row(n).querySelector(".row-meta .chip")).toBeNull();
+    }
+    // Not even an "unchecked" placeholder: unknown is silence, not a question.
+    expect(row(1).querySelector('[aria-label="Attachments not yet checked"]')).toBeNull();
+  });
+});
+
 describe("reply follows the highlighted row", () => {
   const open = (threadId: string, account = "account") => {
     reader.value = { ...reader.value, threadId, account, messages: [

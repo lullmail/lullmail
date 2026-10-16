@@ -75,6 +75,24 @@ describe("logout wipe (audit WEB-07, ratified semantics)", () => {
   });
 });
 
+describe("attachment tri-state survives the response cache (GMAIL-03)", () => {
+  it("round-trips unknown/absent/present rows without flattening to a boolean", async () => {
+    await prepareOfflineOwner({ installation_id: "inst1", user_id: "u1", email: "a@example.com" });
+    const rows = [
+      { message_id: "m-present", attachment_state: "present" },
+      { message_id: "m-absent", attachment_state: "absent" },
+      { message_id: "m-unknown", attachment_state: "unknown" },
+    ];
+    await cacheResponse("/buckets/imbox", { rows, has_more: false });
+    const cached = await cachedResponse<{ rows: typeof rows }>("/buckets/imbox");
+    // A cached "unknown" must come back "unknown": the offline snapshot
+    // is what a revisited list renders from, and flattening it to false
+    // would resurrect the lie the tri-state exists to remove.
+    expect(cached?.rows.map((row) => row.attachment_state)).toEqual(["present", "absent", "unknown"]);
+    expect(cached?.rows.every((row) => !("has_attachment" in row))).toBe(true);
+  });
+});
+
 describe("single-record drafts (audit F05)", () => {
   it("merges field edits into one record without clobbering its attachments", async () => {
     await prepareOfflineOwner({ installation_id: "inst1", user_id: "u1", email: "a@example.com" });

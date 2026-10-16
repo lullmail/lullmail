@@ -17,8 +17,11 @@ export interface Row {
   from: string;
   received_at: string;
   read: boolean;
-  has_attachment?: boolean;
-  attachment_presence?: "unknown" | "present" | "absent";
+  /** Honest tri-state off the wire (GMAIL-03): "present" is the only
+      badge-worthy claim; "unknown" means the fetch that produced the
+      envelope could not see the part tree — it is never a claim of
+      absence, and renders nothing. */
+  attachment_state?: "unknown" | "absent" | "present";
   preview: string;
   bucket?: string;
   thread_len?: number;

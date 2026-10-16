@@ -372,7 +372,9 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 	like := likeContains(q)
 	query := `
 		SELECT m.account_id, m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at,
-		       h.read_at IS NOT NULL AS is_read, m.has_attachment, COALESCE(m.preview,''),
+		       h.read_at IS NOT NULL AS is_read,
+		       CASE m.attachment_state WHEN 2 THEN 'present' WHEN 1 THEN 'absent' ELSE 'unknown' END AS attachment_state,
+		       COALESCE(m.preview,''),
 		       COALESCE(h.bucket,''),
 		       (SELECT count(*) FROM mail_messages t
 	          WHERE t.account_id = m.account_id AND t.thread_id = m.thread_id) AS thread_len
@@ -404,7 +406,7 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 		From       string `json:"from"`
 		ReceivedAt string `json:"received_at"`
 		Read       bool   `json:"read"`
-		Attachment bool   `json:"has_attachment"`
+		Attachment string `json:"attachment_state"`
 		Preview    string `json:"preview"`
 		Bucket     string `json:"bucket"`
 		ThreadLen  int    `json:"thread_len"`
@@ -708,7 +710,9 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 	}
 	query := `
 		SELECT m.account_id, m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at,
-		       h.read_at IS NOT NULL AS is_read, m.has_attachment, COALESCE(m.preview,''), h.bucket,
+		       h.read_at IS NOT NULL AS is_read,
+		       CASE m.attachment_state WHEN 2 THEN 'present' WHEN 1 THEN 'absent' ELSE 'unknown' END AS attachment_state,
+		       COALESCE(m.preview,''), h.bucket,
 		       h.set_aside_until,
 		       (SELECT count(*) FROM mail_messages t
 	          WHERE t.account_id = m.account_id AND t.thread_id = m.thread_id) AS thread_len
@@ -752,7 +756,7 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 		From        string `json:"from"`
 		ReceivedAt  string `json:"received_at"`
 		Read        bool   `json:"read"`
-		Attachment  bool   `json:"has_attachment"`
+		Attachment  string `json:"attachment_state"`
 		Preview     string `json:"preview"`
 		Bucket      string `json:"bucket"`
 		ThreadLen   int    `json:"thread_len"`

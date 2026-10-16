@@ -641,7 +641,10 @@ func mirrorEML(envelope *nmail.Envelope, body *nmail.Body, rawErr error) []byte 
 		textBody = envelope.Preview
 		fmt.Fprint(&out, "X-Lullmail-Body-Source: envelope-preview\r\n")
 	}
-	if envelope.HasAttachment {
+	// Only a Present claim is worth the warning. Unknown (metadata-only
+	// fetch) and Absent make no claim about attachment bytes, so the
+	// fallback render omits nothing it ever promised.
+	if envelope.Attachment == nmail.AttachmentPresent {
 		fmt.Fprint(&out, "X-Lullmail-Attachment-Warning: attachment bytes require the provider original and are omitted from this fallback\r\n")
 	}
 

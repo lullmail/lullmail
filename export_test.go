@@ -98,7 +98,7 @@ func TestMirrorEMLIsParseableAndHonestAboutFallback(t *testing.T) {
 		Subject:         "A useful subject",
 		SentAt:          time.Date(2026, time.August, 25, 10, 0, 0, 0, time.UTC),
 		MessageIDHeader: "<real@example.com>",
-		HasAttachment:   true,
+		Attachment:      nmail.AttachmentFromBool(true),
 	}
 	body := &nmail.Body{Text: "hello", HTML: "<p>hello</p>"}
 	raw := mirrorEML(envelope, body, io.ErrUnexpectedEOF)
@@ -117,6 +117,37 @@ func TestMirrorEMLIsParseableAndHonestAboutFallback(t *testing.T) {
 	}
 	if !strings.HasPrefix(parsed.Header.Get("Content-Type"), "multipart/alternative") {
 		t.Fatalf("content-type = %q", parsed.Header.Get("Content-Type"))
+	}
+}
+
+// The attachment warning is a claim about omitted bytes, so only Present
+// earns it. Unknown (GMAIL-03: a metadata envelope cannot see the part
+// tree) and Absent promise nothing the fallback render would drop, and
+// must stay silent rather than inherit the old boolean's FALSE-means-no
+// / TRUE-means-yes collapse.
+func TestMirrorEMLAttachmentWarningOnlyOnPresent(t *testing.T) {
+	render := func(id string, state nmail.AttachmentState) *stdmail.Message {
+		t.Helper()
+		envelope := &nmail.Envelope{
+			ID: nmail.MessageID(id), Subject: "tri-state",
+			SentAt:     time.Date(2026, time.October, 16, 9, 0, 0, 0, time.UTC),
+			Attachment: state,
+		}
+		raw := mirrorEML(envelope, &nmail.Body{Text: "hello"}, io.ErrUnexpectedEOF)
+		parsed, err := stdmail.ReadMessage(bytes.NewReader(raw))
+		if err != nil {
+			t.Fatalf("fallback is not valid RFC 5322: %v\n%s", err, raw)
+		}
+		return parsed
+	}
+	if got := render("h:unknown", nmail.AttachmentUnknown).Header.Get("X-Lullmail-Attachment-Warning"); got != "" {
+		t.Fatalf("unknown state claimed attachment loss: %q", got)
+	}
+	if got := render("h:absent", nmail.AttachmentAbsent).Header.Get("X-Lullmail-Attachment-Warning"); got != "" {
+		t.Fatalf("absent state claimed attachment loss: %q", got)
+	}
+	if got := render("h:present", nmail.AttachmentPresent).Header.Get("X-Lullmail-Attachment-Warning"); got == "" {
+		t.Fatal("present state did not disclose attachment loss")
 	}
 }
 
