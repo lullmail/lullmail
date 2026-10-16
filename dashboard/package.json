@@ -16,8 +16,8 @@
     "e2e:preview": "node e2e/preview.mjs"
   },
   "dependencies": {
-    "@neutron-build/cli": "^0.2.3",
-    "@neutron-build/core": "^0.2.2",
+    "@neutron-build/cli": "^0.3.2",
+    "@neutron-build/core": "^0.3.2",
     "@neutron-build/mail": "^0.1.0",
     "@preact/signals": "^2.11.1",
     "parse5": "^8.0.1",
@@ -30,7 +30,7 @@
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^30.0.1",
     "typescript": "^5.9.3",
-    "vite": "^6.0.7",
+    "vite": "^8.3.2",
     "vitest": "^4.1.11"
   }
 }
