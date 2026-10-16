@@ -178,9 +178,14 @@ decision — no orphan window, no fabricated history). The
 `graphIdentityTranslator` refuse-gate stays until the translator exists
 upstream (Lane 4).
 
-**Phase 4 — per-account ImmutableId migration.** Machinery lane
-(translator + Prefer opt-in, built-not-enabled) in flight upstream; the
-migration runner and any flip stay gated on the live-validation results
+**Phase 4 — per-account ImmutableId migration.** Machinery ✅ landed
+2026-10-16 (Neutron `04b6350d`, re-vendored `c3326be`):
+`Adapter.GraphMailboxKey` (the bindGraphMailbox gate lifts by
+construction — binding now verifies for real), `Adapter.TranslateExchangeIds`
+(batched at Microsoft's 1000-id ceiling, every id returns or the call
+fails), and the `PreferImmutableIds` opt-in — off everywhere, with a
+test pinning the zero value's wire bytes. The migration runner and any
+flip stay gated on the live-validation results
 (`docs/graph-live-validation.md`) by design — Probe 1 sizes the loss
 mechanism and Probe 4 confirms or kills the premise.
 

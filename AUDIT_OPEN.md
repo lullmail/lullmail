@@ -186,9 +186,12 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   unit per the recorded decision). Every lane's fail-before/pass-after
   regressions verified, full PG suites + race green at each gate, and
   each diff orchestrator-reviewed before commit. Phase 4 machinery
-  (Graph translator + Prefer opt-in, built-not-enabled) in flight
-  upstream; the migration runner and any flip remain gated on the
-  live-validation results by design. The destroy path now carries
+  landed (Neutron 04b6350d, re-vendored c3326be — GraphMailboxKey,
+  batched TranslateExchangeIds, PreferImmutableIds opt-in off
+  everywhere with its zero value pinned by test; bindGraphMailbox's
+  refuse-gate lifted by construction and its regression rewritten as
+  the positive binding suite); the migration runner and any flip
+  remain gated on the live-validation results by design. The destroy path now carries
   product reference deletion atomically instead of orphaning to the
   cleanup sweep — the one user-visible behavior change, regression-
   proven both directions.
