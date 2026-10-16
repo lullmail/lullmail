@@ -132,6 +132,8 @@ never put subject/sender content on the lock screen.
 
 ## Develop
 
+Repo organization and house rules: [`CONVENTIONS.md`](CONVENTIONS.md).
+
 ```
 go build ./... && go test ./... && go vet ./...
 cd dashboard && npm ci && npm test && npm run typecheck && npm run build
