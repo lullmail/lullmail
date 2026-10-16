@@ -136,14 +136,18 @@ green with its own fail-before/pass-after regressions. Estimates are
 focused-days including review cycles across the two repositories.
 
 **Phase 0 — this document and the register corrections** (2026-10-16).
-Done in the commit that adds it.
+Done in the commit that adds it. Phase 0.5 landed with it; Phases 1-4 are
+gated on the decision above — the machinery's value is proportional to real
+Graph usage, and Graph has never run against a live account (the standing
+live-provider validation item), so executing them before that gate is
+premature optimization.
 
-**Phase 0.5 — cheap lock-order fix.** Reorder `bindGraphMailbox`
-advisory-first (or document it as a non-mirror exception with the
-`deleteAccount` edge noted). Dead code today, so the change is safe; add
-the lock-order regression as a direct interleaving test (two connections,
-one taking advisory→rows, one rows→advisory, proving one aborts today /
-neither aborts after). ~0.5 day.
+**Phase 0.5 — cheap lock-order fix.** ✅ Landed 2026-10-16: `bindGraphMailbox`
+reordered advisory-first; the cycle is proven by a direct-interleaving
+regression (`TestIntegrationLockOrderRowLockBeforeAdvisoryDeadlocks`
+reproduces the old order on two connections and observes the 40P01 abort;
+`TestIntegrationLockOrderAdvisoryFirstCompletes` proves the new order
+completes under the same pressure).
 
 **Phase 1 — neutral seam + product-side migration harness + alias table.**
 Reshape `identityTx` to engine-neutral row types; extract the

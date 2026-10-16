@@ -268,7 +268,11 @@ func (a *App) graphReferenceInventory(ctx context.Context, tx identityTx, acct m
 // expected is an operator-verified /me ID, never an email-derived key. A fresh
 // authentication/binding mismatch refuses; migration still verifies /me around
 // every translation batch once the upstream contract exists. No mirror state
-// changes in this binding transaction.
+// changes in this binding transaction. The account advisory lock is the FIRST
+// statement: this transaction also takes owner row locks (users, then
+// email_accounts), and every mirror-writing transaction takes the advisory
+// lock first — any other order here closes a lock cycle with account deletion
+// (docs/identity-stability.md §4).
 func (a *App) bindGraphMailbox(ctx context.Context, uid string, acct mail.AccountID, expected string) error {
 	if expected == "" {
 		return fmt.Errorf("verified Graph mailbox key required")
@@ -305,6 +309,9 @@ func (a *App) bindGraphMailbox(ctx context.Context, uid string, acct mail.Accoun
 		return err
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, mail.AccountLockKey(acct)); err != nil {
+		return err
+	}
 	if _, err := lockAuthUser(ctx, tx, uid); err != nil {
 		return err
 	}
@@ -314,9 +321,6 @@ func (a *App) bindGraphMailbox(ctx context.Context, uid string, acct mail.Accoun
 	}
 	if seal != originalSeal || (existing != "" && existing != actual) {
 		return fmt.Errorf("Graph account binding changed during verification")
-	}
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, mail.AccountLockKey(acct)); err != nil {
-		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE email_accounts SET graph_mailbox_key=$3 WHERE user_id=$1 AND mirror_account_id=$2`, uid, string(acct), actual); err != nil {
 		return err
