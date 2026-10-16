@@ -216,4 +216,7 @@ Total: ~5-9 focused days.
    (doc-level, `AUDIT-CHATGPT-5.md:908`).
 
 All four are gated behind the standing live-provider validation item
-(Gmail/Graph have never run against real accounts in this product).
+(Gmail/Graph have never run against real accounts in this product). The
+consumer-account checklist that settles them empirically is
+`docs/graph-live-validation.md` — each probe maps to a plan decision
+(Probe 4 alone can confirm or kill Phase 4's premise).

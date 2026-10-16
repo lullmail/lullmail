@@ -160,7 +160,12 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   churn), estimates (~5-9 focused days) and residual live-provider
   uncertainties are scaffolded in `docs/identity-stability.md`; the
   SYNC-03 and SYNC-04 entries above were rewritten to match. No product
-  code changed in this pass.
+  code changed in this pass. Phase 0.5 (bindGraphMailbox lock order) landed
+  the same day with deadlock regressions proving both directions
+  (`6303f3d`). Phases 1-4 stay gated on live validation: a consumer
+  Outlook account can run it — the checklist that settles the four
+  residual uncertainties (and with them the phase decisions) is
+  `docs/graph-live-validation.md`.
 
 ## SEND-CONFIRM-01 - FIXED (owner decision recorded 2026-10-07)
 
