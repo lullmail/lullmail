@@ -621,12 +621,13 @@ upstream/re-vendor requirements remain separate release gates.
 - Evidence: Confirmed as conditional hardening — push registration accepts arbitrary endpoints; JMAP sends tokens to session-advertised origins. Pass 7 landed the Graph half: continuation URLs are now validated against the configured origin/path before any request (PROVIDER-02 fix), and OAuth account creation joined the owner lifecycle gate with duplicate-address rejection (the contained half of PROVIDER-03).
 - Deferral (remainder): Provider-specific HTTPS allowlists, redirect policies, and resolved-address validation for configurable hosts is a deliberate egress-policy design (and user-selected private mail servers are an intentional feature, so a blanket ban is wrong). Cross-pool account creation is atomic through `putMirrorAccountTx` (see the reconciliation above); it does not wait on the OPS-03 bridge. Deferred with the deployment-policy pass (OPS-05 above).
 
-## OPS-10 - Low - DELIBERATE KEY COMPATIBILITY AND TRUSTED AGENT POLICY
+## OPS-10 - Low - AGENT-TOKEN HALF FIXED (2026-10-16, `8367d7b`); SECRET-KEY HALF REMAINS DELIBERATE
 
 **Secret-key overrides, local privacy and agent credentials need explicit security policies**
 
 - Evidence: Hardening per the report: SECRET_KEY accepts arbitrary text, agent tokens are broad and unexpiry'd, no key rotation/versioning.
-- Deferral: Key IDs + AEAD additional data with re-encryption migration, agent-token scopes/expiry with per-token migration, and documented retention semantics are each their own security-feature tasks; the secure defaults that exist today (generated 32-byte keys, agent route denylist, auth-surface fencing) hold the line meanwhile.
+- Fixed (agent-token half): per docs/agent-tokens-contract.md (owner-approved) — four named scopes over the unchanged route denylist (mail:read/mail:send/mail:act/agent:manage; default all four, so existing trust is byte-identical), optional per-token expiry (distinct 401 title), rotation with a 10-minute dual-validity grace behind requireRecentReauth, migration v12 whose DEFAULT IS the legacy backfill (every existing es_/lull_ row full-scope forever, per the AGENTS.md pre-rename rule), deny-by-default 403 with the 40-row route x scope table pinned against the real mux, and the reserved-future status of agent:manage recorded. Fail-before regressions incl. the legacy-row migration proof; full suite + dashboard green. Contract amendment recorded: outbox cancel-within-undo is mail:send (the table governed over an errant prose line).
+- Deferral (remainder, unchanged): key IDs + AEAD additional data with a re-encryption migration for SECRET_KEY overrides remains its own security-feature task; today's secure defaults (generated 32-byte keys, the route denylist outer boundary, auth-surface fencing) hold the line.
 
 ## SEND-01 (audit 5) - High - IMPLEMENTED AND MERGED via PRs 21/22 (updated 2026-10-07; deployment not independently verified)
 
