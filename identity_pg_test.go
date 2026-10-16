@@ -3,10 +3,11 @@ package main
 // Real-PostgreSQL regressions for the product half of Graph identity
 // promotion (review R2-01/R2-02 product targets). The atomic replacement
 // transaction belongs to the engine upstream; these tests drive the
-// product-side hooks through one product transaction with the same shape the
-// engine's promotion unit of work will have: admit on the owner rows, the
-// mirror replacement writes, then remapProductIdentity — all committing
-// together or not at all.
+// product-side hooks through the production migration driver
+// (runIdentityMigration) in one product transaction with the same shape the
+// engine's promotion unit of work will have: the account advisory lock,
+// admit on the owner rows, the mirror replacement writes, then
+// remapProductIdentity — all committing together or not at all.
 
 import (
 	"context"
@@ -72,55 +73,20 @@ func graphAction(t *testing.T, p productPG, messageID, body string) (int, map[st
 	return w.Code, out
 }
 
-// promoteIdentity runs one promotion inside a single transaction with the
-// engine's replacement-before-retirement shape: the replacement envelope is
-// written first, product references remap before any retirement, and the old
-// identity retires last — all committing together or not at all.
-func promoteIdentity(t *testing.T, p productPG, old, newID, newThread string) (commit func() error, err error) {
+// promoteIdentity runs one promotion through the production migration
+// driver (runIdentityMigration) in a single transaction with the engine's
+// replacement-before-retirement shape: advisory lock, owner fence, the
+// replacement envelope written first, product references remapped before
+// any retirement, and the old identity retired last — all committing
+// together or not at all.
+func promoteIdentity(t *testing.T, p productPG, old, newID, newThread string) error {
 	t.Helper()
 	ctx := context.Background()
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if err := admitIdentityWrite(ctx, tx, "graph-acct"); err != nil {
-		_ = tx.Rollback()
-		return nil, err
-	}
-	writes := []struct {
-		query string
-		args  []any
-	}{
-		// The engine's replacement writes, inside the same transaction.
-		{`INSERT INTO mail_messages (account_id,id,thread_id,subject) SELECT account_id,$3,$4,subject FROM mail_messages WHERE account_id=$1 AND id=$2`, []any{"graph-acct", old, newID, newThread}},
-		{`INSERT INTO mail_message_mailboxes (account_id,message_id,mailbox_id) SELECT account_id,$3,mailbox_id FROM mail_message_mailboxes WHERE account_id=$1 AND message_id=$2`, []any{"graph-acct", old, newID}},
-		{`INSERT INTO mail_bodies (account_id,message_id,text_body,html_body,parts,fetched_at) SELECT account_id,$3,text_body,html_body,parts,fetched_at FROM mail_bodies WHERE account_id=$1 AND message_id=$2`, []any{"graph-acct", old, newID}},
-	}
-	for _, write := range writes {
-		if _, err := tx.ExecContext(ctx, write.query, write.args...); err != nil {
-			_ = tx.Rollback()
-			return nil, err
-		}
-	}
-	if err := remapProductIdentity(ctx, tx, "graph-acct", []IdentityPair{{OldID: old, NewID: newID}}); err != nil {
-		_ = tx.Rollback()
-		return nil, err
-	}
-	retires := []struct {
-		query string
-		args  []any
-	}{
-		{`DELETE FROM mail_message_mailboxes WHERE account_id=$1 AND message_id=$2`, []any{"graph-acct", old}},
-		{`DELETE FROM mail_bodies WHERE account_id=$1 AND message_id=$2`, []any{"graph-acct", old}},
-		{`DELETE FROM mail_messages WHERE account_id=$1 AND id=$2`, []any{"graph-acct", old}},
-	}
-	for _, retire := range retires {
-		if _, err := tx.ExecContext(ctx, retire.query, retire.args...); err != nil {
-			_ = tx.Rollback()
-			return nil, err
-		}
-	}
-	return func() error { return tx.Commit() }, nil
+	return runIdentityMigration(ctx, tx, "graph-acct", identityReplacement{OldID: old, NewID: newID, Thread: newThread})
 }
 
 func TestIntegrationIdentityRemapMovesEveryProductReferenceAtomically(t *testing.T) {
@@ -184,11 +150,7 @@ func TestIntegrationIdentityRemapMovesEveryProductReferenceAtomically(t *testing
 		t.Fatalf("inventory missed the classified message: %v", ids)
 	}
 
-	commit, err := promoteIdentity(t, p, old, newID, "thread-graph")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := commit(); err != nil {
+	if err := promoteIdentity(t, p, old, newID, "thread-graph"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -235,7 +197,7 @@ func TestIntegrationIdentityRemapRefusesThreadChangeAndRollsBackEverything(t *te
 	// The replacement identity would land on another thread: remapping
 	// would silently re-file every retained reference.
 	newID := string(mail.NativeMessageID(mail.ProviderGraph, "new-thread"))
-	_, err := promoteIdentity(t, p, old, newID, "thread-other")
+	err := promoteIdentity(t, p, old, newID, "thread-other")
 	if err == nil || !strings.Contains(err.Error(), "thread identity") {
 		t.Fatalf("thread change accepted: %v", err)
 	}

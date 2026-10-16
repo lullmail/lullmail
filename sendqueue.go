@@ -348,11 +348,26 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 	var outgoing *mail.Outgoing
 	if req.ReplyToID != "" {
 		var parentAcct, parentProvider string
-		err := a.db.QueryRowContext(r.Context(), `
+		parentLookup := func(id string) error {
+			return a.db.QueryRowContext(r.Context(), `
 	SELECT m.account_id, ea.provider FROM mail_messages m
 	JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 	WHERE m.id = $2 AND (ea.id::text = $3 OR m.account_id = $3)`,
-			uid, req.ReplyToID, req.AccountID).Scan(&parentAcct, &parentProvider)
+				uid, id, req.AccountID).Scan(&parentAcct, &parentProvider)
+		}
+		err := parentLookup(req.ReplyToID)
+		if errors.Is(err, sql.ErrNoRows) {
+			// A reply seed names its parent by the identity current at seed
+			// time — a recovered outbox draft carries one inside sealed
+			// ciphertext, which is never rewritten — so a later remap can
+			// retire the stored identity. One alias hop resolves the
+			// current one; without an alias the miss is exactly today's.
+			if aliased := a.identityAliasForUser(r.Context(), uid, req.AccountID, req.ReplyToID); aliased != "" && aliased != req.ReplyToID {
+				if err = parentLookup(aliased); err == nil {
+					req.ReplyToID = aliased
+				}
+			}
+		}
 		if err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
 				a.log.Error("reply parent lookup failed", "err", err)
@@ -615,6 +630,11 @@ func (a *App) deliveryFor(ctx context.Context, account mail.AccountID, replyPare
 		return nil, mail.Address{}, false
 	}
 	if provider == "gmail" || provider == "graph" {
+		// A sealed reply payload names its parent by the identity the mirror
+		// carried at admission; a later remap retires that identity without
+		// ever rewriting ciphertext. Resolve one alias hop when the mirror
+		// no longer holds it; no alias keeps the stored reference as-is.
+		replyParent = a.resolveReplyParent(ctx, account, replyParent)
 		deliver := func(ctx context.Context, outgoing *mail.Outgoing) error {
 			return a.sendOAuth(ctx, provider, string(account), outgoing, replyParent, replyThreadID)
 		}

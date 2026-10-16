@@ -36,6 +36,22 @@ type IdentityPair struct {
 	NewID string
 }
 
+// identityAliasStatements is the Phase 1 identity-stability machinery
+// (docs/identity-contract.md, "Alias table"): every identity remap records
+// old→new in one durable product table, which outbox delivery and reply
+// seeding consult when a stored reference names an identity a later remap
+// retired from the mirror. Sealed outbox ciphertext is never rewritten; the
+// alias IS the durable resolution.
+var identityAliasStatements = []string{
+	`CREATE TABLE message_identity_aliases (
+  account_id text NOT NULL,
+  old_id     text NOT NULL,
+  new_id     text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (account_id, old_id)
+)`,
+}
+
 // admitIdentityWrite fences a promotion on the owning user and account rows
 // inside the promotion transaction itself. No pool calls or commits here.
 func admitIdentityWrite(ctx context.Context, tx identityTx, acct mail.AccountID) error {
@@ -48,9 +64,9 @@ func admitIdentityWrite(ctx context.Context, tx identityTx, acct mail.AccountID)
 }
 
 // remapProductIdentity moves every retained product reference for the given
-// pairs. It runs inside the engine's promotion transaction: either every
-// product reference moves with the envelope or the whole promotion rolls
-// back.
+// pairs and records one durable alias per pair. It runs inside the engine's
+// promotion transaction: either every product reference moves with the
+// envelope — alias included — or the whole promotion rolls back.
 func remapProductIdentity(ctx context.Context, tx identityTx, acct mail.AccountID, pairs []IdentityPair) error {
 	for _, pair := range pairs {
 		if pair.OldID == pair.NewID {
@@ -125,15 +141,65 @@ func remapProductIdentity(ctx context.Context, tx identityTx, acct mail.AccountI
 				return err
 			}
 		}
+		// Nothing may point at a retired identity: collapse every alias
+		// that currently resolves to the old id onto the new one BEFORE
+		// recording this hop, so no chain ever forms. The upsert keeps a
+		// repeated promotion idempotent.
+		if _, err := tx.ExecContext(ctx, `UPDATE message_identity_aliases SET new_id=$3 WHERE account_id=$1 AND new_id=$2`, string(acct), pair.OldID, pair.NewID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO message_identity_aliases (account_id,old_id,new_id) VALUES ($1,$2,$3)
+			ON CONFLICT (account_id,old_id) DO UPDATE SET new_id=excluded.new_id`, string(acct), pair.OldID, pair.NewID); err != nil {
+			return err
+		}
 	}
-	// Durable upstream aliases resolve encrypted ReplyParent and old clients.
-	// Never rewrite outbox ciphertext, request hash, AAD, or thread IDs; board
+	// Durable aliases resolve the encrypted ReplyParent and old clients at
+	// the two consultation points (outbox delivery, reply seeding). Never
+	// rewrite outbox ciphertext, request hash, AAD, or thread IDs; board
 	// pins are thread-qualified and sticky notes have no message identity.
 	return nil
 }
 
 func sortMessageUndo(states []messageUndo) {
 	sort.Slice(states, func(i, j int) bool { return states[i].ID < states[j].ID })
+}
+
+// resolveReplyParent resolves a stored reply-parent identity to the identity
+// the mirror carries now — the consultation point for outbox delivery
+// (sendqueue.go deliveryFor). The mirror wins while it still holds the
+// identity; only a miss consults message_identity_aliases, and at most ONE
+// hop: remap collapses chains on write, so a second hop can only follow a
+// second remap, whose own write collapses the chain again. With no alias the
+// stored identity stands and behavior is exactly today's.
+func (a *App) resolveReplyParent(ctx context.Context, account mail.AccountID, replyParent string) string {
+	if replyParent == "" {
+		return ""
+	}
+	var resolved string
+	err := a.db.QueryRowContext(ctx, `SELECT COALESCE((SELECT id FROM mail_messages WHERE account_id=$1 AND id=$2),(SELECT new_id FROM message_identity_aliases WHERE account_id=$1 AND old_id=$2),'')`, string(account), replyParent).Scan(&resolved)
+	if err != nil || resolved == "" {
+		return replyParent
+	}
+	return resolved
+}
+
+// identityAliasForUser resolves one alias hop inside the account scope the
+// reply seed pinned — the consultation point for reply seeding (sendqueue.go
+// handleSend), where a stored seed names its parent by an identity current
+// at seed time (a recovered outbox draft carries one inside sealed
+// ciphertext, which is never rewritten) and a later remap can retire it.
+// Owner-fenced like the parent lookup it retries; empty means no alias, and
+// the miss keeps today's behavior.
+func (a *App) identityAliasForUser(ctx context.Context, uid, account, oldID string) string {
+	if oldID == "" {
+		return ""
+	}
+	var newID string
+	err := a.db.QueryRowContext(ctx, `SELECT a.new_id FROM message_identity_aliases a JOIN email_accounts ea ON ea.mirror_account_id=a.account_id WHERE ea.user_id=$1 AND (ea.id::text=$2 OR a.account_id=$2) AND a.old_id=$3`, uid, account, oldID).Scan(&newID)
+	if err != nil {
+		return ""
+	}
+	return newID
 }
 
 // graphIdentityTranslator is the product-side view of the upstream Graph
