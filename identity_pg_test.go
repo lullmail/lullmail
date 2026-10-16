@@ -243,12 +243,20 @@ func TestIntegrationIdentityRemapRefusesThreadChangeAndRollsBackEverything(t *te
 	}
 }
 
-func TestIntegrationGraphMailboxBindingRefusesWithoutVerifiedContract(t *testing.T) {
+// The upstream translator contract is vendored now (Neutron 04b6350d),
+// so binding runs the real verification shape: the substituted dial names
+// the mailbox, and only an exact match with the operator-verified key
+// binds. The empty-key refusal is pre-dial; a mismatch refuses and writes
+// nothing; a match writes the key. The production dial substitution
+// (a.syncResolver) keeps this off the network.
+func TestIntegrationGraphMailboxBindingVerifiesThroughTranslator(t *testing.T) {
 	p := newProductPG(t)
 	seedGraphAccount(t, p)
 	ctx := context.Background()
-	// A resolvable Graph OAuth credential (future expiry, no network use)
-	// so the refusal provably comes from the missing upstream contract.
+
+	const mailboxKey = "me-mailbox-id-1"
+	// A resolvable Graph OAuth credential (future expiry): Token must
+	// parse before the dial, and the substituted dial keeps it offline.
 	p.cfg.MicrosoftClientID = "client-id"
 	p.cfg.MicrosoftClientSecret = "client-secret"
 	tokenJSON := `{"access_token":"bearer","token_type":"Bearer","refresh_token":"refresh","expiry":"` + time.Now().Add(time.Hour).UTC().Format(time.RFC3339) + `"}`
@@ -259,22 +267,48 @@ func TestIntegrationGraphMailboxBindingRefusesWithoutVerifiedContract(t *testing
 	if _, err := p.db.ExecContext(ctx, `UPDATE email_accounts SET cred_ciphertext=$1 WHERE mirror_account_id='graph-acct'`, oauthSealed); err != nil {
 		t.Fatal(err)
 	}
-	// The upstream verification contract is absent from the vendored engine,
-	// so binding must refuse rather than trust an email-derived key.
+	dial := func(ctx context.Context, acct mail.AccountID, cred mail.Credential) (mail.Adapter, func(), error) {
+		ad := &fakeTranslatorAdapter{mailboxKey: mailboxKey}
+		return ad, func() {}, nil
+	}
+	p.app.dial = dial
 	if err := p.app.bindGraphMailbox(ctx, p.uid, "graph-acct", ""); err == nil {
 		t.Fatal("empty verified key accepted")
 	}
-	if err := p.app.bindGraphMailbox(ctx, p.uid, "graph-acct", "operator-verified"); err == nil ||
-		!strings.Contains(err.Error(), "translator unavailable") {
-		t.Fatalf("binding did not refuse on the missing upstream contract: %v", err)
+	if err := p.app.bindGraphMailbox(ctx, p.uid, "graph-acct", "not-the-mailbox"); err == nil ||
+		!strings.Contains(err.Error(), "does not match verified binding") {
+		t.Fatalf("mismatched key did not refuse: %v", err)
 	}
 	var key string
 	if err := p.db.QueryRowContext(ctx, `SELECT graph_mailbox_key FROM email_accounts WHERE mirror_account_id='graph-acct'`).Scan(&key); err != nil {
 		t.Fatal(err)
 	}
 	if key != "" {
-		t.Fatalf("binding wrote an unverified key: %q", key)
+		t.Fatalf("mismatch wrote a key: %q", key)
 	}
+	if err := p.app.bindGraphMailbox(ctx, p.uid, "graph-acct", mailboxKey); err != nil {
+		t.Fatalf("verified key did not bind: %v", err)
+	}
+	if err := p.db.QueryRowContext(ctx, `SELECT graph_mailbox_key FROM email_accounts WHERE mirror_account_id='graph-acct'`).Scan(&key); err != nil {
+		t.Fatal(err)
+	}
+	if key != mailboxKey {
+		t.Fatalf("binding did not persist the verified key: %q", key)
+	}
+}
+
+// fakeTranslatorAdapter is the smallest adapter satisfying the product's
+// graphIdentityTranslator expectation: GraphMailboxKey names the mailbox
+// without any network. The zero-value engine adapter has the method since
+// the 04b6350d re-vendor; the product's interface stays satisfied by
+// construction through the substituted dial.
+type fakeTranslatorAdapter struct {
+	scriptedMailAdapter
+	mailboxKey string
+}
+
+func (a *fakeTranslatorAdapter) GraphMailboxKey(ctx context.Context) (string, error) {
+	return a.mailboxKey, nil
 }
 
 // The connect-time capture is the only product-side source of a verified

@@ -437,7 +437,7 @@ func (a *App) bindGraphMailbox(ctx context.Context, uid string, acct mail.Accoun
 	if err := a.db.QueryRowContext(ctx, `SELECT cred_ciphertext FROM email_accounts WHERE user_id=$1 AND mirror_account_id=$2`, uid, string(acct)).Scan(&originalSeal); err != nil {
 		return err
 	}
-	ad, release, err := newResolver()(ctx, acct, cred)
+	ad, release, err := a.syncResolver()(ctx, acct, cred)
 	if err != nil {
 		return err
 	}

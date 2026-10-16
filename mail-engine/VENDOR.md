@@ -5,7 +5,7 @@ Upstream: `~/Documents/Code Projects/Neutron/mail` (module
 `replace`. The module has no published version and deploy builds run on servers
 with no Neutron checkout, so the copy has to be in-tree.
 
-Synced: 2026-10-16, from Neutron 2f169310 (fix/ci-followup branch; 76bdaa96 identity hooks + 2f169310 dependency backflow) (PR #63 backflowed `NotSubmittedError`; the engine files are byte-identical to upstream mail/ apart from this file, `README.md`, `imap/live_test.go` and the CI-only `scripts/` and `testdata/`, which are not vendored).
+Synced: 2026-10-16, from Neutron 04b6350d (fix/ci-followup branch; 76bdaa96 identity hooks + 2f169310 dependency backflow + 04b6350d Graph identity machinery) (PR #63 backflowed `NotSubmittedError`; the engine files are byte-identical to upstream mail/ apart from this file, `README.md`, `imap/live_test.go` and the CI-only `scripts/` and `testdata/`, which are not vendored).
 
 ## Rule
 
