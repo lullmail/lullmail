@@ -144,6 +144,24 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   dashboard 325 tests, typecheck and 16-page build, site build,
   selection/keybinds/outbox S1-S7+e5b/c e2e green on vite 8.
 
+- Identity-stability review pass (2026-10-16, second): before committing
+  engineering effort to the OPS-03/SYNC-03 remainder, the scaffolded plan
+  was adversarially reviewed by an independent pass and its load-bearing
+  claims re-verified by a second one (both cite file:line). Outcome: the
+  register's own loss mechanism was wrong — engine identity promotion is
+  production-dead (positional⇒no-header is a contradiction; native
+  providers never promote), the live loss is Graph destroy-and-recreate
+  plus IMAP headerless churn, and the ImmutableId flip re-identifies
+  folder IDs (mirror razing via the PutMailboxes stale sweep), making the
+  migration a consumer of — not a precondition for — atomic remap
+  machinery. The "one lock per transaction" invariant was corrected
+  (bindGraphMailbox inverts it; deleteAccount is a live advisory→row
+  edge). The corrected phased plan, accepted losses (IMAP headerless
+  churn), estimates (~5-9 focused days) and residual live-provider
+  uncertainties are scaffolded in `docs/identity-stability.md`; the
+  SYNC-03 and SYNC-04 entries above were rewritten to match. No product
+  code changed in this pass.
+
 ## SEND-CONFIRM-01 - FIXED (owner decision recorded 2026-10-07)
 
 **Known-ambiguous sends did not ask again before an edited draft could send a second copy**
@@ -468,7 +486,7 @@ deferral; that deferral is now discharged by PRs 21/22 as above.
 **Retention and mirror writes can race, leaving expired or orphaned data**
 
 - Evidence: Confirmed — retention deletes mirror rows while sync/body writes run; the mirror has no foreign keys tying bodies and memberships to messages.
-- Fixed: engine migration 3 runs the orphan audit first, then lands `mail_bodies_message_fk` and `mail_membership_message_fk` as NOT VALID → VALIDATED `ON DELETE CASCADE` constraints, so a body or membership whose parent expired can never be written (the mid-race body write is refused by the FK and surfaces as the prefetch path's best-effort warn). Every transaction that writes or deletes mirror rows — engine writeback and scan staging/completion on the pgx pool, product retention, orphan cleanup, and account deletion on the database/sql pool — takes `pg_advisory_xact_lock(mail.AccountLockKey(account))` as its FIRST statement; one lock per transaction is the entire, deadlock-free lock order (documented in `mail-engine/schema.go`). Envelope re-insertion after expiry converges through the post-sync retention sweep rather than ingestion-time filtering — the report's preferred shape, but the FK plus sweep satisfies the regression's finish line (final state honors policy, zero orphans) under `-race` (`TestIntegrationProductRetentionRacingEngineSync`, engine-side `TestIntegrationConcurrentRetentionAndSyncLeaveNoOrphans`).
+- Fixed: engine migration 3 runs the orphan audit first, then lands `mail_bodies_message_fk` and `mail_membership_message_fk` as NOT VALID → VALIDATED `ON DELETE CASCADE` constraints, so a body or membership whose parent expired can never be written (the mid-race body write is refused by the FK and surfaces as the prefetch path's best-effort warn). Every transaction that writes or deletes mirror rows — engine writeback and scan staging/completion on the pgx pool, product retention, orphan cleanup, and account deletion on the database/sql pool — takes `pg_advisory_xact_lock(mail.AccountLockKey(account))` as its FIRST statement; one lock per transaction is the entire, deadlock-free lock order (documented in `mail-engine/schema.go`). *(2026-10-16 correction: that invariant covers mirror-writing transactions only — `bindGraphMailbox` takes row locks before the advisory lock (dead today, fails closed on the missing translator) and `deleteAccount` is already a live advisory→row edge; the rule going forward is advisory-first in every transaction that takes it. See `docs/identity-stability.md` §4.)* Envelope re-insertion after expiry converges through the post-sync retention sweep rather than ingestion-time filtering — the report's preferred shape, but the FK plus sweep satisfies the regression's finish line (final state honors policy, zero orphans) under `-race` (`TestIntegrationProductRetentionRacingEngineSync`, engine-side `TestIntegrationConcurrentRetentionAndSyncLeaveNoOrphans`).
 
 ## SYNC-05 (pass 6) / DATA-09 (pass 7) - Medium - FIXED (staged reconciliation pass, 2026-09-18)
 
@@ -482,7 +500,7 @@ deferral; that deferral is now discharged by PRs 21/22 as above.
 **Identity promotion deletes the old message before its replacement is written**
 
 - Evidence: Confirmed — `apply` called `DeleteMessages` on the old identity before `PutEnvelopes` wrote the new one, so a failed write lost the only readable copy. FIXED in pass 7: the replacement envelope is now written first and the old identity retires only afterwards, so a failure leaves the old record intact and the next sync retries (commit tagged `audit 3-SYNC-03`). The staged-scan pass preserves this ordering inside scans (promotions retire after `ApplyScanPage` staged the replacement).
-- Deferral (remainder): Product filing state keyed by the old account/message id is still not migrated on promotion (the engine cannot reach product tables; the orphan cleanup eventually drops it), and a truly transactional promotion carrying memberships, body, filing, and receipts across both pools needs the OPS-03 cross-pool transaction bridge — one transaction spanning the engine's pgx pool and the product's database/sql pool. The bridge remains deferred as its own infrastructure item. (Superseded note removed 2026-10-16: an older revision of this line called the bridge "the prerequisite for transactional cross-pool account creation" — that path is already atomic through `putMirrorAccountTx` per the OPS-09 reconciliation; only the identity-carrying migration still waits on the bridge.)
+- Deferral (remainder, re-diagnosed 2026-10-16): two adversarial review passes verified that the recorded loss mechanism — engine identity promotion retiring `prepared.promoted` — is **production-dead**: `UpgradeIdentity` fires only for positional identities that carry a Message-ID header, IMAP assigns identity from the same field at parse (positional ⇒ no header, a contradiction), and Gmail/Graph/JMAP are native-only; only synthetic tests exercise the path. The live mechanisms are destroy-and-recreate: Graph folder moves (`@removed` → `RemoveFromMailbox` deletes message+body unpaired; `cleanupMirrorOrphans` then deletes the filing/receipt rows) and IMAP UIDVALIDITY churn of headerless messages (unpairable by construction; headered mail is safe). The Graph ImmutableId flip re-identifies folder IDs too — cursors, `mail_sync_state` keys, memberships — and the first post-flip `PutMailboxes` stale sweep razes the mirror, so the migration is a **consumer of** atomic remap machinery, not a precondition. The corrected phased plan (neutral seam + alias table → two upstream contracts → re-vendor/wire → per-account flip), the lock-order correction, accepted losses and estimates are scaffolded in `docs/identity-stability.md`.
 
 ## GMAIL-IMPORT-01 - High - FIXED locally with GMAIL-READ-01 / GMAIL-AUTH-01; upstream and provider gates remain
 
