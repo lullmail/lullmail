@@ -25,7 +25,9 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: dashboard/package-lock.json
+          cache-dependency-path: |
+            dashboard/package-lock.json
+            site/package-lock.json
       - name: Product tests and vet
         run: go test ./... && go vet ./...
       - name: Mail-engine tests and vet
@@ -34,9 +36,24 @@ jobs:
       - name: MCP tests and vet
         working-directory: mcp
         run: go test ./... && go vet ./...
+      - name: Reachable-vulnerability scan (all Go modules)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          govulncheck ./...
+          (cd mail-engine && govulncheck ./...)
+          (cd mcp && govulncheck ./...)
       - name: Dashboard tests and production build
         working-directory: dashboard
         run: npm ci && npm test && npm run typecheck && npm run build
+      - name: Dashboard dependency audit
+        working-directory: dashboard
+        run: npm audit --audit-level=high
+      - name: Site production build
+        working-directory: site
+        run: npm ci && npm run build
+      - name: Site dependency audit
+        working-directory: site
+        run: npm audit --audit-level=high
       - name: Static Linux binary
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /tmp/lullmail .
       - name: Production container

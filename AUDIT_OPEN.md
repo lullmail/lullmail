@@ -120,6 +120,30 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   dashboard 268 tests, typecheck + build green. Standing deferrals
   untouched.
 
+- Maintenance pass (2026-10-16, dependency/license/CI review — no new
+  product-code findings): the site's four AGPL references corrected to
+  FSL-1.1-MIT to match LICENSE/README (JSON-LD license URL now
+  fsl.software, the "Free and open source" overline now "Free and
+  source-available", both availability paragraphs and the meta strip
+  updated; each release becomes MIT after two years). Go advisories
+  cleared in all three modules: x/text v0.42.0, x/net v0.60.0, pgx v5.9.2,
+  gRPC v1.83.1 (GO-2026-6629, the GO-2026-66xx x/net/http2 set,
+  GO-2026-6348, GO-2026-5004), and `toolchain go1.26.9` pinned everywhere
+  so local builds stop shipping the pre-1.26.9 net/http stdlib
+  (CI/Docker already floated to patched versions). CI's verify job now
+  builds the site (previously never built anywhere), runs
+  govulncheck@v1.9.0 over all three Go modules, and runs
+  `npm audit --audit-level=high` for both frontends — the npm highs
+  (undici/devalue/source-map-js) were already eliminated by the
+  neutron 0.3.2/vite 8.3.4 bump (`6cb132a`); the six remaining moderates
+  per frontend are no-fix transitive (sprintf-js et al.). The stale
+  OPS-03 "prerequisite for transactional cross-pool account creation"
+  wording in the SYNC-03 and OPS-09 entries above was reconciled to the
+  putMirrorAccountTx reality. Evidence: product/engine/mcp suites green
+  against real PostgreSQL with the bumped modules and pinned toolchain;
+  dashboard 325 tests, typecheck and 16-page build, site build,
+  selection/keybinds/outbox S1-S7+e5b/c e2e green on vite 8.
+
 ## SEND-CONFIRM-01 - FIXED (owner decision recorded 2026-10-07)
 
 **Known-ambiguous sends did not ask again before an edited draft could send a second copy**
@@ -458,7 +482,7 @@ deferral; that deferral is now discharged by PRs 21/22 as above.
 **Identity promotion deletes the old message before its replacement is written**
 
 - Evidence: Confirmed — `apply` called `DeleteMessages` on the old identity before `PutEnvelopes` wrote the new one, so a failed write lost the only readable copy. FIXED in pass 7: the replacement envelope is now written first and the old identity retires only afterwards, so a failure leaves the old record intact and the next sync retries (commit tagged `audit 3-SYNC-03`). The staged-scan pass preserves this ordering inside scans (promotions retire after `ApplyScanPage` staged the replacement).
-- Deferral (remainder): Product filing state keyed by the old account/message id is still not migrated on promotion (the engine cannot reach product tables; the orphan cleanup eventually drops it), and a truly transactional promotion carrying memberships, body, filing, and receipts across both pools needs the OPS-03 cross-pool transaction bridge — one transaction spanning the engine's pgx pool and the product's database/sql pool. The bridge remains deferred as its own infrastructure item (it is also the prerequisite for transactional cross-pool account creation, see OPS-09); the identity-carrying migration lands with it.
+- Deferral (remainder): Product filing state keyed by the old account/message id is still not migrated on promotion (the engine cannot reach product tables; the orphan cleanup eventually drops it), and a truly transactional promotion carrying memberships, body, filing, and receipts across both pools needs the OPS-03 cross-pool transaction bridge — one transaction spanning the engine's pgx pool and the product's database/sql pool. The bridge remains deferred as its own infrastructure item. (Superseded note removed 2026-10-16: an older revision of this line called the bridge "the prerequisite for transactional cross-pool account creation" — that path is already atomic through `putMirrorAccountTx` per the OPS-09 reconciliation; only the identity-carrying migration still waits on the bridge.)
 
 ## GMAIL-IMPORT-01 - High - FIXED locally with GMAIL-READ-01 / GMAIL-AUTH-01; upstream and provider gates remain
 
@@ -543,7 +567,7 @@ upstream/re-vendor requirements remain separate release gates.
 **Outbound URL trust boundaries are implicit, including push endpoints and authenticated continuations**
 
 - Evidence: Confirmed as conditional hardening — push registration accepts arbitrary endpoints; JMAP sends tokens to session-advertised origins. Pass 7 landed the Graph half: continuation URLs are now validated against the configured origin/path before any request (PROVIDER-02 fix), and OAuth account creation joined the owner lifecycle gate with duplicate-address rejection (the contained half of PROVIDER-03).
-- Deferral (remainder): Provider-specific HTTPS allowlists, redirect policies, and resolved-address validation for configurable hosts is a deliberate egress-policy design (and user-selected private mail servers are an intentional feature, so a blanket ban is wrong). The cross-pool transactional account creation both reports describe needs the OPS-03 bridge. Deferred with the deployment-policy pass (OPS-05 above).
+- Deferral (remainder): Provider-specific HTTPS allowlists, redirect policies, and resolved-address validation for configurable hosts is a deliberate egress-policy design (and user-selected private mail servers are an intentional feature, so a blanket ban is wrong). Cross-pool account creation is atomic through `putMirrorAccountTx` (see the reconciliation above); it does not wait on the OPS-03 bridge. Deferred with the deployment-policy pass (OPS-05 above).
 
 ## OPS-10 - Low - DELIBERATE KEY COMPATIBILITY AND TRUSTED AGENT POLICY
 
