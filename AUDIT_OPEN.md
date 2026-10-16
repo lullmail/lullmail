@@ -556,12 +556,12 @@ introduced, and the body-prefetch default is unchanged. Google quota profiles
 can differ for grandfathered projects. PostgreSQL, live-provider and Neutron
 upstream/re-vendor requirements remain separate release gates.
 
-## GMAIL-03 - Low - UPSTREAM MODEL REQUIREMENT
+## GMAIL-03 - Low - FIXED end to end (2026-10-16, Neutron 621951af + lullmail 3d957e6/8fd3f83)
 
 **Attachment flags are inferred from MIME structure excluded by metadata requests**
 
 - Evidence: Confirmed — envelope requests use format=metadata, which does not return the part tree that `payloadHasAttachment` walks.
-- Deferral: The honest fix is a tri-state attachment property (unknown/present/absent) flowing through the envelope model, the mirror schema and the dashboard badge — a model change. Requesting format=full for every envelope would multiply quota cost for every sync; the report itself says not to deploy that without measurement.
+- Fixed: the honest tri-state landed through the whole stack. Engine (upstream first, then re-vendored): `Envelope.Attachment AttachmentState` (Unknown/Absent/Present) replaces the bool; mirror migration v5 backfills provider-aware (Gmail false recovers to Unknown — its absence was never provable; every other provider's false stays Absent); IMAP/Graph/JMAP map their definitive sources, Gmail metadata envelopes report Unknown. The rejected alternative (format=full per envelope, quota cost) was never deployed. Product: `/search` and `/buckets/{bucket}` carry `attachment_state: "unknown"|"absent"|"present"` on the wire (old field gone, pinned by test); export warns on omitted bytes only for Present; the dashboard clip renders only on present — unknown renders nothing (no claim), replacing the interim '?' chip; offline cache round-trips the string verbatim; e2e seed migrated. Fail-befores: engine (old walk, naive backfill, collapsing read), product (SQLSTATE 42703 before the SQL fix, dashboard tri-state vs unchanged component). Gates green both repos against real PostgreSQL; dashboard 327/327. The Gmail live-validation checklist's attachment probe now observes honest Unknowns on real metadata envelopes.
 
 ## GRAPH-02 / PROVIDER-01 (pass 7) - Medium - BLOCKED ON LIVE ID-TRANSLATION MIGRATION
 
