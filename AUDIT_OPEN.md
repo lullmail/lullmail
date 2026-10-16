@@ -165,7 +165,33 @@ Unresolved findings for this repository from the ChatGPT-led audit series.
   (`6303f3d`). Phases 1-4 stay gated on live validation: a consumer
   Outlook account can run it — the checklist that settles the four
   residual uncertainties (and with them the phase decisions) is
-  `docs/graph-live-validation.md`.
+  `docs/graph-live-validation.md`. Phases 1-3 landed the same session
+  (see below).
+
+- Identity-contract build pass (2026-10-16, owner-approved): the plan's
+  Phases 1-3 are landed end to end. The binding Go contract was
+  committed first as the anti-drift source of truth
+  (`docs/identity-contract.md`), then built by parallel verified lanes:
+  Phase 1 product side (`3f219f3` — alias table v11 with
+  chain-collapsing writes, consult-on-miss resolution at outbox delivery
+  and reply seeding, migration harness extracted to production), Phase 2
+  upstream engine contracts (Neutron `76bdaa96` on fix/ci-followup —
+  HookTx/IdentityHooks types, atomic IdentityReplaceStore and
+  ReferenceAwareStore as optional capabilities, Engine.Hooks wiring,
+  nil-hooks behavior preserved; dependency backflow `2f169310` restored
+  the fix-upstream-first rule my earlier eb851ad commit had bent), Phase
+  3 re-vendor + wiring (`ead56fa`, `5a24e39` — diff gate clean, product
+  seam reshaped to mail.HookTx, newSyncEngine wires productIdentityHooks,
+  ReferencesDropped deletes dead product references inside the engine's
+  unit per the recorded decision). Every lane's fail-before/pass-after
+  regressions verified, full PG suites + race green at each gate, and
+  each diff orchestrator-reviewed before commit. Phase 4 machinery
+  (Graph translator + Prefer opt-in, built-not-enabled) in flight
+  upstream; the migration runner and any flip remain gated on the
+  live-validation results by design. The destroy path now carries
+  product reference deletion atomically instead of orphaning to the
+  cleanup sweep — the one user-visible behavior change, regression-
+  proven both directions.
 
 ## SEND-CONFIRM-01 - FIXED (owner decision recorded 2026-10-07)
 

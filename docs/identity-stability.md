@@ -149,51 +149,47 @@ reproduces the old order on two connections and observes the 40P01 abort;
 `TestIntegrationLockOrderAdvisoryFirstCompletes` proves the new order
 completes under the same pressure).
 
-**Phase 1 — neutral seam + product-side migration harness + alias table.**
-Reshape `identityTx` to engine-neutral row types; extract the
-product-tx-driven migration driver from `identity_pg_test.go` into
-production shape; land the alias table in `app_migrations` (next version),
-consulted at outbox delivery and reply seeding, populated by every remap.
-This unlocks Graph ID migration without upstream work. ~1-2 days.
+**Phase 1 — neutral seam + product-side migration harness + alias table.** ✅
+Landed 2026-10-16 (`3f219f3`): `app_migrations` v11 alias table;
+chain-collapsing alias writes in `remapProductIdentity`; consult-on-miss
+resolution at outbox delivery and reply seeding; migration harness
+extracted to production (`runIdentityMigration`).
 
-**Phase 2 — upstream engine contract (two contracts, not one).**
-In the Neutron repo first, fail-before PG tests included:
+**Phase 2 — upstream engine contract (two contracts).** ✅ Landed
+2026-10-16 (Neutron `76bdaa96`, on the `fix/ci-followup` branch —
+cherry-pick to main with that branch's merge): `HookTx`/`IdentityHooks`
+contract types; `IdentityReplaceStore` (atomic replacement, optional
+capability) and `ReferenceAwareStore` (destroy-with-references) on
+PgStore; `Engine.Hooks` wiring with capability probes; nil-hooks
+behavior byte-identical. Decision recorded in
+`docs/identity-contract.md`: ReferencesDropped callback chosen,
+fingerprint pairing refused. The promoted set remains production-dead —
+the seam exists for Phase 4's translate-confirmed pairs. Dependency
+backflow `2f169310` restored upstream/vendor byte-identity first.
 
-1. *Atomic replacement for known pairs* — a `ReplaceIdentities`-style
-   **optional store capability** (an interface like `FinalScanPageStore`,
-   `scan.go:109-111` — not a new `Store` method; consumers implement
-   `Store` by design), carrying envelope + membership + body replacement
-   and product callbacks on the engine's transaction. Callbacks execute on
-   that transaction's connection; **nested store calls are prohibited**
-   (a second connection self-deadlocks on the same advisory key). Body
-   copy-vs-refetch is decided here (copy inside the transaction is the
-   contract the product hooks already assume).
-2. *Destroy-with-references* — for unpaired destroys (Graph moves today),
-   either fingerprint pairing — only `m:` fingerprints; `c:` heuristic
-   collisions (`identity.go:163-166`) must refuse — or an explicit
-   references-dropped callback so the product can snapshot instead of
-   silently orphaning.
+**Phase 3 — re-vendor and wire.** ✅ Landed 2026-10-16 (`ead56fa`
+re-vendor, `5a24e39` wiring): diff gate clean; product seam reshaped to
+`mail.HookTx` (`sqlHookTx`/`sqlHookRows` adapters — note `*sql.Rows`
+does NOT satisfy `HookRows`, Close signatures differ); the engine's
+identity transactions now call the product hooks end to end
+(`newSyncEngine` sets `eng.Hooks`); `ReferencesDropped` deletes the
+product's dead reference rows inside the engine's unit (recorded
+decision — no orphan window, no fabricated history). The
+`graphIdentityTranslator` refuse-gate stays until the translator exists
+upstream (Lane 4).
 
-~2-3 days.
-
-**Phase 3 — re-vendor and wire.** Re-vendor under the `VENDOR.md` 0-line
-diff gate; wire `mail.go`; reshape the product adapter; remove the
-`graphIdentityTranslator` refuse-gate only once the real translator
-(`translateExchangeIds` batches + `/me` verification) exists upstream;
-lock-order regressions; full product PG suite + race. ~1 day.
-
-**Phase 4 — per-account ImmutableId migration.** Only after 1-3: translate
-message **and folder** IDs in bounded batches with `/me` verification
-around every batch (`graphReferenceInventory` bounds the retained set);
-migrate `mail_sync_state` keys and cursors (or clear them to force benign
-re-enumeration — under immutable IDs, re-enumeration re-affirms the same
-identities); enable the `Prefer` header in the upstream adapter; run the
-product-state remap through the Phase 1 harness. ~2-3 days.
+**Phase 4 — per-account ImmutableId migration.** Machinery lane
+(translator + Prefer opt-in, built-not-enabled) in flight upstream; the
+migration runner and any flip stay gated on the live-validation results
+(`docs/graph-live-validation.md`) by design — Probe 1 sizes the loss
+mechanism and Probe 4 confirms or kills the premise.
 
 **Phase 5 — gauntlet and register.** Race suites, PG suites, dashboard
 e2e, `AUDIT_OPEN.md` closure, and the live-provider gates below.
 
-Total: ~5-9 focused days.
+Total: ~5-9 focused days. (Actual: Phases 1-3 landed in one orchestrated
+session — two parallel lanes plus wiring — on 2026-10-16; Phase 4's
+machinery the same day, its execution gated on live validation.)
 
 ## Accepted losses
 
