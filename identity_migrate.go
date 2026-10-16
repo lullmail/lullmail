@@ -3,12 +3,11 @@ package main
 // The product-tx identity migration driver (docs/identity-contract.md,
 // "Migration harness extraction"): the transaction shape the identity
 // promotion regressions proved (identity_pg_test.go), moved into production
-// form. The engine's atomic replacement capability is Phase 2 upstream work;
-// until it lands and calls the product hooks on its own transaction, this
-// driver is the one proven way to run a whole identity replacement —
-// engine-table writes and product remap together — through a single product
-// transaction. It is test- and migration-tooling-reachable only; there is no
-// HTTP surface.
+// form. The engine now calls the same hooks on its own transaction
+// (mail-engine/hooks.go, wired in mail.go); this driver remains the one
+// proven way to run a whole identity replacement — engine-table writes and
+// product remap together — through a single PRODUCT transaction, for
+// migration tooling. There is no HTTP surface.
 //
 // The account advisory lock is the FIRST statement
 // (docs/identity-stability.md §4): the transaction then takes owner row
@@ -38,13 +37,16 @@ type identityReplacement struct {
 // (envelope, membership, body copy), remapProductIdentity — which also
 // records the durable alias for every pair — and finally the retirement of
 // the old identities. Any failure rolls back everything, so the old record
-// stays readable and the whole unit is retryable.
+// stays readable and the whole unit is retryable. The hooks run through
+// sqlHookTx — the same adapter shape the engine's transaction hands them —
+// so this driver and the engine execute identical product SQL.
 func runIdentityMigration(ctx context.Context, tx *sql.Tx, acct mail.AccountID, replacements ...identityReplacement) error {
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, mail.AccountLockKey(acct)); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
-	if err := admitIdentityWrite(ctx, tx, acct); err != nil {
+	hookTx := sqlHookTx{tx: tx}
+	if err := admitIdentityWrite(ctx, hookTx, acct); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -69,7 +71,7 @@ func runIdentityMigration(ctx context.Context, tx *sql.Tx, acct mail.AccountID, 
 	for _, rep := range replacements {
 		pairs = append(pairs, IdentityPair{OldID: rep.OldID, NewID: rep.NewID})
 	}
-	if err := remapProductIdentity(ctx, tx, acct, pairs); err != nil {
+	if err := remapProductIdentity(ctx, hookTx, acct, pairs); err != nil {
 		_ = tx.Rollback()
 		return err
 	}

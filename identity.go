@@ -11,23 +11,49 @@ import (
 	"github.com/neutron-build/neutron/mail"
 )
 
-// Product half of Graph identity promotion (review R2-01/R2-02). The atomic
-// replacement transaction itself belongs to the engine upstream first; these
-// hooks are the callbacks that transaction must run on the product's tables.
-// They take an explicit transaction so the engine's promotion unit of work —
-// not a product pool — commits them together with envelope, membership and
-// body replacement, before any old ID is retired. The vendored engine has no
-// promotion callback yet (see AUDIT_OPEN.md); identity promotion tests drive
-// the hooks through a product transaction with the same shape.
+// Product half of the identity contract (docs/identity-contract.md). The
+// engine's identity transactions call these hooks through the engine's own
+// mail.HookTx handle — the engine owns the connection, so the product's
+// writes commit with the envelope, membership and body replacement, before
+// any old ID is retired — and productIdentityHooks below adapts them to
+// mail.IdentityHooks for the engine wiring in mail.go.
 //
-// identityTx is satisfied by *sql.Tx today. When the reviewed upstream
-// contract lands, its promotion transaction supplies an adapter with these
-// methods and the wiring in mail.go follows.
-type identityTx interface {
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+// sqlHookTx adapts a product *sql.Tx to the same interface, so the
+// migration driver (runIdentityMigration) and the identity regressions run
+// the IDENTICAL hook SQL on a product transaction. *sql.Row satisfies
+// mail.HookRow directly; *sql.Rows does not (its Close returns an error and
+// the contract's does not), so Query wraps it in sqlHookRows.
+type sqlHookTx struct{ tx *sql.Tx }
+
+var _ mail.HookTx = sqlHookTx{}
+
+func (h sqlHookTx) Exec(ctx context.Context, query string, args ...any) error {
+	_, err := h.tx.ExecContext(ctx, query, args...)
+	return err
 }
+
+func (h sqlHookTx) QueryRow(ctx context.Context, query string, args ...any) mail.HookRow {
+	return h.tx.QueryRowContext(ctx, query, args...)
+}
+
+func (h sqlHookTx) Query(ctx context.Context, query string, args ...any) (mail.HookRows, error) {
+	rows, err := h.tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return sqlHookRows{rows: rows}, nil
+}
+
+// sqlHookRows adapts *sql.Rows to mail.HookRows; Close drops the error
+// that Err already carries.
+type sqlHookRows struct{ rows *sql.Rows }
+
+var _ mail.HookRows = sqlHookRows{}
+
+func (r sqlHookRows) Next() bool             { return r.rows.Next() }
+func (r sqlHookRows) Scan(dest ...any) error { return r.rows.Scan(dest...) }
+func (r sqlHookRows) Err() error             { return r.rows.Err() }
+func (r sqlHookRows) Close()                 { _ = r.rows.Close() }
 
 // IdentityPair is one old→new message identity replacement inside a
 // promotion. IDs are the engine's canonical MessageID strings.
@@ -54,12 +80,12 @@ var identityAliasStatements = []string{
 
 // admitIdentityWrite fences a promotion on the owning user and account rows
 // inside the promotion transaction itself. No pool calls or commits here.
-func admitIdentityWrite(ctx context.Context, tx identityTx, acct mail.AccountID) error {
+func admitIdentityWrite(ctx context.Context, tx mail.HookTx, acct mail.AccountID) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	var owner string
-	return tx.QueryRowContext(ctx, `SELECT u.id::text FROM users u JOIN email_accounts ea ON ea.user_id=u.id
+	return tx.QueryRow(ctx, `SELECT u.id::text FROM users u JOIN email_accounts ea ON ea.user_id=u.id
  WHERE ea.mirror_account_id=$1 FOR UPDATE OF u,ea`, string(acct)).Scan(&owner)
 }
 
@@ -67,7 +93,7 @@ func admitIdentityWrite(ctx context.Context, tx identityTx, acct mail.AccountID)
 // pairs and records one durable alias per pair. It runs inside the engine's
 // promotion transaction: either every product reference moves with the
 // envelope — alias included — or the whole promotion rolls back.
-func remapProductIdentity(ctx context.Context, tx identityTx, acct mail.AccountID, pairs []IdentityPair) error {
+func remapProductIdentity(ctx context.Context, tx mail.HookTx, acct mail.AccountID, pairs []IdentityPair) error {
 	for _, pair := range pairs {
 		if pair.OldID == pair.NewID {
 			continue
@@ -76,7 +102,7 @@ func remapProductIdentity(ctx context.Context, tx identityTx, acct mail.AccountI
 		// thread rewrite rather than guessing which pinned/queued
 		// conversation it denotes.
 		var oldThread, newThread string
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT thread_id FROM mail_messages WHERE account_id=$1 AND id=$2),''),COALESCE((SELECT thread_id FROM mail_messages WHERE account_id=$1 AND id=$3),'')`, string(acct), pair.OldID, pair.NewID).Scan(&oldThread, &newThread); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT thread_id FROM mail_messages WHERE account_id=$1 AND id=$2),''),COALESCE((SELECT thread_id FROM mail_messages WHERE account_id=$1 AND id=$3),'')`, string(acct), pair.OldID, pair.NewID).Scan(&oldThread, &newThread); err != nil {
 			return err
 		}
 		if oldThread != "" && oldThread != newThread {
@@ -87,7 +113,7 @@ func remapProductIdentity(ctx context.Context, tx identityTx, acct mail.AccountI
 			`UPDATE push_deliveries SET message_id=$3 WHERE account_id=$1 AND message_id=$2`,
 			`UPDATE message_action_undo SET message_id=$3 WHERE account_id=$1 AND message_id=$2`,
 		} {
-			if _, err := tx.ExecContext(ctx, query, string(acct), pair.OldID, pair.NewID); err != nil {
+			if err := tx.Exec(ctx, query, string(acct), pair.OldID, pair.NewID); err != nil {
 				return err
 			}
 		}
@@ -95,7 +121,7 @@ func remapProductIdentity(ctx context.Context, tx identityTx, acct mail.AccountI
 		if err != nil {
 			return err
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT token,snapshot FROM message_action_undo WHERE account_id=$1 AND snapshot @> $2::jsonb FOR UPDATE`, string(acct), string(needle))
+		rows, err := tx.Query(ctx, `SELECT token,snapshot FROM message_action_undo WHERE account_id=$1 AND snapshot @> $2::jsonb FOR UPDATE`, string(acct), string(needle))
 		if err != nil {
 			return err
 		}
@@ -137,7 +163,7 @@ func remapProductIdentity(ctx context.Context, tx identityTx, acct mail.AccountI
 			return err
 		}
 		for _, u := range updates {
-			if _, err := tx.ExecContext(ctx, `UPDATE message_action_undo SET snapshot=$2::jsonb WHERE token=$1`, u.token, string(u.raw)); err != nil {
+			if err := tx.Exec(ctx, `UPDATE message_action_undo SET snapshot=$2::jsonb WHERE token=$1`, u.token, string(u.raw)); err != nil {
 				return err
 			}
 		}
@@ -145,10 +171,10 @@ func remapProductIdentity(ctx context.Context, tx identityTx, acct mail.AccountI
 		// that currently resolves to the old id onto the new one BEFORE
 		// recording this hop, so no chain ever forms. The upsert keeps a
 		// repeated promotion idempotent.
-		if _, err := tx.ExecContext(ctx, `UPDATE message_identity_aliases SET new_id=$3 WHERE account_id=$1 AND new_id=$2`, string(acct), pair.OldID, pair.NewID); err != nil {
+		if err := tx.Exec(ctx, `UPDATE message_identity_aliases SET new_id=$3 WHERE account_id=$1 AND new_id=$2`, string(acct), pair.OldID, pair.NewID); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO message_identity_aliases (account_id,old_id,new_id) VALUES ($1,$2,$3)
+		if err := tx.Exec(ctx, `INSERT INTO message_identity_aliases (account_id,old_id,new_id) VALUES ($1,$2,$3)
 			ON CONFLICT (account_id,old_id) DO UPDATE SET new_id=excluded.new_id`, string(acct), pair.OldID, pair.NewID); err != nil {
 			return err
 		}
@@ -162,6 +188,63 @@ func remapProductIdentity(ctx context.Context, tx identityTx, acct mail.AccountI
 
 func sortMessageUndo(states []messageUndo) {
 	sort.Slice(states, func(i, j int) bool { return states[i].ID < states[j].ID })
+}
+
+// productIdentityHooks is the product's mail.IdentityHooks adapter: the
+// engine's identity transactions (see mail-engine/hooks.go) call these
+// inside their own unit of work, after the account advisory lock. Every
+// method works only through the HookTx handle — no pool connections, no
+// engine-store calls, no additional locks, none of the caller's DDL — per
+// the contract's prohibitions. The callbacks are the same functions the
+// migration driver runs on a product transaction (sqlHookTx), so both
+// drivers execute identical product SQL. No receiver state: the hooks own
+// nothing the handle does not carry.
+type productIdentityHooks struct{}
+
+var _ mail.IdentityHooks = productIdentityHooks{}
+
+func (productIdentityHooks) AdmitIdentityWrite(ctx context.Context, tx mail.HookTx, acct mail.AccountID) error {
+	if err := admitIdentityWrite(ctx, tx, acct); err != nil {
+		return fmt.Errorf("admit identity write: %w", err)
+	}
+	return nil
+}
+
+func (productIdentityHooks) RemapIdentity(ctx context.Context, tx mail.HookTx, acct mail.AccountID, pairs []mail.IdentityPair) error {
+	product := make([]IdentityPair, len(pairs))
+	for i, pair := range pairs {
+		product[i] = IdentityPair{OldID: string(pair.OldID), NewID: string(pair.NewID)}
+	}
+	if err := remapProductIdentity(ctx, tx, acct, product); err != nil {
+		return fmt.Errorf("remap identity: %w", err)
+	}
+	return nil
+}
+
+// ReferencesDropped records the contract's decision for identities deleted
+// with no known replacement: the mirror row dies in THIS transaction, so
+// the product's references are dead the moment it commits. Deleting them
+// here — not fabricating undo snapshots into history, not resurrecting
+// anything — is deterministic and atomic: there is no orphan window for
+// cleanupMirrorOrphans to sweep later.
+func (productIdentityHooks) ReferencesDropped(ctx context.Context, tx mail.HookTx, acct mail.AccountID, ids []mail.MessageID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	dropped := make([]string, len(ids))
+	for i, id := range ids {
+		dropped[i] = string(id)
+	}
+	for _, query := range []string{
+		`DELETE FROM hey_messages WHERE account_id=$1 AND message_id = ANY($2)`,
+		`DELETE FROM push_deliveries WHERE account_id=$1 AND message_id = ANY($2)`,
+		`DELETE FROM message_action_undo WHERE account_id=$1 AND message_id = ANY($2)`,
+	} {
+		if err := tx.Exec(ctx, query, string(acct), dropped); err != nil {
+			return fmt.Errorf("drop references for deleted identities: %w", err)
+		}
+	}
+	return nil
 }
 
 // resolveReplyParent resolves a stored reply-parent identity to the identity
@@ -215,8 +298,8 @@ type graphIdentityTranslator interface {
 // Graph message identities for one account, including reference-only IDs
 // whose mirror row expired. The engine's migration consults it so no
 // retained reference is left behind by a bounded translation batch. SQL and
-// payload integrity checks use the supplied promotion transaction.
-func (a *App) graphReferenceInventory(ctx context.Context, tx identityTx, acct mail.AccountID) ([]mail.MessageID, error) {
+// payload integrity checks use the supplied migration transaction.
+func (a *App) graphReferenceInventory(ctx context.Context, tx mail.HookTx, acct mail.AccountID) ([]mail.MessageID, error) {
 	ids := map[mail.MessageID]bool{}
 	add := func(id string) error {
 		if id == "" {
@@ -232,7 +315,7 @@ func (a *App) graphReferenceInventory(ctx context.Context, tx identityTx, acct m
 		ids[key] = true
 		return nil
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT message_id FROM hey_messages WHERE account_id=$1 UNION SELECT message_id FROM push_deliveries WHERE account_id=$1 UNION SELECT message_id FROM message_action_undo WHERE account_id=$1`, string(acct))
+	rows, err := tx.Query(ctx, `SELECT message_id FROM hey_messages WHERE account_id=$1 UNION SELECT message_id FROM push_deliveries WHERE account_id=$1 UNION SELECT message_id FROM message_action_undo WHERE account_id=$1`, string(acct))
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +335,7 @@ func (a *App) graphReferenceInventory(ctx context.Context, tx identityTx, acct m
 	if err != nil {
 		return nil, err
 	}
-	rows, err = tx.QueryContext(ctx, `SELECT snapshot FROM message_action_undo WHERE account_id=$1`, string(acct))
+	rows, err = tx.Query(ctx, `SELECT snapshot FROM message_action_undo WHERE account_id=$1`, string(acct))
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +362,7 @@ func (a *App) graphReferenceInventory(ctx context.Context, tx identityTx, acct m
 	if err != nil {
 		return nil, err
 	}
-	rows, err = tx.QueryContext(ctx, `SELECT id::text,user_id::text,payload_ciphertext FROM outbox_jobs WHERE account_id=$1 AND payload_ciphertext<>''`, string(acct))
+	rows, err = tx.Query(ctx, `SELECT id::text,user_id::text,payload_ciphertext FROM outbox_jobs WHERE account_id=$1 AND payload_ciphertext<>''`, string(acct))
 	if err != nil {
 		return nil, err
 	}

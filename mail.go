@@ -496,5 +496,11 @@ func apiUnavailable(mux *http.ServeMux, reason string) {
 func newSyncEngine(store mail.Store, cfg *Config) *mail.Engine {
 	eng := mail.NewEngine(store, slog.Default())
 	eng.FetchBodies = envOr("PREFETCH_BODIES", "1") != "0"
+	// Identity hooks: the engine's identity transactions (atomic
+	// replacement, destroy-with-references) call back into the product's
+	// tables on the engine's own transaction — identity.go carries them.
+	// Nil hooks would leave every destroy to orphan product rows until
+	// cleanupMirrorOrphans sweeps them.
+	eng.Hooks = productIdentityHooks{}
 	return eng
 }

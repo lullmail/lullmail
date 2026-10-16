@@ -137,7 +137,7 @@ func TestIntegrationIdentityRemapMovesEveryProductReferenceAtomically(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	ids, err := p.app.graphReferenceInventory(ctx, inventoryTx, "graph-acct")
+	ids, err := p.app.graphReferenceInventory(ctx, sqlHookTx{tx: inventoryTx}, "graph-acct")
 	_ = inventoryTx.Rollback()
 	if err != nil {
 		t.Fatal(err)
@@ -236,7 +236,7 @@ func TestIntegrationIdentityRemapRefusesThreadChangeAndRollsBackEverything(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = p.app.graphReferenceInventory(ctx, tx, "graph-acct")
+	_, err = p.app.graphReferenceInventory(ctx, sqlHookTx{tx: tx}, "graph-acct")
 	_ = tx.Rollback()
 	if err == nil || !strings.Contains(err.Error(), "non-Graph") {
 		t.Fatalf("foreign-namespace reference accepted: %v", err)
