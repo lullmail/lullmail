@@ -1,0 +1,459 @@
+package app
+
+// The Board (branch experiment): the briefing's derived sections presented as
+// the columns of a personal kanban. The cards write themselves from mail
+// semantics — unread Imbox mail needs you, a two-sided thread you spoke last
+// in is one you're waiting on, a dated snooze comes back on its day. Pins and
+// manual notes are the only user-authored cards, and a pin never moves mail:
+// it is a marker on top of whatever bucket the thread lives in, so it cannot
+// fight the classifier or the sweep.
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"time"
+)
+
+// decodeJSON reads exactly one bounded JSON document (audit OPS-01): the
+// cap applies before decoding begins, so an oversized body is refused as
+// an error from the reader instead of allocating toward it. The default
+// covers every small product mutation; callers with larger legitimate
+// bodies use decodeJSONLimit explicitly.
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
+	return decodeJSONLimit(w, r, v, 64<<10)
+}
+
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, v any, limit int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	return json.NewDecoder(r.Body).Decode(v)
+}
+
+// isBodyTooLarge classifies a bounded decode's failure for the caller's
+// problem response.
+func isBodyTooLarge(err error) bool {
+	var maxErr *http.MaxBytesError
+	return errors.As(err, &maxErr)
+}
+
+// writeDecodeProblem answers a bounded decode failure with the right
+// status: 413 for an oversized body, 400 for malformed JSON.
+func writeDecodeProblem(w http.ResponseWriter, err error) {
+	if isBodyTooLarge(err) {
+		writeProblem(w, http.StatusRequestEntityTooLarge, "Request Too Large",
+			"the request body exceeds this route's limit")
+		return
+	}
+	writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
+}
+
+// sweepSnoozed returns dated snoozes whose day has arrived (TASKS 1.4). A
+// Snoozed column that never gave the mail back would just be a second Set
+// Aside — the sweep is what makes deferral a promise. A non-empty account
+// (the per-mailbox lens) limits the sweep to that account; the periodic
+// sweep in the background still returns everyone's mail.
+func (a *App) sweepSnoozed(ctx context.Context, uid, account string) error {
+	query := `
+		UPDATE hey_messages SET bucket = 'imbox'
+		WHERE user_id = $1 AND bucket = 'set_aside'
+		  AND set_aside_until IS NOT NULL AND set_aside_until <= now()`
+	args := []any{uid}
+	if account != "" {
+		query += `
+		  AND account_id = (SELECT mirror_account_id FROM email_accounts WHERE user_id = $1 AND id = $2)`
+		args = append(args, account)
+	}
+	_, err := a.db.ExecContext(ctx, query, args...)
+	return err
+}
+
+type boardCard struct {
+	CardID      string `json:"card_id,omitempty"`
+	Account     string `json:"account,omitempty"`
+	ThreadID    string `json:"thread_id,omitempty"`
+	MessageID   string `json:"message_id,omitempty"`
+	Subject     string `json:"subject"`
+	From        string `json:"from,omitempty"`
+	ReceivedAt  string `json:"received_at,omitempty"`
+	Preview     string `json:"preview,omitempty"`
+	Note        string `json:"note,omitempty"`
+	Manual      bool   `json:"manual,omitempty"`
+	Read        *bool  `json:"read,omitempty"`
+	Bucket      string `json:"bucket,omitempty"`
+	SnoozeUntil string `json:"snooze_until,omitempty"`
+	// Created is true only when this call inserted the card. A pin that
+	// found an existing card leaves it untouched — not its done state, not
+	// its note — and reports created=false so the client's undo cannot
+	// delete a pin it did not create (audit 4 F20).
+	Created bool `json:"created,omitempty"`
+}
+
+func cardFromThread(t briefThread) boardCard {
+	return boardCard{
+		Account:    t.Account,
+		ThreadID:   t.ThreadID,
+		MessageID:  t.MessageID,
+		Subject:    t.Subject,
+		From:       t.From,
+		ReceivedAt: t.ReceivedAt,
+		Preview:    t.Preview,
+	}
+}
+
+// handleBoard assembles the board: needs-you (derived unread Imbox threads,
+// then pinned threads not already among them, then manual notes — derived
+// first, so the keyboard list and the rendered column stay index-aligned),
+// you're-waiting, and the done pile. Waiting and Snoozed stay pure
+// derivations: those cards clear themselves when the mail changes, which is
+// the point of the whole experiment.
+func (a *App) handleBoard(w http.ResponseWriter, r *http.Request) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	if err := a.sweepSnoozed(r.Context(), uid, r.URL.Query().Get("account")); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Sweep Failed", err.Error())
+		return
+	}
+
+	account := r.URL.Query().Get("account")
+	needsYou, waiting, err := a.briefThreads(r.Context(), uid, account)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	cards := make([]boardCard, 0, len(needsYou))
+	derived := map[string]bool{}
+	for _, t := range needsYou {
+		derived[t.Account+"\x00"+t.ThreadID] = true
+		card := cardFromThread(t)
+		unread := false
+		card.Read, card.Bucket = &unread, "imbox"
+		cards = append(cards, card)
+	}
+
+	// Live data for pinned threads: subject and date follow the thread's
+	// newest message; the stored title only outlives a disconnected account.
+	// Cards are scoped to the selected account the same way the derived
+	// lists are; a subquery (not a join) so a pinned card still shows its
+	// stored title when its account is disconnected.
+	type cardRow struct{ id, account, thread, title, note string }
+	var open []cardRow
+	pinnedQuery := `
+		SELECT id::text, COALESCE(account_id,''), COALESCE(thread_key,''), title, note FROM board_cards
+		WHERE user_id = $1 AND done_at IS NULL AND thread_key IS NOT NULL`
+	pinnedArgs := []any{uid}
+	if account != "" {
+		pinnedQuery += ` AND account_id = (SELECT mirror_account_id FROM email_accounts WHERE user_id = $1 AND id = $2)`
+		pinnedArgs = append(pinnedArgs, account)
+	}
+	pinnedQuery += ` ORDER BY created_at`
+	rows, err := a.db.QueryContext(r.Context(), pinnedQuery, pinnedArgs...)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	for rows.Next() {
+		var c cardRow
+		if err := rows.Scan(&c.id, &c.account, &c.thread, &c.title, &c.note); err != nil {
+			rows.Close()
+			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
+			return
+		}
+		open = append(open, c)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	rows.Close()
+	if len(open) > 0 {
+		live := map[string]boardCard{}
+		liveQuery := `
+			SELECT DISTINCT ON (b.id)
+			       m.account_id, m.thread_id, m.id, m.subject, m.from_addrs, m.received_at, m.preview,
+			       CASE WHEN h.message_id IS NULL THEN NULL ELSE h.read_at IS NOT NULL END,
+			       COALESCE(h.bucket,''), h.set_aside_until
+			FROM board_cards b
+			JOIN mail_messages m ON m.account_id = b.account_id AND m.thread_id = b.thread_key
+			JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+			LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
+			WHERE b.user_id = $1 AND b.done_at IS NULL AND b.thread_key IS NOT NULL`
+		liveArgs := []any{uid}
+		if account != "" {
+			liveQuery += ` AND ea.id = $2`
+			liveArgs = append(liveArgs, account)
+		}
+		liveQuery += ` ORDER BY b.id, m.received_at DESC NULLS LAST, m.id DESC`
+		r2, err := a.db.QueryContext(r.Context(), liveQuery, liveArgs...)
+		if err != nil {
+			writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+			return
+		}
+		for r2.Next() {
+			var t boardCard
+			var fromJSON string
+			var received *time.Time
+			var read sql.NullBool
+			var until sql.NullTime
+			if err := r2.Scan(&t.Account, &t.ThreadID, &t.MessageID, &t.Subject, &fromJSON, &received, &t.Preview, &read, &t.Bucket, &until); err != nil {
+				r2.Close()
+				writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
+				return
+			}
+			if received != nil {
+				t.ReceivedAt = received.Format(time.RFC3339)
+			}
+			if read.Valid {
+				t.Read = &read.Bool
+			}
+			if until.Valid && t.Bucket == "set_aside" {
+				t.SnoozeUntil = until.Time.UTC().Format(time.RFC3339Nano)
+			}
+			t.From = firstSenderName(fromJSON)
+			live[t.Account+"\x00"+t.ThreadID] = t
+		}
+		if err := r2.Err(); err != nil {
+			r2.Close()
+			writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+			return
+		}
+		r2.Close()
+		for _, c := range open {
+			if derived[c.account+"\x00"+c.thread] {
+				continue // already on the board on its own
+			}
+			if card, ok := live[c.account+"\x00"+c.thread]; ok {
+				card.CardID, card.Note = c.id, c.note
+				cards = append(cards, card)
+			} else {
+				cards = append(cards, boardCard{CardID: c.id, Account: c.account, ThreadID: c.thread, Subject: c.title, Note: c.note})
+			}
+		}
+	}
+
+	// Manual notes last: they have no thread, so they must not shift the
+	// indices of the openable cards above them.
+	r3, err := a.db.QueryContext(r.Context(), `
+		SELECT id::text, title, note FROM board_cards
+		WHERE user_id = $1 AND done_at IS NULL AND thread_key IS NULL
+		ORDER BY created_at`, uid)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	for r3.Next() {
+		var c boardCard
+		if err := r3.Scan(&c.CardID, &c.Subject, &c.Note); err != nil {
+			r3.Close()
+			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
+			return
+		}
+		c.Manual = true
+		cards = append(cards, c)
+	}
+	if err := r3.Err(); err != nil {
+		r3.Close()
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	r3.Close()
+
+	waitingCards := make([]boardCard, 0, len(waiting))
+	for _, t := range waiting {
+		waitingCards = append(waitingCards, cardFromThread(t))
+	}
+
+	done := []boardCard{}
+	doneQuery := `
+		SELECT id::text, COALESCE(account_id,''), COALESCE(thread_key,''), title, note FROM board_cards
+		WHERE user_id = $1 AND done_at IS NOT NULL`
+	doneArgs := []any{uid}
+	if account != "" {
+		doneQuery += ` AND account_id = (SELECT mirror_account_id FROM email_accounts WHERE user_id = $1 AND id = $2)`
+		doneArgs = append(doneArgs, account)
+	}
+	doneQuery += ` ORDER BY done_at DESC LIMIT 20`
+	r4, err := a.db.QueryContext(r.Context(), doneQuery, doneArgs...)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	for r4.Next() {
+		var id, account, thread, title, note string
+		if err := r4.Scan(&id, &account, &thread, &title, &note); err != nil {
+			r4.Close()
+			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
+			return
+		}
+		done = append(done, boardCard{CardID: id, Account: account, ThreadID: thread, Subject: title, Note: note})
+	}
+	if err := r4.Err(); err != nil {
+		r4.Close()
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	r4.Close()
+
+	writeJSON(w, map[string]any{
+		"needs_you":  cards,
+		"waiting_on": waitingCards,
+		"done":       done,
+	})
+}
+
+// handleBoardPin pins a thread. The current subject is snapshotted as the
+// card title so the card survives its account being disconnected. Re-pinning
+// an already-pinned thread is a no-op on the existing card: it does not reset
+// the done state or clobber the note, and the response says created=false so
+// the pin's undo cannot erase a card that existed before it (audit 4 F20).
+func (a *App) handleBoardPin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Account  string `json:"account"`
+		ThreadID string `json:"thread_id"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
+		return
+	}
+	if req.Account == "" || req.ThreadID == "" {
+		writeProblem(w, http.StatusUnprocessableEntity, "Missing Thread", "account and thread_id are required")
+		return
+	}
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+
+	var mirror, subject string
+	if err := a.mutationDB(r.Context()).QueryRowContext(r.Context(), `
+		SELECT m.account_id, m.subject FROM mail_messages m
+		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+		WHERE (m.account_id = $2 OR ea.id::text = $2) AND m.thread_id = $3
+		ORDER BY m.received_at DESC NULLS LAST LIMIT 1`, uid, req.Account, req.ThreadID).Scan(&mirror, &subject); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			a.log.Error("pin thread lookup failed", "err", err)
+		}
+		writeLookupProblem(w, err, "thread")
+		return
+	}
+
+	var id string
+	err = a.mutationDB(r.Context()).QueryRowContext(r.Context(), `
+		INSERT INTO board_cards (user_id, account_id, thread_key, title) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (user_id, account_id, thread_key) WHERE thread_key IS NOT NULL
+		DO NOTHING
+		RETURNING id::text`, uid, mirror, req.ThreadID, subject).Scan(&id)
+	switch {
+	case err == nil:
+		writeJSON(w, boardCard{CardID: id, Account: mirror, ThreadID: req.ThreadID, Subject: subject, Created: true})
+	case errors.Is(err, sql.ErrNoRows):
+		// Already pinned: report the existing card unchanged.
+		if err := a.mutationDB(r.Context()).QueryRowContext(r.Context(), `
+			SELECT id::text FROM board_cards
+			WHERE user_id = $1 AND account_id = $2 AND thread_key = $3`,
+			uid, mirror, req.ThreadID).Scan(&id); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				a.log.Error("existing pin lookup failed", "err", err)
+			}
+			writeLookupProblem(w, err, "thread pin")
+			return
+		}
+		writeJSON(w, boardCard{CardID: id, Account: mirror, ThreadID: req.ThreadID, Subject: subject})
+	default:
+		writeProblem(w, http.StatusInternalServerError, "Pin Failed", err.Error())
+	}
+}
+
+// handleBoardCard creates a manual note card — the only card with no mail
+// behind it.
+func (a *App) handleBoardCard(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Title string `json:"title"`
+		Note  string `json:"note"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
+		return
+	}
+	if req.Title == "" {
+		writeProblem(w, http.StatusUnprocessableEntity, "Missing Title", "title is required")
+		return
+	}
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	var id string
+	err = a.mutationDB(r.Context()).QueryRowContext(r.Context(), `
+		INSERT INTO board_cards (user_id, thread_key, title, note)
+		VALUES ($1, NULL, $2, $3) RETURNING id::text`, uid, req.Title, req.Note).Scan(&id)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Card Failed", err.Error())
+		return
+	}
+	writeJSON(w, boardCard{CardID: id, Subject: req.Title, Note: req.Note, Manual: true})
+}
+
+// handleBoardCardDone checks a card off (or restores it) without touching any
+// mail — derived cards are resolved by reading instead.
+func (a *App) handleBoardCardDone(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Done bool `json:"done"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
+		return
+	}
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	res, err := a.mutationDB(r.Context()).ExecContext(r.Context(), `
+		UPDATE board_cards SET done_at = CASE WHEN $3 THEN now() ELSE NULL END
+		WHERE user_id = $1 AND id = $2`, uid, r.PathValue("id"), req.Done)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Update Failed", err.Error())
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeProblem(w, http.StatusNotFound, "Not Found", "no such card")
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleBoardUnpin removes a card — the undo for a pin, and the delete for a
+// note. The mail itself never moved, so there is nothing to restore.
+func (a *App) handleBoardUnpin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CardID string `json:"card_id"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil || req.CardID == "" {
+		writeProblem(w, http.StatusUnprocessableEntity, "Missing Card", "card_id is required")
+		return
+	}
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	res, err := a.mutationDB(r.Context()).ExecContext(r.Context(),
+		`DELETE FROM board_cards WHERE user_id = $1 AND id = $2`, uid, req.CardID)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Delete Failed", err.Error())
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeProblem(w, http.StatusNotFound, "Not Found", "no such card")
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}

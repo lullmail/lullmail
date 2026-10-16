@@ -1,0 +1,179 @@
+package app
+
+import (
+	"context"
+	"database/sql"
+	"database/sql/driver"
+	"errors"
+	"io"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"testing/fstest"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+)
+
+// Liveness must stay 200 with a prompt "down" body even when the database
+// is unreachable: the probe has its own deadline, so a stalled pool cannot
+// hang the endpoint until the caller disconnects.
+func TestHealthStaysLiveWhenDatabaseIsDown(t *testing.T) {
+	db, err := sql.Open("pgx", "postgres://nobody:nopass@127.0.0.1:1/nowhere")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	for _, tc := range []struct {
+		name string
+		app  *App
+	}{
+		{"unreachable database", &App{db: db}},
+		{"no app at all", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			tc.app.handleHealth(w, httptest.NewRequest("GET", "/health", nil))
+			if w.Code != 200 {
+				t.Fatalf("status = %d, want 200", w.Code)
+			}
+			if !strings.Contains(w.Body.String(), `"database":"down"`) {
+				t.Fatalf("body = %s, want database down", w.Body.String())
+			}
+		})
+	}
+}
+
+// The split probes (audit 6 F12): /health/live answers liveness with no
+// dependency probes at all, and /health/ready refuses 200 until the
+// database answers so a deploy never cuts traffic over to an instance that
+// cannot serve mail.
+func TestHealthLiveIsAlwaysOK(t *testing.T) {
+	w := httptest.NewRecorder()
+	(*App)(nil).handleHealthLive(w, httptest.NewRequest("GET", "/health/live", nil))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `"status":"ok"`) {
+		t.Fatalf("body = %s, want ok", w.Body.String())
+	}
+}
+
+func TestHealthReadyRefusesWhenDatabaseIsDown(t *testing.T) {
+	db, err := sql.Open("pgx", "postgres://nobody:nopass@127.0.0.1:1/nowhere")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	for _, tc := range []struct {
+		name string
+		app  *App
+	}{
+		{"unreachable database", &App{db: db}},
+		{"no app at all", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			tc.app.handleHealthReady(w, httptest.NewRequest("GET", "/health/ready", nil))
+			if w.Code != 503 {
+				t.Fatalf("status = %d, want 503", w.Code)
+			}
+			if !strings.Contains(w.Body.String(), `"database":"down"`) {
+				t.Fatalf("body = %s, want database down", w.Body.String())
+			}
+		})
+	}
+}
+
+type readyPingDriver struct{}
+
+func (readyPingDriver) Open(string) (driver.Conn, error) { return readyPingConn{}, nil }
+
+type readyPingConn struct{}
+
+func (readyPingConn) Prepare(string) (driver.Stmt, error) { return nil, errors.New("not supported") }
+func (readyPingConn) Close() error                        { return nil }
+func (readyPingConn) Begin() (driver.Tx, error)           { return nil, errors.New("not supported") }
+func (readyPingConn) Ping(context.Context) error          { return nil }
+
+func TestHealthReadyPassesWhenDatabaseAnswers(t *testing.T) {
+	sql.Register("lullmail-ready-ping", readyPingDriver{})
+	db, err := sql.Open("lullmail-ready-ping", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	w := httptest.NewRecorder()
+	(&App{db: db}).handleHealthReady(w, httptest.NewRequest("GET", "/health/ready", nil))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `"status":"ready"`) {
+		t.Fatalf("body = %s, want ready", w.Body.String())
+	}
+}
+
+func TestServeHTMLVersionsStylesheet(t *testing.T) {
+	files := fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte(`<html><head><link rel="stylesheet" href="/styles.css"></head></html>`)},
+		"styles.css": &fstest.MapFile{Data: []byte(`body { color: red; }`)},
+	}
+	w := httptest.NewRecorder()
+	serveHTML(w, httptest.NewRequest("GET", "/", nil), newShellRenderer(files), "index.html")
+	response := w.Result()
+	body, _ := io.ReadAll(response.Body)
+	if response.StatusCode != 200 {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+	got := string(body)
+	if strings.Contains(got, `href="/styles.css"`) || !strings.Contains(got, `href="/styles.css?v=`) {
+		t.Fatalf("stylesheet was not content-versioned: %s", got)
+	}
+}
+
+func workerVersion(t *testing.T, files fstest.MapFS) string {
+	t.Helper()
+	w := httptest.NewRecorder()
+	serveServiceWorker(w, httptest.NewRequest("GET", "/service-worker.js", nil), newShellRenderer(files))
+	if w.Code != 200 {
+		t.Fatalf("status = %d", w.Code)
+	}
+	const marker = `const VERSION = "lull-shell-`
+	idx := strings.Index(w.Body.String(), marker)
+	if idx < 0 {
+		t.Fatalf("worker has no stamped version: %s", w.Body.String())
+	}
+	rest := w.Body.String()[idx+len(marker):]
+	return rest[:strings.Index(rest, `"`)]
+}
+
+// The cache version must change when any precached asset changes, not only
+// index.html: the worker serves icons and the manifest cache-first, so an
+// asset-only deploy has to produce a new version or those files stay stale.
+func TestServiceWorkerVersionCoversAllShellAssets(t *testing.T) {
+	shell := func(icon string, manifest string) fstest.MapFS {
+		return fstest.MapFS{
+			"index.html":           &fstest.MapFile{Data: []byte(`<html>unchanged shell</html>`)},
+			"service-worker.js":    &fstest.MapFile{Data: []byte(`const VERSION = "lull-shell-v1";` + "\n")},
+			"icon.svg":             &fstest.MapFile{Data: []byte(icon)},
+			"manifest.webmanifest": &fstest.MapFile{Data: []byte(manifest)},
+		}
+	}
+	before := workerVersion(t, shell("<svg>one</svg>", `{}`))
+	afterIcon := workerVersion(t, shell("<svg>two</svg>", `{}`))
+	afterManifest := workerVersion(t, shell("<svg>one</svg>", `{"v":2}`))
+	if before == "" || afterIcon == "" || afterManifest == "" {
+		t.Fatal("version stamp missing")
+	}
+	if afterIcon == before {
+		t.Fatal("icon-only deploy left the worker version unchanged")
+	}
+	if afterManifest == before {
+		t.Fatal("manifest-only deploy left the worker version unchanged")
+	}
+	if afterManifest == afterIcon {
+		t.Fatal("distinct asset changes produced the same version")
+	}
+}

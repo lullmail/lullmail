@@ -6,20 +6,22 @@ apps in the family should start from this page, not from this repo's history.
 
 ## Root is wiring and nothing else
 
-Root holds: `README.md`, `AGENTS.md`, `AUDIT_OPEN.md` (the live audit
-tracker), `LICENSE`, Go wiring (`main.go`, `app.go`, `config/env/embed`,
-`cmd_*.go` subcommands), and the deploy surfaces (`compose.yaml`,
-`teploy.yml`, `Dockerfile`). Any frozen process document goes under
-`docs/` — never the root.
+Root holds: `main.go` (the subcommand dispatcher and the dashboard asset
+embed — the only Go file at root), the docs (`README.md`, `AGENTS.md`,
+`AUDIT_OPEN.md`, `CONVENTIONS.md`), and the deploy surfaces
+(`compose.yaml`, `teploy.yml`, `Dockerfile`). Any frozen process document
+goes under `docs/` — never the root.
 
 ## One product package, by policy
 
-The product layer is a single `package main`. That is deliberate, not
-sprawl: the subsystems (outbox, identity, auth, accounts, briefing) share
-one `App`, one database handle, and one integration harness (`productPG`,
-`seedSession`, `jsonBody`). Splitting them into `internal/` packages would
-mean exporting dozens of identifiers and duplicating the harness — churn
-with no boundary gained.
+The product layer is a single package at `internal/app/`. That is
+deliberate, not sprawl: the subsystems (outbox, identity, auth, accounts,
+briefing) share one `App`, one database handle, and one integration
+harness (`productPG`, `seedSession`, `jsonBody`). Splitting them into
+further packages would mean exporting dozens of identifiers and
+duplicating the harness — churn with no boundary gained. `internal/app`
+exports exactly four entry points to `main.go`: `Serve`, `Migrate`,
+`RepairScans`, `BackfillBodies`.
 
 A subsystem earns its own package or module only when it has a **hard
 boundary**: its own deployable, its own consumers outside this repo, or no

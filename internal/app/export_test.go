@@ -1,0 +1,223 @@
+package app
+
+import (
+	"archive/zip"
+	"bytes"
+	"context"
+	"database/sql/driver"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	stdmail "net/mail"
+	"strings"
+	"testing"
+	"time"
+
+	nmail "github.com/neutron-build/neutron/mail"
+)
+
+func TestAccountExportFallsBackToMirrorWhenProviderUnreachable(t *testing.T) {
+	// A resolver failure must degrade the export to the local mirror, not
+	// 502: the product promise is that a user's exit never depends on a
+	// healthy upstream. The credential below is an IMAP account with no
+	// host, so the resolver refuses it before any dialing.
+	cfg := &Config{SecretKey: "0123456789abcdef0123456789abcdef"}
+	sealed, err := sealSecret(cfg, "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &App{
+		cfg: cfg,
+		log: discardLogger(),
+		db: openStepDB(t,
+			dbStep{kind: "query", rows: &testRows{
+				columns: []string{"mirror_account_id", "address"},
+				values:  [][]driver.Value{{"mirror-1", "user@example.com"}},
+			}},
+			dbStep{kind: "query", rows: emptyRows("id", "name")},
+			dbStep{kind: "query", rows: &testRows{
+				columns: []string{"provider", "address", "username", "host", "port", "cred_ciphertext"},
+				values:  [][]driver.Value{{"imap", "user@example.com", "user", "", int64(0), sealed}},
+			}},
+		),
+	}
+	w := httptest.NewRecorder()
+	a.handleAccountExport(w, requestAsOwner(http.MethodGet, "/api/accounts/1/export"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Type"); got != "application/zip" {
+		t.Fatalf("content type = %q, want application/zip", got)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(w.Body.Bytes()), int64(w.Body.Len()))
+	if err != nil {
+		t.Fatalf("response is not a readable zip: %v", err)
+	}
+	var manifest exportManifest
+	for _, f := range zr.File {
+		if f.Name != "export-manifest.json" {
+			continue
+		}
+		rc, _ := f.Open()
+		raw, _ := io.ReadAll(rc)
+		rc.Close()
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			t.Fatalf("manifest is not JSON: %v", err)
+		}
+	}
+	if len(manifest.Warnings) == 0 || !strings.Contains(manifest.Warnings[0], "local mirror") {
+		t.Fatalf("manifest does not note mirror-only mode: %v", manifest.Warnings)
+	}
+}
+
+func TestWriteMboxRDEscapesOnlyBodyFromLines(t *testing.T) {
+	envelope := &nmail.Envelope{
+		From:   []nmail.Address{{Email: "sender@example.com"}},
+		SentAt: time.Date(2026, time.August, 25, 10, 11, 12, 0, time.UTC),
+	}
+	raw := []byte("From: sender@example.com\r\nSubject: test\r\n\r\nFrom body\r\n>From quoted\r\nordinary")
+	var got bytes.Buffer
+	if err := writeMboxRD(&got, envelope, raw); err != nil {
+		t.Fatal(err)
+	}
+	want := "From sender@example.com Tue Aug 25 10:11:12 2026\n" +
+		"From: sender@example.com\nSubject: test\n\n" +
+		">From body\n>>From quoted\nordinary\n\n"
+	if got.String() != want {
+		t.Fatalf("mboxrd mismatch\n--- got ---\n%s\n--- want ---\n%s", got.String(), want)
+	}
+}
+
+func TestMirrorEMLIsParseableAndHonestAboutFallback(t *testing.T) {
+	envelope := &nmail.Envelope{
+		ID:              "h:abc",
+		From:            []nmail.Address{{Name: "Sender", Email: "sender@example.com"}},
+		To:              []nmail.Address{{Email: "you@example.com"}},
+		Subject:         "A useful subject",
+		SentAt:          time.Date(2026, time.August, 25, 10, 0, 0, 0, time.UTC),
+		MessageIDHeader: "<real@example.com>",
+		Attachment:      nmail.AttachmentFromBool(true),
+	}
+	body := &nmail.Body{Text: "hello", HTML: "<p>hello</p>"}
+	raw := mirrorEML(envelope, body, io.ErrUnexpectedEOF)
+	parsed, err := stdmail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("fallback is not valid RFC 5322: %v\n%s", err, raw)
+	}
+	if parsed.Header.Get("Message-ID") != "<real@example.com>" {
+		t.Fatalf("message-id = %q", parsed.Header.Get("Message-ID"))
+	}
+	if !strings.Contains(parsed.Header.Get("X-Lullmail-Export-Warning"), "mirror") {
+		t.Fatalf("missing fallback warning: %q", parsed.Header.Get("X-Lullmail-Export-Warning"))
+	}
+	if parsed.Header.Get("X-Lullmail-Attachment-Warning") == "" {
+		t.Fatal("attachment loss was not disclosed")
+	}
+	if !strings.HasPrefix(parsed.Header.Get("Content-Type"), "multipart/alternative") {
+		t.Fatalf("content-type = %q", parsed.Header.Get("Content-Type"))
+	}
+}
+
+// The attachment warning is a claim about omitted bytes, so only Present
+// earns it. Unknown (GMAIL-03: a metadata envelope cannot see the part
+// tree) and Absent promise nothing the fallback render would drop, and
+// must stay silent rather than inherit the old boolean's FALSE-means-no
+// / TRUE-means-yes collapse.
+func TestMirrorEMLAttachmentWarningOnlyOnPresent(t *testing.T) {
+	render := func(id string, state nmail.AttachmentState) *stdmail.Message {
+		t.Helper()
+		envelope := &nmail.Envelope{
+			ID: nmail.MessageID(id), Subject: "tri-state",
+			SentAt:     time.Date(2026, time.October, 16, 9, 0, 0, 0, time.UTC),
+			Attachment: state,
+		}
+		raw := mirrorEML(envelope, &nmail.Body{Text: "hello"}, io.ErrUnexpectedEOF)
+		parsed, err := stdmail.ReadMessage(bytes.NewReader(raw))
+		if err != nil {
+			t.Fatalf("fallback is not valid RFC 5322: %v\n%s", err, raw)
+		}
+		return parsed
+	}
+	if got := render("h:unknown", nmail.AttachmentUnknown).Header.Get("X-Lullmail-Attachment-Warning"); got != "" {
+		t.Fatalf("unknown state claimed attachment loss: %q", got)
+	}
+	if got := render("h:absent", nmail.AttachmentAbsent).Header.Get("X-Lullmail-Attachment-Warning"); got != "" {
+		t.Fatalf("absent state claimed attachment loss: %q", got)
+	}
+	if got := render("h:present", nmail.AttachmentPresent).Header.Get("X-Lullmail-Attachment-Warning"); got == "" {
+		t.Fatal("present state did not disclose attachment loss")
+	}
+}
+
+func TestSafeExportNameCannotCreateArchivePaths(t *testing.T) {
+	got := safeExportName(" ../Work/Receipts:\n2026 ")
+	if got != "Work-Receipts-2026" {
+		t.Fatalf("safeExportName = %q", got)
+	}
+	if strings.ContainsAny(got, "/\\") {
+		t.Fatalf("unsafe separator in %q", got)
+	}
+}
+
+func TestAppendExportWarningIsBounded(t *testing.T) {
+	var warnings []string
+	for i := 0; i < 130; i++ {
+		warnings = appendExportWarning(warnings, "warning")
+	}
+	if len(warnings) != 101 {
+		t.Fatalf("got %d warnings, want 101", len(warnings))
+	}
+	if warnings[100] != "Further warnings omitted from this manifest." {
+		t.Fatalf("missing truncation marker: %q", warnings[100])
+	}
+}
+
+// Distinct folders whose sanitized bases collide (a, a, a-2) must yield
+// three distinct ZIP filenames, not a duplicated entry an extractor would
+// overwrite (audit EXPORT-02).
+func TestUniqueMboxNameNeverDuplicates(t *testing.T) {
+	used := map[string]bool{}
+	got := []string{
+		uniqueMboxName("a", used),
+		uniqueMboxName("a", used),
+		uniqueMboxName("a-2", used),
+		uniqueMboxName("A", used), // case-only collision
+	}
+	seen := map[string]bool{}
+	for _, name := range got {
+		if seen[name] {
+			t.Fatalf("duplicate allocation %q in %v", name, got)
+		}
+		seen[name] = true
+	}
+	want := []string{"a.mbox", "a-2.mbox", "a-2-2.mbox", "a-3.mbox"}
+	for i := range want {
+		if !strings.EqualFold(got[i], want[i]) {
+			t.Fatalf("allocation %d = %q, want %q (all: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestExportProviderTimeoutFallsBackButRequestCancellationStops(t *testing.T) {
+	for _, sourceErr := range []error{context.DeadlineExceeded, context.Canceled, fmt.Errorf("provider: %w", context.DeadlineExceeded)} {
+		if outcome := exportSourceOutcome(context.Background(), sourceErr); outcome != "fallback" {
+			t.Fatalf("healthy request with %v became %s", sourceErr, outcome)
+		}
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, stop := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer stop()
+	for _, ctx := range []context.Context{cancelled, expired} {
+		for _, sourceErr := range []error{nil, context.DeadlineExceeded} {
+			if outcome := exportSourceOutcome(ctx, sourceErr); outcome != "cancelled" {
+				t.Fatalf("ended request continued as %s", outcome)
+			}
+		}
+	}
+	if outcome := exportSourceOutcome(context.Background(), nil); outcome != "original" {
+		t.Fatal("healthy original misclassified", outcome)
+	}
+}

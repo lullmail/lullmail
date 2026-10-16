@@ -1,0 +1,1050 @@
+package app
+
+// Account connect flow (TASKS 1.3): create/list/delete connected mailboxes,
+// store credentials encrypted, drive on-demand sync. The mirror account is
+// created here; neutron-mail never learns the credential persistently.
+
+import (
+	"context"
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+
+	"github.com/neutron-build/neutron/mail"
+)
+
+type accountJSON struct {
+	ID              string  `json:"id"`
+	MirrorAccountID string  `json:"mirror_account_id"`
+	Provider        string  `json:"provider"`
+	Address         string  `json:"address"`
+	Label           string  `json:"label"`
+	BackfillDays    int     `json:"backfill_days"`
+	RetentionDays   int     `json:"retention_days"`
+	SyncEnabled     bool    `json:"sync_enabled"`
+	LastSyncAt      *string `json:"last_sync_at"`
+	LastError       *string `json:"last_error"`
+	MessageCount    int     `json:"message_count"`
+	ScreenerCount   int     `json:"screener_count"`
+
+	// Desired vs applied policy versions (audit 5 API-04): a client can
+	// tell a requested transition from one whose data work finished.
+	PolicyVersion        int64 `json:"policy_version"`
+	AppliedPolicyVersion int64 `json:"applied_policy_version"`
+
+	// Reconcile is the durable policy-transition job state (DATA-08):
+	// nil when no transition is outstanding.
+	Reconcile map[string]any `json:"reconcile,omitempty"`
+}
+
+func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		a.listAccountsJSON(w, r)
+	case http.MethodPost:
+		a.createAccount(w, r)
+	default:
+		writeProblem(w, http.StatusMethodNotAllowed, "Method Not Allowed", "use GET or POST")
+	}
+}
+
+func (a *App) listAccountsJSON(w http.ResponseWriter, r *http.Request) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	// The reconcile job rides along as one LEFT JOIN (audit 5 API-04):
+	// the response type always declared it, but the list never selected
+	// it — a polling client could not see a failed restoration job or
+	// tell desired from applied policy through this endpoint.
+	rows, err := a.db.QueryContext(r.Context(), `
+		SELECT ea.id, ea.mirror_account_id, ea.provider, ea.address, ea.label, ea.backfill_days, ea.retention_days, ea.sync_enabled,
+		       COALESCE(ea.last_sync_at::text,''), COALESCE(ea.last_error,''),
+		       (SELECT count(*) FROM mail_messages m WHERE m.account_id = ea.mirror_account_id),
+		       (SELECT count(*) FROM hey_messages h
+		         JOIN mail_messages m ON m.account_id = h.account_id AND m.id = h.message_id
+		          AND m.account_id = ea.mirror_account_id
+		         WHERE h.user_id = ea.user_id AND h.bucket = 'screener'),
+		       ea.policy_version, ea.applied_policy_version,
+		       j.state, j.policy_version, j.full_enumeration, COALESCE(j.last_error,'')
+		FROM email_accounts ea
+		LEFT JOIN account_reconcile_jobs j ON j.account_id = ea.mirror_account_id
+		WHERE ea.user_id = $1 ORDER BY ea.created_at`, uid)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	defer rows.Close()
+
+	out := []accountJSON{}
+	for rows.Next() {
+		var acc accountJSON
+		var lastSync, lastErr string
+		var jobState, jobError sql.NullString
+		var jobVersion sql.NullInt64
+		var jobFull sql.NullBool
+		if err := rows.Scan(&acc.ID, &acc.MirrorAccountID, &acc.Provider, &acc.Address, &acc.Label, &acc.BackfillDays, &acc.RetentionDays, &acc.SyncEnabled,
+			&lastSync, &lastErr, &acc.MessageCount, &acc.ScreenerCount,
+			&acc.PolicyVersion, &acc.AppliedPolicyVersion,
+			&jobState, &jobVersion, &jobFull, &jobError); err != nil {
+			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
+			return
+		}
+		if lastSync != "" {
+			acc.LastSyncAt = &lastSync
+		}
+		if lastErr != "" {
+			acc.LastError = &lastErr
+		}
+		if jobState.Valid {
+			reconcile := map[string]any{
+				"state":            jobState.String,
+				"policy_version":   jobVersion.Int64,
+				"full_enumeration": jobFull.Bool,
+			}
+			if jobError.Valid && jobError.String != "" {
+				reconcile["last_error"] = jobError.String
+			}
+			acc.Reconcile = reconcile
+		}
+		out = append(out, acc)
+	}
+	if err := rows.Err(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	writeJSON(w, out)
+}
+
+// putMirrorAccountTx inserts the engine's mail_accounts row THROUGH the
+// product's own transaction (audit 5 DATA-05): the mirror account and its
+// email_accounts row must commit or vanish together, and the engine
+// pool's separate commit left an orphan mirror account whenever the
+// process died between the two. The account maintenance advisory lock is
+// the transaction's FIRST statement — the same lock order every mirror
+// writer shares (audit SYNC-04).
+func putMirrorAccountTx(ctx context.Context, tx *sql.Tx, acct mail.AccountID, provider mail.Provider, email, name string) error {
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock($1)`, mail.AccountLockKey(acct)); err != nil {
+		return fmt.Errorf("account maintenance lock: %w", err)
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO mail_accounts (id, provider, email, name, needs_reauth)
+		VALUES ($1, $2, $3, $4, false)`,
+		string(acct), string(provider), email, name)
+	return err
+}
+
+// isUniqueViolation reports a PostgreSQL unique-constraint rejection
+// (SQLSTATE 23505) — e.g. two validated connect requests racing past the
+// duplicate pre-check land here.
+func isUniqueViolation(err error) bool {
+	var pgErr interface{ SQLState() string }
+	return errors.As(err, &pgErr) && pgErr.SQLState() == "23505"
+}
+
+func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Provider     string `json:"provider"`
+		Address      string `json:"address"`
+		Username     string `json:"username"`
+		Password     string `json:"password"`
+		Host         string `json:"host"`
+		Port         int    `json:"port"`
+		SMTPHost     string `json:"smtp_host"`
+		SMTPPort     int    `json:"smtp_port"`
+		Label        string `json:"label"`
+		BackfillDays *int   `json:"backfill_days"`
+	}
+	if err := decodeJSONLimit(w, r, &req, 64<<10); err != nil {
+		writeDecodeProblem(w, err)
+		return
+	}
+	if req.Provider == "" {
+		req.Provider = "imap"
+	}
+	if req.Provider != "imap" && req.Provider != "jmap" {
+		writeProblem(w, http.StatusUnprocessableEntity, "Unsupported Provider", "v0 supports imap and jmap; gmail/graph arrive in Phase 1b")
+		return
+	}
+	if req.Address == "" || req.Password == "" || req.Host == "" {
+		writeProblem(w, http.StatusUnprocessableEntity, "Missing Fields", "address, password and host are required")
+		return
+	}
+	if req.Username == "" {
+		req.Username = req.Address
+	}
+	if req.Port == 0 {
+		if req.Provider == "jmap" {
+			req.Port = 443
+		} else {
+			req.Port = 993
+		}
+	}
+	// Pointer field: omitted means the 90-day default, an explicit 0 means
+	// "All history" — the two must not collapse into one value.
+	backfill := 90
+	if req.BackfillDays != nil {
+		if *req.BackfillDays < 0 || *req.BackfillDays > 3650 {
+			writeProblem(w, http.StatusUnprocessableEntity, "Invalid Backfill", "days must be 0 (all history) through 3650")
+			return
+		}
+		backfill = *req.BackfillDays
+	}
+
+	cred := storedCredential(mail.Provider(req.Provider), req.Address, req.Username, req.Password, req.Host, req.Port)
+
+	// Validate before storing: dial and list mailboxes. A typo'd host must
+	// not become a credential row that fails on every scheduler tick.
+	resolve := newResolver()
+	adapter, release, err := resolve(r.Context(), "verify", cred)
+	if err != nil {
+		writeProblem(w, http.StatusBadGateway, "Connect Failed", err.Error())
+		return
+	}
+	boxes, err := adapter.Mailboxes(r.Context())
+	release()
+	if err != nil {
+		writeProblem(w, http.StatusBadGateway, "Mailboxes Failed", err.Error())
+		return
+	}
+	roleCount := 0
+	for _, b := range boxes {
+		if b.Role != "" {
+			roleCount++
+		}
+	}
+
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	var exists bool
+	if err := a.db.QueryRowContext(r.Context(),
+		`SELECT EXISTS(SELECT 1 FROM email_accounts WHERE user_id=$1 AND lower(address)=lower($2))`,
+		uid, req.Address).Scan(&exists); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	if exists {
+		writeProblem(w, http.StatusConflict, "Already Connected", "that address is already connected")
+		return
+	}
+	ciphertext, err := sealSecret(a.config(), req.Password)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Encrypt Failed", err.Error())
+		return
+	}
+
+	mirrorID := newID()
+	a.accountOwnerMu.RLock()
+	defer a.accountOwnerMu.RUnlock()
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Begin Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+
+	// One transaction carries BOTH rows (audit 5 DATA-05): the mirror
+	// account and its email_accounts owner commit together or not at all
+	// — no orphan mirror can survive a crash between two commits, so the
+	// deferred cleanup that could not run after process death is gone.
+	// Two validated requests racing past the pre-check also land on the
+	// uniqueness constraint here, answering 409 instead of 500.
+	if err := putMirrorAccountTx(r.Context(), tx, mail.AccountID(mirrorID), cred.Provider, req.Address, req.Label); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Mirror Account Failed", err.Error())
+		return
+	}
+	var accID string
+	err = tx.QueryRowContext(r.Context(), `
+		INSERT INTO email_accounts
+		  (user_id, mirror_account_id, provider, address, label, username, host, port,
+		   smtp_host, smtp_port, cred_ciphertext, backfill_days)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		RETURNING id::text`,
+		uid, string(mirrorID), req.Provider, req.Address, req.Label, req.Username,
+		req.Host, req.Port, req.SMTPHost, req.SMTPPort, ciphertext, backfill).Scan(&accID)
+	if err != nil {
+		if isUniqueViolation(err) {
+			writeProblem(w, http.StatusConflict, "Already Connected", "that address is already connected")
+			return
+		}
+		writeProblem(w, http.StatusInternalServerError, "Insert Failed", err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Commit Failed", err.Error())
+		return
+	}
+
+	// Initial sync in the background: the API answers immediately, the UI
+	// polls account status while envelopes land. The launch is owned by
+	// the app's task group and runs on the account's gate context, so
+	// shutdown joins it and a deletion cancels it (audit OPS-04/05).
+	a.launchAccountSync(mail.AccountID(mirrorID))
+
+	writeJSON(w, map[string]any{"id": accID, "mailboxes": len(boxes), "with_roles": roleCount})
+}
+
+func (a *App) handleAccountItem(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	switch r.Method {
+	case http.MethodGet:
+		a.getAccountJSON(w, r, id)
+	case http.MethodDelete:
+		a.deleteAccount(w, r, id)
+	case http.MethodPost:
+		if r.URL.Query().Get("op") == "sync" {
+			a.triggerSync(w, r, id)
+			return
+		}
+		if r.URL.Query().Get("op") == "retention" {
+			a.updateRetention(w, r, id)
+			return
+		}
+		if r.URL.Query().Get("op") == "backfill" {
+			a.updateBackfill(w, r, id)
+			return
+		}
+		if r.URL.Query().Get("op") == "sync_enabled" {
+			a.updateSyncEnabled(w, r, id)
+			return
+		}
+		writeProblem(w, http.StatusBadRequest, "Unknown Op", "use ?op=sync, ?op=retention, ?op=backfill, or ?op=sync_enabled")
+	default:
+		writeProblem(w, http.StatusMethodNotAllowed, "Method Not Allowed", "use GET, DELETE, or POST with an ?op=")
+	}
+}
+
+// getAccountJSON returns one account in the same shape as the list, so a
+// caller refreshing a single connection reads what the list would show —
+// including the desired/applied policy versions, which the list exposes
+// through the same accountJSON fields (a detail refresh that zeroed them
+// could not distinguish a pending policy transition from an applied one).
+func (a *App) getAccountJSON(w http.ResponseWriter, r *http.Request, id string) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	var acc accountJSON
+	var lastSync, lastErr string
+	err = a.db.QueryRowContext(r.Context(), `
+		SELECT ea.id, ea.mirror_account_id, ea.provider, ea.address, ea.label, ea.backfill_days, ea.retention_days, ea.sync_enabled,
+		       COALESCE(ea.last_sync_at::text,''), COALESCE(ea.last_error,''),
+		       (SELECT count(*) FROM mail_messages m WHERE m.account_id = ea.mirror_account_id),
+		       (SELECT count(*) FROM hey_messages h
+		         JOIN mail_messages m ON m.account_id = h.account_id AND m.id = h.message_id
+		          AND m.account_id = ea.mirror_account_id
+		         WHERE h.user_id = ea.user_id AND h.bucket = 'screener'),
+		       ea.policy_version, ea.applied_policy_version
+		FROM email_accounts ea
+		WHERE ea.user_id = $1 AND ea.id::text = $2`, uid, id).
+		Scan(&acc.ID, &acc.MirrorAccountID, &acc.Provider, &acc.Address, &acc.Label, &acc.BackfillDays, &acc.RetentionDays, &acc.SyncEnabled,
+			&lastSync, &lastErr, &acc.MessageCount, &acc.ScreenerCount,
+			&acc.PolicyVersion, &acc.AppliedPolicyVersion)
+	if err == sql.ErrNoRows {
+		writeProblem(w, http.StatusNotFound, "Not Found", "no such account")
+		return
+	}
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	if lastSync != "" {
+		acc.LastSyncAt = &lastSync
+	}
+	if lastErr != "" {
+		acc.LastError = &lastErr
+	}
+	if job, err := a.loadReconcileJob(r.Context(), acc.ID); err == nil && job != nil {
+		acc.Reconcile = job.asJSON()
+	}
+	writeJSON(w, acc)
+}
+
+// loadReconcileJob reads the durable reconciliation job for one product
+// account, so the UI can show "rebuilding retained history" until the
+// staged rescan actually finished (audit DATA-08/SYNC-05).
+func (a *App) loadReconcileJob(ctx context.Context, id string) (*reconcileJob, error) {
+	row := a.db.QueryRowContext(ctx, `
+		SELECT j.account_id, j.policy_version, j.state, j.full_enumeration, COALESCE(j.last_error,'')
+		FROM account_reconcile_jobs j
+		JOIN email_accounts ea ON ea.mirror_account_id = j.account_id
+		WHERE ea.id::text = $1`, id)
+	var job reconcileJob
+	var state string
+	if err := row.Scan(&job.AccountID, &job.PolicyVersion, &state, &job.FullEnumeration, &job.LastError); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	job.State = state
+	job.HasError = job.LastError != ""
+	return &job, nil
+}
+
+// decodeSettingsJSON reads exactly one bounded JSON document with unknown
+// fields rejected. Non-pointer request shapes cannot tell "field omitted"
+// from an explicit zero, and zero is a meaningful value on these endpoints
+// (0 = all history / forever) (audit 3 DATA-07).
+func decodeSettingsJSON(w http.ResponseWriter, r *http.Request, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return err
+		}
+		return errors.New("request must contain exactly one JSON object")
+	}
+	return nil
+}
+
+func writeSettingsDecodeError(w http.ResponseWriter, err error) {
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		writeProblem(w, http.StatusRequestEntityTooLarge, "Request Too Large", "the settings body is too large")
+		return
+	}
+	writeProblem(w, http.StatusBadRequest, "Bad Request", err.Error())
+}
+
+// updateSyncEnabled flips the background-sync pause. Manual ?op=sync stays
+// available either way — pausing the scheduler is not pausing the owner.
+func (a *App) updateSyncEnabled(w http.ResponseWriter, r *http.Request, id string) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, 500, "Lookup Failed", err.Error())
+		return
+	}
+	var req struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := decodeSettingsJSON(w, r, &req); err != nil {
+		writeSettingsDecodeError(w, err)
+		return
+	}
+	if req.Enabled == nil {
+		writeProblem(w, 422, "Missing Flag", "enabled is required and must be true or false")
+		return
+	}
+	result, err := a.db.ExecContext(r.Context(), `UPDATE email_accounts SET sync_enabled=$1 WHERE id=$2 AND user_id=$3`, *req.Enabled, id, uid)
+	if err != nil {
+		writeProblem(w, 500, "Update Failed", err.Error())
+		return
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		writeProblem(w, 404, "Not Found", "no such account")
+		return
+	}
+	writeJSON(w, map[string]any{"sync_enabled": *req.Enabled})
+}
+
+// updateBackfill sets how much history the product organizes. Zero means
+// "All history": every mirrored message is eligible for the filing views.
+// The setting change and its durable reconciliation job commit together
+// (audit DATA-08): the transition itself — shrink deletes filing rows
+// outside the window, grow classifies newly included mail — is applied by
+// the job worker, and the endpoint answers 202 with the job state.
+func (a *App) updateBackfill(w http.ResponseWriter, r *http.Request, id string) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, 500, "Lookup Failed", err.Error())
+		return
+	}
+	var req struct {
+		Days *int `json:"days"`
+	}
+	if err := decodeSettingsJSON(w, r, &req); err != nil {
+		writeSettingsDecodeError(w, err)
+		return
+	}
+	if req.Days == nil || *req.Days < 0 || *req.Days > 3650 {
+		writeProblem(w, 422, "Invalid Backfill", "days is required and must be 0 (all history) through 3650")
+		return
+	}
+
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeProblem(w, 500, "Backfill Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+
+	var mirror string
+	var version int64
+	if err := tx.QueryRowContext(r.Context(), `
+		UPDATE email_accounts SET backfill_days = $3, policy_version = policy_version + 1
+		WHERE id = $1 AND user_id = $2
+		RETURNING mirror_account_id, policy_version`,
+		id, uid, *req.Days).Scan(&mirror, &version); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			a.log.Error("backfill account lookup failed", "err", err)
+		}
+		writeLookupProblem(w, err, "account")
+		return
+	}
+	// Backfill is the classification window, not the mirror window:
+	// restoring pruned mirror content is retention's job (SYNC-05), so
+	// this job is always a local transition.
+	if err := upsertReconcileJobTx(r.Context(), tx, mirror, version, false); err != nil {
+		writeProblem(w, 500, "Backfill Failed", err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeProblem(w, 500, "Backfill Failed", err.Error())
+		return
+	}
+
+	a.kickReconcileJob(mirror)
+	writeJSONStatus(w, http.StatusAccepted, map[string]any{
+		"backfill_days": *req.Days,
+		"reconcile": (&reconcileJob{
+			PolicyVersion:   version,
+			State:           "pending",
+			FullEnumeration: false,
+		}).asJSON(),
+	})
+}
+
+// updateRetention commits the desired policy and a durable
+// reconciliation job in ONE transaction (audit DATA-08): the response is
+// 202 with the job state, never a claim that the data transition already
+// happened. Widening the window (or lifting it) needs a full staged
+// rescan to RESTORE older messages the incremental feed will never
+// re-report (audit SYNC-05); narrowing is a local sweep only.
+func (a *App) updateRetention(w http.ResponseWriter, r *http.Request, id string) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, 500, "Lookup Failed", err.Error())
+		return
+	}
+	var req struct {
+		Days *int `json:"days"`
+	}
+	if err := decodeSettingsJSON(w, r, &req); err != nil {
+		writeSettingsDecodeError(w, err)
+		return
+	}
+	if req.Days == nil || *req.Days < 0 || *req.Days > 3650 {
+		writeProblem(w, 422, "Invalid Retention", "days is required and must be 0 (forever) through 3650")
+		return
+	}
+
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeProblem(w, 500, "Retention Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+
+	var oldDays int
+	var mirror string
+	if err := tx.QueryRowContext(r.Context(),
+		`SELECT retention_days FROM email_accounts WHERE id = $1 AND user_id = $2 FOR UPDATE`,
+		id, uid).Scan(&oldDays); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeProblem(w, 404, "Not Found", "no such account")
+			return
+		}
+		writeProblem(w, 500, "Retention Failed", err.Error())
+		return
+	}
+
+	var version int64
+	if err := tx.QueryRowContext(r.Context(), `
+		UPDATE email_accounts SET retention_days = $3, policy_version = policy_version + 1
+		WHERE id = $1 AND user_id = $2
+		RETURNING mirror_account_id, policy_version`,
+		id, uid, *req.Days).Scan(&mirror, &version); err != nil {
+		writeProblem(w, 500, "Retention Failed", err.Error())
+		return
+	}
+	full := needsRetentionExpansion(oldDays, *req.Days)
+	if err := upsertReconcileJobTx(r.Context(), tx, mirror, version, full); err != nil {
+		writeProblem(w, 500, "Retention Failed", err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeProblem(w, 500, "Retention Failed", err.Error())
+		return
+	}
+
+	a.kickReconcileJob(mirror)
+	writeJSONStatus(w, http.StatusAccepted, map[string]any{
+		"retention_days": *req.Days,
+		"reconcile": (&reconcileJob{
+			PolicyVersion:   version,
+			State:           "pending",
+			FullEnumeration: full,
+		}).asJSON(),
+	})
+}
+
+// Retention affects only the local encrypted/mirrored copy; it never issues a
+// delete operation to the mail provider. Zero means keep the mirror forever.
+func (a *App) applyRetention(ctx context.Context, uid string) error {
+	rows, err := a.db.QueryContext(ctx, `SELECT mirror_account_id,retention_days FROM email_accounts WHERE user_id=$1 AND retention_days>0`, uid)
+	if err != nil {
+		return err
+	}
+	type policy struct {
+		mirror string
+		days   int
+	}
+	var policies []policy
+	for rows.Next() {
+		var p policy
+		if err := rows.Scan(&p.mirror, &p.days); err != nil {
+			rows.Close()
+			return err
+		}
+		policies = append(policies, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, p := range policies {
+		releaseUse, ok := a.beginAccountUse(mail.AccountID(p.mirror))
+		if !ok {
+			continue
+		}
+		if err := a.applyAccountRetention(ctx, uid, mail.AccountID(p.mirror), p.days); err != nil {
+			releaseUse()
+			return err
+		}
+		releaseUse()
+	}
+	return nil
+}
+
+// applyBackfillWindow enforces the classification window's shrink half:
+// filing rows for messages that left the window go; mirror data stays
+// (that is retention's business) and provider mail is never touched.
+func (a *App) applyBackfillWindow(ctx context.Context, uid string, acct mail.AccountID, days int) error {
+	if days <= 0 {
+		return nil
+	}
+	_, err := a.db.ExecContext(ctx, `
+		DELETE FROM hey_messages WHERE user_id=$1 AND account_id=$2 AND message_id IN (
+		  SELECT m.id FROM mail_messages m
+		  WHERE m.account_id=$2
+		    AND $3 > 0
+		    AND (m.received_at AT TIME ZONE 'UTC') <= now() - make_interval(days => $3))`,
+		uid, string(acct), days)
+	if err != nil {
+		return fmt.Errorf("backfill window: %w", err)
+	}
+	return nil
+}
+
+// applyAccountRetention prunes the local mirror past the cutoff under the
+// account maintenance advisory lock — the same lock every engine mirror
+// write takes as its first statement — so a concurrent sync writeback can
+// never reinsert what retention just removed or strand a body whose
+// parent expired mid-fetch (audit SYNC-04).
+func (a *App) applyAccountRetention(ctx context.Context, uid string, acct mail.AccountID, days int) error {
+	if days <= 0 {
+		return nil
+	}
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock($1)`, mail.AccountLockKey(acct)); err != nil {
+		return fmt.Errorf("account maintenance lock: %w", err)
+	}
+	deletes := []struct {
+		query string
+		args  []any
+	}{
+		{`DELETE FROM hey_messages WHERE user_id=$1 AND account_id=$2 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$2 AND (received_at AT TIME ZONE 'UTC') < now()-($3 * interval '1 day'))`, []any{uid, string(acct), days}},
+		{`DELETE FROM push_deliveries WHERE user_id=$1 AND account_id=$2 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$2 AND (received_at AT TIME ZONE 'UTC') < now()-($3 * interval '1 day'))`, []any{uid, string(acct), days}},
+		{`DELETE FROM mail_message_mailboxes WHERE account_id=$1 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$1 AND (received_at AT TIME ZONE 'UTC') < now()-($2 * interval '1 day'))`, []any{string(acct), days}},
+		{`DELETE FROM mail_bodies WHERE account_id=$1 AND message_id IN (SELECT id FROM mail_messages WHERE account_id=$1 AND (received_at AT TIME ZONE 'UTC') < now()-($2 * interval '1 day'))`, []any{string(acct), days}},
+		{`DELETE FROM mail_messages WHERE account_id=$1 AND (received_at AT TIME ZONE 'UTC') < now()-($2 * interval '1 day')`, []any{string(acct), days}},
+	}
+	for _, deletion := range deletes {
+		if _, err := tx.ExecContext(ctx, deletion.query, deletion.args...); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (a *App) deleteAccount(w http.ResponseWriter, r *http.Request, id string) {
+	// Serialize this whole seal/drain/delete against full-owner deletion.
+	// An already sealed gate can mean an IN-PROGRESS account deletion,
+	// not a retired account; the owner must not skip its unfinished work.
+	// Account deletions take only the read side, so unrelated mailboxes
+	// remain independent. This route is not inside accountWorkLifecycle,
+	// and full-owner deletion performs its own SQL rather than calling it.
+	a.accountOwnerMu.RLock()
+	defer a.accountOwnerMu.RUnlock()
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	var mirror string
+	err = a.db.QueryRowContext(r.Context(),
+		`SELECT mirror_account_id FROM email_accounts WHERE id = $1 AND user_id = $2`, id, uid).Scan(&mirror)
+	if err == sql.ErrNoRows {
+		writeProblem(w, http.StatusNotFound, "Not Found", "no such account")
+		return
+	}
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	// Serialize the whole count/seal/delete sequence against concurrent
+	// send admission: without this gate, a send accepted between the first
+	// count and the seal is later cancelled by the seal (the worker sees a
+	// sealed account and records not_submitted) and then erased by the
+	// final count — an acknowledged, durable composition disappears. With
+	// the gate held across the entire disconnect, an acceptance that owns
+	// it first finishes its commit and is counted here (the deletion
+	// refuses before any cancellation), and a deletion that owns it first
+	// seals the account so a waiting send is refused without an
+	// acknowledgment. Deletion keeps its existing owner read-lock order and
+	// acquires this gate before the count; rollback/unseal (finishDelete)
+	// runs before the gate unlocks, so after an aborted deletion a waiting
+	// send may legitimately succeed. The account-work lease is never held
+	// while waiting for the global outbox SQL lock, so draining cannot
+	// deadlock against an admitted send's commit.
+	unlockAdmission, err := a.outboxAdmissionGateOf(mail.AccountID(mirror)).Lock(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusServiceUnavailable, "Delete Busy",
+			"this account is accepting a send; retry the deletion in a moment")
+		return
+	}
+	defer unlockAdmission()
+	// Checked before the seal so a refusal does not cancel the send it is
+	// protecting; rechecked under the admission lock inside the transaction.
+	if active, _, err := accountOutboxRows(r.Context(), a.db, mirror); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	} else if active > 0 {
+		writeOutboxActive(w, active)
+		return
+	}
+	if err := a.outboxPoint("delete:after-count"); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Delete Failed", err.Error())
+		return
+	}
+	finishDelete, ok := a.beginAccountDeletion(r.Context(), mail.AccountID(mirror))
+	if !ok {
+		writeProblem(w, http.StatusServiceUnavailable, "Delete Busy",
+			"this account has work still draining — retry the deletion in a moment")
+		return
+	}
+	if err := a.outboxPoint("delete:after-seal"); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Delete Failed", err.Error())
+		return
+	}
+	committed := false
+	defer func() { finishDelete(committed) }()
+	// Mirror rows are derived state; dropping them wholesale is a supported
+	// operation upstream. hey_messages cascade via their own delete first.
+	// The transaction takes the account maintenance advisory lock first,
+	// like every mirror writer (audit SYNC-04 lock order); scan staging
+	// rows for this account go with the rest.
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Begin Failed", err.Error())
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(r.Context(),
+		`SELECT pg_advisory_xact_lock($1)`, mail.AccountLockKey(mail.AccountID(mirror))); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Delete Failed", err.Error())
+		return
+	}
+	deletes := []struct {
+		query string
+		args  []any
+	}{
+		{`DELETE FROM hey_messages WHERE user_id = $1 AND account_id = $2`, []any{uid, mirror}},
+		{`DELETE FROM push_deliveries WHERE user_id = $1 AND account_id = $2`, []any{uid, mirror}},
+		{`DELETE FROM mirror_scan_seen WHERE scan_id IN (SELECT id FROM mirror_scans WHERE account_id = $1)`, []any{mirror}},
+		{`DELETE FROM mirror_scans WHERE account_id = $1`, []any{mirror}},
+		{`DELETE FROM mail_scan_done WHERE account_id = $1`, []any{mirror}},
+		{`DELETE FROM mail_message_mailboxes WHERE account_id = $1`, []any{mirror}},
+		{`DELETE FROM mail_bodies WHERE account_id = $1`, []any{mirror}},
+		{`DELETE FROM mail_messages WHERE account_id = $1`, []any{mirror}},
+		{`DELETE FROM mail_mailboxes WHERE account_id = $1`, []any{mirror}},
+		{`DELETE FROM mail_sync_state WHERE account_id = $1`, []any{mirror}},
+		{`DELETE FROM mail_accounts WHERE id = $1`, []any{mirror}},
+	}
+	for _, deletion := range deletes {
+		if _, err := tx.ExecContext(r.Context(), deletion.query, deletion.args...); err != nil {
+			writeProblem(w, http.StatusInternalServerError, "Delete Failed", err.Error())
+			return
+		}
+	}
+	// The account row cascades to its outbox rows. Outbox admission takes
+	// this lock, so no send can be queued for the account between this
+	// check and the commit; a send queued before it is counted here.
+	if _, err := tx.ExecContext(r.Context(), `SELECT pg_advisory_xact_lock($1)`, outboxLockKey); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Delete Failed", err.Error())
+		return
+	}
+	active, retained, err := accountOutboxRows(r.Context(), tx, mirror)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Delete Failed", err.Error())
+		return
+	}
+	if active > 0 {
+		writeOutboxActive(w, active)
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM email_accounts WHERE user_id = $1 AND id = $2`, uid, id); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Delete Failed", err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Commit Failed", err.Error())
+		return
+	}
+	committed = true
+	writeJSON(w, map[string]any{"deleted": id, "outbox_deleted": retained})
+}
+
+// accountOutboxRows counts an account's outbox rows: active ones (pending or
+// submitting, which block deletion) and all of them (deleted with it).
+func accountOutboxRows(ctx context.Context, q outboxQuerier, mirror string) (active, total int, err error) {
+	err = q.QueryRowContext(ctx, `SELECT COUNT(*) FILTER (WHERE state IN ('pending','submitting')), COUNT(*) FROM outbox_jobs WHERE account_id=$1`, mirror).Scan(&active, &total)
+	return
+}
+
+func writeOutboxActive(w http.ResponseWriter, active int) {
+	noun := "sends are"
+	if active == 1 {
+		noun = "send is"
+	}
+	writeProblem(w, http.StatusConflict, "Sends In Progress",
+		fmt.Sprintf("%d %s still waiting or being submitted from this account; wait for them to finish (see Outbox) before disconnecting it", active, noun))
+}
+
+func (a *App) triggerSync(w http.ResponseWriter, r *http.Request, id string) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	var mirror string
+	err = a.db.QueryRowContext(r.Context(),
+		`SELECT mirror_account_id FROM email_accounts WHERE id = $1 AND user_id = $2`, id, uid).Scan(&mirror)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			a.log.Error("sync account lookup failed", "err", err)
+		}
+		writeLookupProblem(w, err, "account")
+		return
+	}
+	if r.URL.Query().Get("wait") == "1" {
+		if err := a.syncAccount(r.Context(), mail.AccountID(mirror)); err != nil {
+			writeProblem(w, http.StatusBadGateway, "Sync Failed", err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"synced": id})
+		return
+	}
+	a.launchAccountSync(mail.AccountID(mirror))
+	writeJSON(w, map[string]any{"syncing": id})
+}
+
+// launchAccountSync runs one whole-account sync as a group-owned background
+// unit on the account's gate context: shutdown joins it, a deletion of the
+// account cancels the provider I/O mid-flight (audit OPS-04/OPS-05).
+func (a *App) launchAccountSync(acct mail.AccountID) {
+	a.launch("account-sync", func(ctx context.Context) {
+		_ = a.syncAccount(ctx, acct)
+	})
+}
+
+// syncAccount dials with the stored credential and runs one full sync,
+// recording outcome on the account row. The returned error covers BOTH the
+// provider fetch and product finalization: a wait=1 caller must not be told
+// "synced" when reconciliation failed (audit 4 F16). Duplicate syncs for one
+// account coalesce on a context-aware gate — a queued request whose context
+// went away returns instead of stacking a provider connection.
+func (a *App) syncAccount(ctx context.Context, acct mail.AccountID) error {
+	ctx, releaseUse, ok := a.beginAccountWorkCtx(ctx, acct)
+	if !ok {
+		return fmt.Errorf("account %s is being deleted", acct)
+	}
+	defer releaseUse()
+	releaseGate, err := accountSyncGate(acct).Lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseGate()
+	cred, err := a.Token(ctx, acct)
+	if err != nil {
+		return a.finishSync(ctx, acct, nil, err)
+	}
+	adapter, release, err := a.syncResolver()(ctx, acct, cred)
+	if err != nil {
+		return a.finishSync(ctx, acct, nil, err)
+	}
+	defer release()
+	reports, err := a.eng.SyncAccount(ctx, acct, adapter)
+	return a.finishSync(ctx, acct, reports, err)
+}
+
+// syncResolver is the dial the sync paths use: the substituted test dialer
+// when one is installed, the production resolver otherwise.
+func (a *App) syncResolver() mail.Resolver {
+	if a.dial != nil {
+		return a.dial
+	}
+	return newResolverWithGmailRefresh(a.refreshGmailToken)
+}
+
+func (a *App) finishSync(ctx context.Context, acct mail.AccountID, reports []mail.SyncReport, syncErr error) error {
+	// The shutdown drain cancels syncs mid-flight (their contexts derive
+	// from the background root). Recording that cancellation as a
+	// last_error on the account row — or writing it after the pools are
+	// closing — was the failed-writeback noise this pass removes: a
+	// stopped process owes no finalization, and the next boot's sync
+	// refreshes the row (audit OPS-04).
+	if syncErr != nil && errors.Is(syncErr, context.Canceled) && a.shuttingDown() {
+		return nil
+	}
+	// A wait=1 browser request may vanish mid-sync; the outcome still has to
+	// land durably, so finish on a detached context rather than not at all —
+	// but a BOUNDED one, so finalization cannot outlive shutdown forever.
+	if ctx.Err() != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+	}
+	changed := false
+	for _, report := range reports {
+		changed = changed || report.Created+report.Updated+report.Deleted > 0
+	}
+	ev := syncEvent{Type: "sync-finished", Changed: changed}
+	if syncErr != nil {
+		var accountID, uid string
+		if err := a.db.QueryRowContext(ctx,
+			`UPDATE email_accounts SET last_error=$1 WHERE mirror_account_id=$2 RETURNING id,user_id`,
+			syncErr.Error(), string(acct)).Scan(&accountID, &uid); err != nil {
+			a.log.Error("record sync error failed", "account", acct, "err", err)
+			return errors.Join(syncErr, fmt.Errorf("record sync error: %w", err))
+		}
+		// Durable first, hint second: a browser reloading on this event must
+		// see last_error already set.
+		ev.AccountID = accountID
+		ev.Error = syncErr.Error()
+		a.events.publish(uid, ev)
+		return syncErr
+	}
+	var accountID, uid string
+	// The provider sync succeeded, but the local view is not usable until
+	// reconciliation ran: recording a healthy, error-free sync BEFORE the
+	// post-sync phases let a failed cleanup/retention/classify pass read
+	// as fully healthy (audit 3 DATA-10). last_error stays untouched
+	// until the phases answer.
+	if err := a.db.QueryRowContext(ctx,
+		`UPDATE email_accounts SET last_sync_at=now() WHERE mirror_account_id=$1 RETURNING id,user_id`,
+		string(acct)).Scan(&accountID, &uid); err != nil {
+		a.log.Error("record sync success failed", "account", acct, "err", err)
+		return fmt.Errorf("record provider sync: %w", err)
+	}
+	var reconErrs []error
+	if err := a.cleanupMirrorOrphans(ctx, uid, acct); err != nil {
+		a.log.Error("post-sync orphan cleanup failed", "account", acct, "err", err)
+		reconErrs = append(reconErrs, fmt.Errorf("orphan cleanup: %w", err))
+	}
+	var retentionDays int
+	if err := a.db.QueryRowContext(ctx, `SELECT retention_days FROM email_accounts WHERE mirror_account_id=$1`, string(acct)).Scan(&retentionDays); err == nil {
+		if err := a.applyAccountRetention(ctx, uid, acct, retentionDays); err != nil {
+			a.log.Error("post-sync retention failed", "account", acct, "err", err)
+			reconErrs = append(reconErrs, fmt.Errorf("retention: %w", err))
+		}
+	} else {
+		reconErrs = append(reconErrs, fmt.Errorf("retention policy: %w", err))
+	}
+	if err := a.classifyUser(ctx, uid); err != nil {
+		a.log.Error("post-sync classify failed", "account", acct, "err", err)
+		reconErrs = append(reconErrs, fmt.Errorf("classification: %w", err))
+	}
+	if reconErr := errors.Join(reconErrs...); reconErr != nil {
+		// The sync itself succeeded; the residual is a reconciliation
+		// failure, recorded as such instead of being logged away.
+		if _, err := a.db.ExecContext(ctx,
+			`UPDATE email_accounts SET last_error=$1 WHERE mirror_account_id=$2`,
+			"reconcile failed after sync: "+reconErr.Error(), string(acct)); err != nil {
+			a.log.Error("record reconcile error failed", "account", acct, "err", err)
+			return errors.Join(reconErr, fmt.Errorf("record final status: %w", err))
+		}
+		ev.AccountID = accountID
+		ev.Error = "reconcile failed after sync"
+		a.events.publish(uid, ev)
+		return reconErr
+	}
+	if _, err := a.db.ExecContext(ctx,
+		`UPDATE email_accounts SET last_error=NULL WHERE mirror_account_id=$1`, string(acct)); err != nil {
+		a.log.Error("clear sync error failed", "account", acct, "err", err)
+		return fmt.Errorf("clear sync error: %w", err)
+	}
+	// Publish only after classification completes, so a reloading browser
+	// never lands between envelope insertion and bucket insertion.
+	if changed {
+		a.sendPushForUser(ctx, uid)
+		a.events.publish(uid, syncEvent{Type: "sync-finished", AccountID: accountID, Changed: true})
+	}
+	return nil
+}
+
+// cleanupMirrorOrphans drops product rows whose mirror message is gone.
+// With staged reconciliation (SYNC-03) mirror rows only ever disappear
+// after an authoritative completed scan, so this never sees a false
+// absence; the account maintenance lock still orders it against
+// concurrent retention and writeback (SYNC-04).
+func (a *App) cleanupMirrorOrphans(ctx context.Context, uid string, acct mail.AccountID) error {
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock($1)`, mail.AccountLockKey(acct)); err != nil {
+		return err
+	}
+	for _, query := range []string{
+		`DELETE FROM hey_messages h WHERE h.user_id=$1 AND h.account_id=$2 AND NOT EXISTS (SELECT 1 FROM mail_messages m WHERE m.account_id=h.account_id AND m.id=h.message_id)`,
+		`DELETE FROM push_deliveries p WHERE p.user_id=$1 AND p.account_id=$2 AND NOT EXISTS (SELECT 1 FROM mail_messages m WHERE m.account_id=p.account_id AND m.id=p.message_id)`,
+	} {
+		if _, err := tx.ExecContext(ctx, query, uid, string(acct)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func newID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
