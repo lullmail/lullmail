@@ -6,7 +6,7 @@ toolchain go1.26.9
 
 require (
 	github.com/jackc/pgx/v5 v5.9.2
-	github.com/jhillyerd/enmime/v2 v2.4.1
+	github.com/jhillyerd/enmime/v2 v2.5.0
 	golang.org/x/text v0.42.0
 	google.golang.org/api v0.291.0
 )
