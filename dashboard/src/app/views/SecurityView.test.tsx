@@ -103,6 +103,47 @@ describe("logout and account deletion erase reporting", () => {
   });
 });
 
+describe("agent token scopes, expiry, and rotation display", () => {
+  it("renders the read-only scope, expiry, and rotation state for each token", async () => {
+    resetSelection();
+    setList({ kind: "none", key: "security", loading: false, error: null, rows: [], senders: [], origin: null });
+    vi.unstubAllGlobals();
+    const tokensFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/security")) {
+        return jsonResponse(200, { email: "owner@example.test", passkeys: [], totp_enabled: false, password_set: true, recovery_codes_remaining: 10 });
+      }
+      // The OPS-10 list shape: scopes, expiry, and rotation state — the
+      // secret never appears (it crossed the wire once, at mint).
+      if (url.endsWith("/api/security/agent-tokens")) {
+        return jsonResponse(200, [
+          { id: "t1", name: "Importer", created_at: "2026-10-01T10:00:00Z", last_used_at: null, scopes: ["mail:read", "mail:send"], expires_at: "2027-01-01T00:00:00Z", rotated_to: null, rotated_grace_until: null },
+          { id: "t2", name: "Old importer", created_at: "2026-09-01T10:00:00Z", last_used_at: "2026-10-02T10:00:00Z", scopes: ["mail:read"], expires_at: null, rotated_to: "t3", rotated_grace_until: "2026-10-16T12:00:00Z" },
+        ]);
+      }
+      if (url.endsWith("/api/security/sessions")) return jsonResponse(200, []);
+      if (url.endsWith("/api/push")) return jsonResponse(200, { configured: false, subscribed: false, public_key: "" });
+      return jsonResponse(404, { title: "Not Found" });
+    });
+    vi.stubGlobal("fetch", tokensFetch);
+
+    render(<SecurityView />, host);
+    await vi.waitFor(() => expect(host.textContent).toContain("Agent tokens"));
+
+    // Both token rows render (passkeys and sessions are empty, so every
+    // security-row here is a token).
+    const rows = [...host.querySelectorAll(".security-row")];
+    expect(rows.length).toBe(2);
+    expect(host.textContent).toContain("mail:read, mail:send");
+    expect(host.textContent).toContain("expires ");
+    expect(host.textContent).toContain("no expiry");
+    expect(host.textContent).toContain("superseded (valid until ");
+    // Read-only surface: no rotate control, no secret material.
+    expect(host.textContent).not.toMatch(/lull_|es_|Bearer/);
+    expect([...host.querySelectorAll("button")].some((b) => /rotate/i.test(b.textContent || ""))).toBe(false);
+  });
+});
+
 describe("re-authentication prompt", () => {
   it("opens the password dialog on 428, confirms, and retries the parked action", async () => {
     resetSelection();

@@ -24,6 +24,12 @@ defects rather than resolving them unilaterally.
    (AGENTS.md: pre-rename `es_` tokens must stay valid).
 6. **Deny-by-default** outside granted scopes: 403 RFC 7807 problem in
    repo style. The route→scope table is test-verified exhaustively.
+7. **`agent:manage` is reserved-future** (recorded at build): the token
+   routes sit outside `agentAllowed` on purpose (a leaked token must not
+   mint siblings), so no agent-reachable route requires the scope today.
+   It stays in the vocabulary and the default grant for the day agent
+   self-rotation is designed; a token minted with only `agent:manage`
+   can do nothing — honest deny-by-default.
 
 ## Scope → route mapping (the lane verifies every entry against the mux)
 
@@ -33,7 +39,7 @@ moves to exactly one scope, plus `agentMayUndo` stays within `mail:act`:
 | Scope | Routes (API-relative) |
 |---|---|
 | `mail:read` | `/recent`, `/folder`, `/mailboxes`, `/buckets/`, `/threads/`, `/messages/` (GET semantics), `/people`, `/board` + `/board/` + `/notes` + `/notes/` reads, `/outbox` (outcomes list) |
-| `mail:send` | `/send`, outbox cancel-within-undo (`DELETE /outbox/{id}` via `agentMayUndo`) |
+| `mail:send` | `/send`, outbox cancel-within-undo (`DELETE /outbox/{id}` via `agentMayUndo`) — cancel-within-undo IS the send lifecycle; a mail:act-only token does not touch the send pipeline (amended 2026-10-16: an earlier prose line said mail:act; the table was the considered mapping and governs) |
 | `mail:act` | `/classify`, `/messages/` mutations (actions/undo), `/board/` mutations (pin/unpin/cards), `/notes/` mutations |
 | `agent:manage` | `/security/agent-tokens` (GET/POST), `/{id}` (DELETE/rotate) |
 | (unchanged exclusions) | `/accounts/*/export` stays agent-unreachable; `/personal/export` stays `mail:read` |

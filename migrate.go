@@ -118,6 +118,20 @@ var reauthStatements = []string{
 	)`,
 }
 
+// agentTokenScopeStatements is the OPS-10 machinery: four named scopes per
+// agent token, optional per-token expiry, and rotation linkage. The scopes
+// DEFAULT is the legacy backfill by design — every row that exists at
+// migration time becomes full-scope with no expiry in the same ALTER, so no
+// UPDATE runs (and none may: the contract pins that).
+var agentTokenScopeStatements = []string{
+	`ALTER TABLE agent_tokens ADD COLUMN scopes text[] NOT NULL
+		DEFAULT ARRAY['mail:read','mail:send','mail:act','agent:manage']`,
+	`ALTER TABLE agent_tokens ADD COLUMN expires_at timestamptz`,
+	`ALTER TABLE agent_tokens ADD COLUMN rotated_to uuid
+		REFERENCES agent_tokens(id) ON DELETE SET NULL`,
+	`ALTER TABLE agent_tokens ADD COLUMN rotated_grace_until timestamptz`,
+}
+
 var productMigrations = []productMigration{
 	{Version: 1, Name: "product baseline schema", Statements: splitStatements(schemaSQL)},
 	{Version: 2, Name: "account-scoped product state", Statements: accountScopedStatements},
@@ -132,6 +146,7 @@ var productMigrations = []productMigration{
 	{Version: 9, Name: "versioned one-use message undo", Statements: messageUndoStatements},
 	{Version: 10, Name: "verified Graph mailbox binding", Statements: []string{`ALTER TABLE email_accounts ADD COLUMN graph_mailbox_key text NOT NULL DEFAULT ''`}},
 	{Version: 11, Name: "message identity aliases", Statements: identityAliasStatements},
+	{Version: 12, Name: "agent token scopes", Statements: agentTokenScopeStatements},
 }
 
 // reconcileClaimStatements stamps account_reconcile_jobs with the claim

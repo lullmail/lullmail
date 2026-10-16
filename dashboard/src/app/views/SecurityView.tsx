@@ -11,7 +11,7 @@ interface Passkey { id: string; name: string; created_at: string; last_used_at: 
 interface Security { email: string; passkeys: Passkey[]; totp_enabled: boolean; password_set: boolean; recovery_codes_remaining: number }
 interface Session { id: string; created_at: string; last_seen_at: string; expires_at: string; user_agent: string; current: boolean }
 interface PushState { configured: boolean; subscribed: boolean; public_key: string }
-interface AgentToken { id: string; name: string; created_at: string; last_used_at: string | null }
+interface AgentToken { id: string; name: string; created_at: string; last_used_at: string | null; scopes: string[]; expires_at: string | null; rotated_to: string | null; rotated_grace_until: string | null }
 
 function vapidBytes(value: string): Uint8Array {
   const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4);
@@ -370,7 +370,8 @@ export function SecurityView() {
           <div class="inline-form"><button class="btn btn-primary btn-sm" type="button" onClick={copyNewToken}>Copy</button><button class="btn btn-ghost btn-sm" type="button" onClick={() => setNewToken("")}>Done</button></div>
         </div>}
         {agentTokens.length === 0 && !newToken && <Empty title="No agent tokens." />}
-        {agentTokens.map((token) => <div class="security-row" key={token.id}><div><strong>{token.name}</strong><span>Created {fmtDate(token.created_at)}{token.last_used_at ? " · used " + fmtDate(token.last_used_at) : " · not used yet"}</span></div>
+        {agentTokens.map((token) => <div class="security-row" key={token.id}><div><strong>{token.name}</strong><span>Created {fmtDate(token.created_at)}{token.last_used_at ? " · used " + fmtDate(token.last_used_at) : " · not used yet"}</span>
+          <span>{token.scopes?.length ? token.scopes.join(", ") : "no scopes"}{token.expires_at ? " · expires " + fmtDate(token.expires_at) : " · no expiry"}{token.rotated_to ? " · superseded (valid until " + fmtDate(token.rotated_grace_until) + ")" : ""}</span></div>
           <button class="btn btn-quiet-danger btn-sm" type="button" onClick={async () => { try { await api("/security/agent-tokens/" + encodeURIComponent(token.id), { method: "DELETE" }); await load(); } catch (e) { report(e, "Could not revoke token"); } }}>Revoke</button></div>)}
       </section>
 
