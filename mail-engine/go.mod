@@ -5,7 +5,7 @@ go 1.26.0
 toolchain go1.26.9
 
 require (
-	github.com/jackc/pgx/v5 v5.9.2
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/jhillyerd/enmime/v2 v2.4.1
 	golang.org/x/text v0.42.0
 	google.golang.org/api v0.291.0
