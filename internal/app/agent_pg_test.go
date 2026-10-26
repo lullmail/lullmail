@@ -48,6 +48,7 @@ var agentRouteScopeCases = []struct {
 	{"POST", "/notes/n1", scopeMailAct, false},
 	{"DELETE", "/notes/n1", scopeMailAct, false},
 	{"GET", "/people", scopeMailRead, false},
+	{"GET", "/people/sent", scopeMailRead, false},
 	{"GET", "/recent", scopeMailRead, false},
 	{"GET", "/folder", scopeMailRead, false},
 	{"GET", "/mailboxes", scopeMailRead, false},

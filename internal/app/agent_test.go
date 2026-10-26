@@ -11,7 +11,7 @@ func TestAgentScopeFence(t *testing.T) {
 		"/accounts", "/accounts/x/sync", "/screener",
 		"/screener/decide", "/screener/undecide", "/counts", "/briefing",
 		"/threads/t1", "/messages/m1/action", "/send", "/buckets/imbox",
-		"/notes", "/notes/x", "/board", "/board/pin", "/people", "/personal/export", "/outbox",
+		"/notes", "/notes/x", "/board", "/board/pin", "/people", "/people/sent", "/personal/export", "/outbox",
 	}
 	for _, path := range allowed {
 		if !agentAllowedPath(path) {

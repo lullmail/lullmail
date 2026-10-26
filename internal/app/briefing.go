@@ -12,6 +12,7 @@ import (
 	"context"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -406,6 +407,98 @@ func (a *App) handlePeople(w http.ResponseWriter, r *http.Request) {
 		p.LastAt = lastAt
 		p.Subject = lastSub
 		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	writeJSON(w, out)
+}
+
+// peopleSentMax bounds one /people/sent call: a client asks per page of
+// contacts, and a page is far smaller than this.
+const peopleSentMax = 500
+
+// handlePeopleLastSent: when the owner last wrote to each of a set of
+// correspondents. GET /people/sent?addr=a@x.test&addr=b@y.test, optionally
+// &domain=y.test (any address at that domain) and &account=<id>. The roster
+// (/people) only sees senders, so a client that wants "last contacted"
+// across many contacts asks here once instead of searching per contact.
+//
+// Outbound evidence is the same predicate classify uses: From is the
+// account's own address on mail the provider filed as Sent, so a spoofed
+// inbound From cannot fake a reply. One row per matching recipient address
+// (To, Cc or Bcc), latest first; an address never written to is absent.
+func (a *App) handlePeopleLastSent(w http.ResponseWriter, r *http.Request) {
+	norm := func(in []string) []string {
+		out := []string{}
+		seen := map[string]bool{}
+		for _, v := range in {
+			v = strings.ToLower(strings.TrimSpace(v))
+			if v != "" && !seen[v] {
+				seen[v] = true
+				out = append(out, v)
+			}
+		}
+		return out
+	}
+	q := r.URL.Query()
+	addrs, domains := norm(q["addr"]), norm(q["domain"])
+	if len(addrs)+len(domains) == 0 {
+		writeJSON(w, []any{})
+		return
+	}
+	if len(addrs)+len(domains) > peopleSentMax {
+		writeProblem(w, http.StatusBadRequest, "Too Many Addresses", "ask for at most "+strconv.Itoa(peopleSentMax)+" addresses and domains per call")
+		return
+	}
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
+		return
+	}
+	arrayOf := func(col string) string {
+		return `CASE WHEN json_typeof(COALESCE(` + col + `, '[]')::json) = 'array'
+		       THEN COALESCE(` + col + `, '[]')::json ELSE '[]'::json END`
+	}
+	rows, err := a.db.QueryContext(r.Context(), `
+		SELECT rcpt.addr, max(COALESCE(m.sent_at, m.received_at)) AS last_at
+		FROM mail_messages m
+		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
+		CROSS JOIN LATERAL (
+		  SELECT lower(x->>'email') AS addr FROM json_array_elements(`+arrayOf("m.to_addrs")+`) x
+		  UNION ALL SELECT lower(x->>'email') FROM json_array_elements(`+arrayOf("m.cc_addrs")+`) x
+		  UNION ALL SELECT lower(x->>'email') FROM json_array_elements(`+arrayOf("m.bcc_addrs")+`) x
+		) rcpt
+		WHERE lower(COALESCE(m.from_addrs, '[]')::json->0->>'email') = lower(ea.address)
+		  AND EXISTS (
+		    SELECT 1 FROM mail_message_mailboxes mm
+		    JOIN mail_mailboxes mb ON mb.account_id = mm.account_id AND mb.id = mm.mailbox_id
+		    WHERE mm.account_id = m.account_id AND mm.message_id = m.id AND mb.role = 'sent')
+		  AND (rcpt.addr = ANY($2) OR split_part(rcpt.addr, '@', 2) = ANY($3))`+
+		accountClause(r)+`
+		GROUP BY rcpt.addr
+		HAVING max(COALESCE(m.sent_at, m.received_at)) IS NOT NULL
+		ORDER BY last_at DESC`, uid, addrs, domains)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
+	defer rows.Close()
+	type sentTo struct {
+		Address    string `json:"address"`
+		LastSentAt string `json:"last_sent_at"`
+	}
+	out := []sentTo{}
+	for rows.Next() {
+		var s sentTo
+		var at time.Time
+		if err := rows.Scan(&s.Address, &at); err != nil {
+			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
+			return
+		}
+		s.LastSentAt = at.UTC().Format(time.RFC3339)
+		out = append(out, s)
 	}
 	if err := rows.Err(); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())

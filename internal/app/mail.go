@@ -415,6 +415,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	api.HandleFunc("POST /notes/{id}", a.withIdempotency(a.handleNoteUpdate))
 	api.HandleFunc("DELETE /notes/{id}", a.withIdempotency(a.handleNoteDelete))
 	api.HandleFunc("GET /people", a.handlePeople)
+	api.HandleFunc("GET /people/sent", a.handlePeopleLastSent)
 	api.HandleFunc("GET /recent", a.handleRecent)
 	api.HandleFunc("GET /folder", a.handleFolder)
 	api.HandleFunc("GET /mailboxes", a.handleMailboxList)

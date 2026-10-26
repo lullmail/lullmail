@@ -39,7 +39,7 @@ is the register the audit asked for: route, auth, body bound, notes.
 | `GET /api/prefs` | session | — | |
 | `POST /api/prefs` | session | 64 KiB | |
 | `GET /api/search` | session/agent | — | `limit` 1–200 (default 60), keyset `cursor` |
-| `GET /api/briefing`, `/api/board`, `/api/people`, `/api/recent`, `/api/folder`, `/api/mailboxes` | session/agent | — | |
+| `GET /api/briefing`, `/api/board`, `/api/people`, `/api/people/sent` (≤500 addr+domain), `/api/recent`, `/api/folder`, `/api/mailboxes` | session/agent | — | |
 | `POST /api/board/pin` `unpin` `cards` `cards/{id}/done` | session/agent | 64 KiB | idempotent (`Idempotency-Key`) |
 | `GET /api/notes` | session/agent | — | |
 | `POST /api/notes`, `POST /api/notes/{id}`, `DELETE /api/notes/{id}` | session/agent | 64 KiB | idempotent |
