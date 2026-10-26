@@ -34,7 +34,18 @@ type GmailRefresh func(context.Context, mail.AccountID, mail.Credential) (mail.C
 
 // NewWithGmailRefresh permits one refresh/retry of a rejected Gmail GET.
 // Mutations never use this recovery path.
-func NewWithGmailRefresh(refresh GmailRefresh) mail.Resolver {
+func NewWithGmailRefresh(refresh GmailRefresh) mail.Resolver { return NewWithPolicy(refresh, Policy{}) }
+
+// Policy comes from product account configuration, never request headers.
+type Policy struct {
+	// JMAPAllowedOrigins names credential destinations beyond the JMAP
+	// discovery origin (a provider's separate download host, for one).
+	// Session metadata cannot authorize an origin by itself.
+	JMAPAllowedOrigins func(context.Context, mail.AccountID, mail.Credential) ([]string, error)
+}
+
+// NewWithPolicy is NewWithGmailRefresh plus product-owned dial policy.
+func NewWithPolicy(refresh GmailRefresh, policy Policy) mail.Resolver {
 	return func(ctx context.Context, acct mail.AccountID, cred mail.Credential) (mail.Adapter, func(), error) {
 		if cred.Zero() {
 			return nil, nil, fmt.Errorf("mail: no credential supplied for account %s", acct)
@@ -47,7 +58,14 @@ func NewWithGmailRefresh(refresh GmailRefresh) mail.Resolver {
 		case mail.ProviderIMAP:
 			return dialIMAP(ctx, cred)
 		case mail.ProviderJMAP:
-			return dialJMAP(ctx, cred)
+			var origins []string
+			if policy.JMAPAllowedOrigins != nil {
+				var err error
+				if origins, err = policy.JMAPAllowedOrigins(ctx, acct, cred); err != nil {
+					return nil, nil, err
+				}
+			}
+			return dialJMAP(ctx, cred, origins)
 		case mail.ProviderGmail:
 			return dialGmailAccount(ctx, acct, cred, refresh)
 		case mail.ProviderGraph:
@@ -74,15 +92,16 @@ func dialIMAP(ctx context.Context, cred mail.Credential) (mail.Adapter, func(), 
 	return ad, func() { _ = ad.Close() }, nil
 }
 
-func dialJMAP(ctx context.Context, cred mail.Credential) (mail.Adapter, func(), error) {
+func dialJMAP(ctx context.Context, cred mail.Credential, origins []string) (mail.Adapter, func(), error) {
 	sessionURL := fmt.Sprintf("https://%s/.well-known/jmap", cred.Host)
 	if cred.Port != 0 {
 		sessionURL = fmt.Sprintf("https://%s:%d/.well-known/jmap", cred.Host, cred.Port)
 	}
 
 	ad, err := jmap.Dial(ctx, jmap.Config{
-		SessionURL: sessionURL,
-		Token:      cred.AccessToken,
+		SessionURL:     sessionURL,
+		Token:          cred.AccessToken,
+		AllowedOrigins: origins,
 	})
 	if err != nil {
 		return nil, nil, err

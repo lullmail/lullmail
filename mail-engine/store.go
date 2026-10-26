@@ -412,7 +412,11 @@ func putEnvelopesTx(ctx context.Context, tx pgx.Tx, acct AccountID, envs []Envel
 			   thread_id = $3, fingerprint = $4, subject = $5,
 			   sent_at = $6, received_at = $7, from_addrs = $8, to_addrs = $9,
 			   cc_addrs = $10, bcc_addrs = $11, reply_to_addrs = $12,
-			   keywords = $13, attachment_state = $14, size = $15, preview = $16,
+			   keywords = $13,
+			   -- Unknown (0) is a metadata fetch that never saw the part
+			   -- tree; it must not erase evidence a fuller fetch recorded.
+			   attachment_state = CASE WHEN $14 = 0 THEN mail_messages.attachment_state ELSE $14 END,
+			   size = $15, preview = $16,
 			   message_id_header = $17, in_reply_to = $18, references_header = $19`,
 			string(acct), string(e.ID), string(e.ThreadID), string(e.Fingerprint), e.Subject,
 			nullTime(e.SentAt), nullTime(e.ReceivedAt), string(from), string(to), string(cc),
@@ -809,6 +813,19 @@ func putBodyTx(ctx context.Context, tx pgx.Tx, acct AccountID, b *Body) error {
 		   text_body = $3, html_body = $4, parts = $5, fetched_at = $6`,
 		string(acct), string(b.MessageID), b.Text, b.HTML, string(parts), time.Now().UTC()); err != nil {
 		return fmt.Errorf("mail: put body: %w", err)
+	}
+	// A fetched body carries the part tree. Attachments found are proof of
+	// presence; none found resolves only an Unknown, never overruling a
+	// provider's own definitive flag.
+	if _, err := tx.Exec(ctx,
+		`UPDATE mail_messages SET attachment_state = CASE
+		   WHEN $3 THEN $4::smallint
+		   WHEN attachment_state = $5::smallint THEN $6::smallint
+		   ELSE attachment_state END
+		  WHERE account_id = $1 AND id = $2`,
+		string(acct), string(b.MessageID), len(b.Attachments()) > 0,
+		int16(AttachmentPresent), int16(AttachmentUnknown), int16(AttachmentAbsent)); err != nil {
+		return fmt.Errorf("mail: put body attachment state: %w", err)
 	}
 	return nil
 }

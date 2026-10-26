@@ -151,6 +151,53 @@ func TestIntegrationAttachmentStateRoundTrip(t *testing.T) {
 	}
 }
 
+// Gmail envelopes arrive as Unknown on every metadata sync; a body fetch
+// that saw the part tree must not be erased by the next one.
+func TestIntegrationAttachmentEvidenceSurvivesMetadataRefresh(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	acct := seedAccount(t, s)
+
+	withParts := Envelope{ID: HeaderMessageID("<evidence-1@example.com>"), MailboxIDs: []MailboxID{"INBOX"}}
+	without := Envelope{ID: HeaderMessageID("<evidence-2@example.com>"), MailboxIDs: []MailboxID{"INBOX"}}
+	flagged := Envelope{ID: HeaderMessageID("<evidence-3@example.com>"), MailboxIDs: []MailboxID{"INBOX"}, Attachment: AttachmentPresent}
+	if err := s.PutEnvelopes(ctx, acct, []Envelope{withParts, without, flagged}); err != nil {
+		t.Fatal(err)
+	}
+	bodies := []*Body{
+		{MessageID: withParts.ID, Text: "x", Parts: []BodyPart{{PartID: "2", Disposition: "attachment", Filename: "a.pdf"}}},
+		{MessageID: without.ID, Text: "x"},
+		// A body without parts never overrules a provider's definitive flag.
+		{MessageID: flagged.ID, Text: "x"},
+	}
+	for _, b := range bodies {
+		if err := s.PutBody(ctx, acct, b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The next metadata sync knows nothing about parts.
+	if err := s.PutEnvelopes(ctx, acct, []Envelope{withParts, without, flagged}); err != nil {
+		t.Fatal(err)
+	}
+	flagged.Attachment = AttachmentUnknown
+	if err := s.PutEnvelopes(ctx, acct, []Envelope{flagged}); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[MessageID]AttachmentState{
+		withParts.ID: AttachmentPresent,
+		without.ID:   AttachmentAbsent,
+		flagged.ID:   AttachmentPresent,
+	} {
+		got, err := s.Envelope(ctx, acct, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Attachment != want {
+			t.Errorf("%s Attachment = %d, want %d", id, got.Attachment, want)
+		}
+	}
+}
+
 func TestIntegrationUpsertReplacesMailboxMembership(t *testing.T) {
 	// A moved message must not keep its old membership row, or it stays
 	// visible in a folder it has left.

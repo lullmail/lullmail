@@ -20,7 +20,7 @@ import (
 func newResolver() mail.Resolver { return newResolverWithGmailRefresh(nil) }
 
 func newResolverWithGmailRefresh(refresh dialer.GmailRefresh) mail.Resolver {
-	stock := dialer.NewWithGmailRefresh(refresh)
+	stock := dialer.NewWithPolicy(refresh, dialer.Policy{JMAPAllowedOrigins: jmapAllowedOrigins})
 	return func(ctx context.Context, acct mail.AccountID, cred mail.Credential) (mail.Adapter, func(), error) {
 		if cred.Provider == mail.ProviderIMAP && isLoopbackHost(cred.Host) {
 			user := strings.TrimSpace(cred.Username)
@@ -43,6 +43,18 @@ func newResolverWithGmailRefresh(refresh dialer.GmailRefresh) mail.Resolver {
 		}
 		return stock(ctx, acct, cred)
 	}
+}
+
+// jmapExtraOrigins lists, per JMAP discovery host, the provider's credential
+// destinations outside that origin. The engine no longer lets a session
+// advertise them itself; a provider absent here works if it keeps its API
+// and downloads on the discovery origin.
+var jmapExtraOrigins = map[string][]string{
+	"api.fastmail.com": {"https://www.fastmailusercontent.com"},
+}
+
+func jmapAllowedOrigins(_ context.Context, _ mail.AccountID, cred mail.Credential) ([]string, error) {
+	return jmapExtraOrigins[strings.ToLower(cred.Host)], nil
 }
 
 func isLoopbackHost(host string) bool {
