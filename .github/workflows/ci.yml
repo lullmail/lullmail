@@ -62,7 +62,13 @@ jobs:
         run: npm ci && npm run build
       - name: Site dependency audit
         working-directory: site
-        run: npm audit --audit-level=high
+        # Same GHSA-mrhx-c7xc-m3w5 exception as the dashboard audit.
+        run: |
+          npm audit --json > "$RUNNER_TEMP/audit.json" || true
+          jq -e '[.vulnerabilities[].via[] | objects
+                  | select(.severity == "high" or .severity == "critical") | .url]
+                 | unique - ["https://github.com/advisories/GHSA-mrhx-c7xc-m3w5"]
+                 | if length == 0 then true else (., false) end' "$RUNNER_TEMP/audit.json"
       - name: Static Linux binary
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /tmp/lullmail .
       - name: Production container
