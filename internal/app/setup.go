@@ -302,7 +302,7 @@ func (a *App) setOriginForSetup(origin string) bool {
 		return false
 	}
 	wa, err := newWebAuthn(&candidate)
-	if err != nil {
+	if err != nil && !errors.Is(err, errPasskeysNeedDomain) {
 		return false
 	}
 	*a.cfg = candidate

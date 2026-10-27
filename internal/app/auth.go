@@ -154,9 +154,18 @@ func (u *webUser) WebAuthnDisplayName() string {
 }
 func (u *webUser) WebAuthnCredentials() []webauthn.Credential { return u.Credentials }
 
+// errPasskeysNeedDomain marks an origin served from an IP address. WebAuthn
+// forbids IP relying-party IDs (browsers refuse the ceremony, and go-webauthn
+// 0.18 rejects the configuration), so such an install runs with passkeys off
+// and password sign-in only, rather than failing to start.
+var errPasskeysNeedDomain = errors.New("passkeys need the site to be served from a domain name, not an IP address")
+
 func newWebAuthn(cfg *Config) (*webauthn.WebAuthn, error) {
 	if cfg.RPID == "" || cfg.PublicURL == "" {
 		return nil, errors.New("PUBLIC_URL must be an absolute browser origin")
+	}
+	if net.ParseIP(strings.Trim(cfg.RPID, "[]")) != nil {
+		return nil, errPasskeysNeedDomain
 	}
 	return webauthn.New(&webauthn.Config{
 		RPDisplayName: "Lull Mail",
@@ -430,7 +439,7 @@ func (a *App) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]any{
 		"configured": configured, "authenticated": authenticated, "email": email,
 		"bootstrap_available": !configured && a.setupTokenValid(),
-		"passkey_supported":   true,
+		"passkey_supported":   a.webAuthn() != nil || a.config().RPID == "",
 		// Warn-only exposure signal for the dashboard (D10). Classified here,
 		// once per boot, against the pinned origin — never enforced.
 		"exposed": publicExposure(a.config().PublicURL),
@@ -754,7 +763,12 @@ func (a *App) beginRegistration(w http.ResponseWriter, r *http.Request, uid, kin
 	for _, c := range user.Credentials {
 		exclusions = append(exclusions, c.Descriptor())
 	}
-	creation, session, err := a.webAuthn().BeginRegistration(user,
+	wa := a.webAuthn()
+	if wa == nil {
+		writePasskeysUnavailable(w)
+		return
+	}
+	creation, session, err := wa.BeginRegistration(user,
 		webauthn.WithExclusions(exclusions),
 		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired),
 		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
@@ -824,7 +838,12 @@ func (a *App) verifyRegistration(w http.ResponseWriter, r *http.Request, kind st
 	if err := readPasskeyBody(w, r); err != nil {
 		return nil, err
 	}
-	credential, err := a.webAuthn().FinishRegistration(user, *session, r)
+	wa := a.webAuthn()
+	if wa == nil {
+		writePasskeysUnavailable(w)
+		return nil, errPasskeysNeedDomain
+	}
+	credential, err := wa.FinishRegistration(user, *session, r)
 	if err != nil {
 		writeProblem(w, 400, "Passkey Rejected", "the browser response could not be verified")
 		return nil, err
@@ -893,7 +912,12 @@ func (a *App) handleLoginBegin(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	assertion, session, err := a.webAuthn().BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
+	wa := a.webAuthn()
+	if wa == nil {
+		writePasskeysUnavailable(w)
+		return
+	}
+	assertion, session, err := wa.BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
 		writeProblem(w, 500, "Sign In Failed", err.Error())
 		return
@@ -918,7 +942,12 @@ func (a *App) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
 	if err := readPasskeyBody(w, r); err != nil {
 		return
 	}
-	userAny, credential, err := a.webAuthn().FinishPasskeyLogin(func(rawID, handle []byte) (webauthn.User, error) {
+	wa := a.webAuthn()
+	if wa == nil {
+		writePasskeysUnavailable(w)
+		return
+	}
+	userAny, credential, err := wa.FinishPasskeyLogin(func(rawID, handle []byte) (webauthn.User, error) {
 		user, err := a.loadWebUserByHandle(r.Context(), handle)
 		if err != nil {
 			return nil, err
@@ -2389,4 +2418,8 @@ func writeLookupProblem(w http.ResponseWriter, err error, noun string) {
 	w.Header().Set("Retry-After", "2")
 	writeProblem(w, http.StatusServiceUnavailable, "Temporarily Unavailable",
 		"the operation could not be completed — retry without discarding your changes")
+}
+
+func writePasskeysUnavailable(w http.ResponseWriter) {
+	writeProblem(w, http.StatusConflict, "Passkeys Unavailable", errPasskeysNeedDomain.Error()+" — sign in with a password")
 }

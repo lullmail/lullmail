@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -125,6 +126,10 @@ func connectApp(cfg *Config) *App {
 	app.prepareSetup()
 	if app.cfg.RPID != "" {
 		app.wa, err = newWebAuthn(cfg)
+		if errors.Is(err, errPasskeysNeedDomain) {
+			log.Printf("app: %v — passkeys are off; password sign-in only", err)
+			err = nil
+		}
 		if err != nil {
 			store.Close()
 			db.Close()
