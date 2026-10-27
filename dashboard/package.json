@@ -16,8 +16,8 @@
     "e2e:preview": "node e2e/preview.mjs"
   },
   "dependencies": {
-    "@neutron-build/cli": "^0.3.2",
-    "@neutron-build/core": "^0.3.2",
+    "@neutron-build/cli": "^0.4.0",
+    "@neutron-build/core": "^0.4.0",
     "@neutron-build/mail": "^0.1.0",
     "@preact/signals": "^2.11.1",
     "parse5": "^8.0.1",
