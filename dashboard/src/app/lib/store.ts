@@ -211,8 +211,17 @@ export const accountsFailed = signal(false);
    The unified view is the product; the lens is a scope, not a mode switch.
    Empty string = every mailbox together (the default). */
 
-export interface AccountLite { id: string; address: string }
+export interface AccountLite { id: string; address: string; mirror_account_id?: string; label?: string }
 export const accounts = signal<AccountLite[]>([]);
+
+/** Which of the owner's mailboxes a message belongs to (its label, else its
+    address), or null with only one mailbox, where it would be noise. Rows
+    carry the mirror account id; the product id is accepted too. */
+export function mailboxName(account: string): string | null {
+  if (accounts.value.length < 2) return null;
+  const found = accounts.value.find((a) => a.mirror_account_id === account || a.id === account);
+  return found ? (found.label || found.address) : null;
+}
 
 function initialAccountFilter(): string {
   if (typeof localStorage === "undefined") return "";

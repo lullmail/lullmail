@@ -1,6 +1,6 @@
 import { useState } from "preact/hooks";
 import { download } from "../lib/api";
-import { closeReader, openCompose, reader, readerRow, showError } from "../lib/store";
+import { closeReader, mailboxName, openCompose, reader, readerRow, showError } from "../lib/store";
 import { BUCKET_LABEL, loadMessageBody, loadOlderMessages, markDone, markRead, moveTo, pinThreads, snooze, trashThreads } from "../lib/actions";
 import type { Bucket, ListBucket, Message, Row } from "../lib/types";
 import { countOf, fmtFull, splitFrom } from "../lib/fmt";
@@ -21,6 +21,7 @@ function ThreadMessage({ message }: { message: Message }) {
     try { await loadMessageBody(message); } catch (e) { showError(e instanceof Error ? e.message : "Could not load message"); } finally { setLoadingBody(false); }
   };
   const who = splitFrom(message.from);
+  const mailbox = mailboxName(message.account);
   const [exporting, setExporting] = useState(false);
   return (
     <article class="thread-msg">
@@ -29,7 +30,7 @@ function ThreadMessage({ message }: { message: Message }) {
         <Avatar email={who.email} name={who.name} size="sm" />
         <div class="thread-msg-names">
           <span class="thread-msg-from">{who.name || who.email}</span>
-          <span class="thread-msg-to">to {message.to || "you"}</span>
+          <span class="thread-msg-to">to {message.to || "you"}{mailbox && <> · in <span class="thread-msg-mailbox">{mailbox}</span></>}</span>
         </div>
         <span class="thread-msg-date">{fmtFull(message.received_at)}</span>
         <button

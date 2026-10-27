@@ -1,6 +1,6 @@
 import { useState } from "preact/hooks";
 import type { Row } from "../lib/types";
-import { checked, clearChecked, cursor, focusRow, list, rowIdentity, selectRange, toggleChecked } from "../lib/store";
+import { accountFilter, checked, clearChecked, cursor, focusRow, list, mailboxName, rowIdentity, selectRange, toggleChecked } from "../lib/store";
 import { markDone, moveTo, openThread, snooze, trashThreads } from "../lib/actions";
 import { dayLabel, fmtDate, splitFrom } from "../lib/fmt";
 import { Highlight } from "./bits";
@@ -44,6 +44,7 @@ function QuickActs({ row }: { row: Row }) {
     and a 40px colour disc on every line is what made this read like Gmail. */
 export function MsgRow({ row, index, q }: { row: Row; index: number; q?: string }) {
   const who = splitFrom(row.from);
+  const mailbox = mailboxName(row.account);
   const isChecked = checked.value.has(rowIdentity(row));
   const cls = [
     "msg-row",
@@ -91,6 +92,7 @@ export function MsgRow({ row, index, q }: { row: Row; index: number; q?: string 
         <span class="row-meta">
           {row.attachment_state === "present" && <span class="chip" title="Has attachments"><Icon name="clip" size={11} /></span>}
           {(row.thread_len || 0) > 1 && <span class="chip">{row.thread_len}</span>}
+          {!accountFilter.value && mailbox && <span class="row-mailbox" title={"In " + mailbox}>{mailbox}</span>}
           <span class="row-date">{fmtDate(row.received_at)}</span>
         </span>
       </div>

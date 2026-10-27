@@ -744,6 +744,13 @@ button { font: inherit; cursor: pointer; border: none; background: none; color: 
 }
 .row-meta { margin-left: auto; display: flex; align-items: center; gap: var(--sp-2); flex: none; }
 .row-date { font-size: var(--t-sm); color: var(--ink-3); font-weight: 520; }
+.row-mailbox, .digest-mailbox {
+  font-size: var(--t-sm); color: var(--ink-3); max-width: 16ch;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.msg-row:hover .row-mailbox, .msg-row.cursor .row-mailbox { opacity: 0; }
+.digest-mailbox { margin-left: auto; flex: 0 1 auto; }
+.digest-mailbox + .digest-date { margin-left: var(--sp-2); }
 .row-subject {
   font-family: var(--serif);
   font-size: var(--t-subject); font-weight: 640; letter-spacing: -0.016em;
@@ -970,6 +977,7 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 .thread-msg-names { display: flex; flex-direction: column; min-width: 0; }
 .thread-msg-from { font-size: var(--t-md); font-weight: 700; }
 .thread-msg-to { font-size: var(--t-sm); color: var(--ink-3); }
+.thread-msg-mailbox { color: var(--ink-2); font-weight: 560; }
 .thread-msg-date { margin-left: auto; font-size: var(--t-sm); color: var(--ink-3); flex: none; }
 .message-export { color: var(--ink-3); flex: none; }
 .message-export:hover:not(:disabled) { color: var(--ink); background: var(--hover); }

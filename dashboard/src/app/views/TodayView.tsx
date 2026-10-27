@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { generationCurrent, newMutationKey, offlineGeneration, offlineOwner, offlineStorageSuspended } from "../lib/offline";
 import { api } from "../lib/api";
 import { useLoad } from "../lib/useLoad";
-import { accountFilter, accountQS, checked, cursor, resetSelection, rowIdentity, setList, openCompose, trashing } from "../lib/store";
+import { accountFilter, accountQS, checked, cursor, mailboxName, resetSelection, rowIdentity, setList, openCompose, trashing } from "../lib/store";
 import { CONFIRM_RESEND, checkEarlierSubmission, loadReplySeed, markDone, openThread, sendMailOutcome } from "../lib/actions";
 import type { Briefing, BriefThread, Row, ScreenerSender } from "../lib/types";
 import { countOf, daysSince, fmtDate, relativeAge, splitFrom } from "../lib/fmt";
@@ -132,6 +132,7 @@ function NeedsRow({ thread, index }: { thread: BriefThread; index: number }) {
       <div class="digest-top">
         {selected && <span class="chip">Selected</span>}
         <span class="digest-sender">{who.name || who.email}</span>
+        {!accountFilter.value && mailboxName(thread.account) && <span class="digest-mailbox">{mailboxName(thread.account)}</span>}
         <span class="digest-date">{fmtDate(thread.received_at)}</span>
       </div>
       <div class="digest-subject">{thread.subject || "(no subject)"}</div>

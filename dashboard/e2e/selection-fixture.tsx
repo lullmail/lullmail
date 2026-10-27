@@ -2,7 +2,7 @@ import { render } from "preact";
 import { MsgList } from "../src/app/ui/MsgRow";
 import { BulkBar } from "../src/app/ui/BulkBar";
 import { installKeys } from "../src/app/lib/keys";
-import { checked, cursor, dismissReader, layout, list, reader, rowIdentity, setList } from "../src/app/lib/store";
+import { accounts, checked, cursor, dismissReader, layout, list, reader, rowIdentity, setList } from "../src/app/lib/store";
 import type { Row } from "../src/app/lib/types";
 
 const rows: Row[] = Array.from({ length: 8 }, (_, n) => ({
@@ -11,6 +11,10 @@ const rows: Row[] = Array.from({ length: 8 }, (_, n) => ({
   from: "Test Sender <sender@example.test>", subject: "Selection test message " + n,
   received_at: "2026-10-01T12:00:00Z", read: false, preview: "Synthetic test mail. No real mailbox is connected.",
 }));
+accounts.value = [
+  { id: "p1", address: "owner@example.test", mirror_account_id: "test-account" },
+  { id: "p2", address: "second@example.test", mirror_account_id: "second-account", label: "Side project" },
+];
 layout.value = "classic";
 setList({ key: "test-inbox", kind: "rows", loading: false, error: null, rows, senders: [], origin: "imbox" });
 installKeys();
