@@ -1,4 +1,6 @@
 version: 2
+# mail-engine/ is vendored from Neutron mail/ and must stay byte-identical
+# (mail-engine/VENDOR.md), so its dependencies are bumped there, not here.
 updates:
   - package-ecosystem: github-actions
     directory: /
@@ -6,10 +8,6 @@ updates:
       interval: weekly
   - package-ecosystem: gomod
     directory: /
-    schedule:
-      interval: weekly
-  - package-ecosystem: gomod
-    directory: /mail-engine
     schedule:
       interval: weekly
   - package-ecosystem: gomod
