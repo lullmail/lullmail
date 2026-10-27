@@ -421,6 +421,7 @@ func (a *App) mountAPI(mux *http.ServeMux) {
 	api.Handle("GET /messages/{message}/body", a.accountWorkLifecycle(http.HandlerFunc(a.handleMessageBody)))
 	api.Handle("GET /threads/{thread...}", a.accountWorkLifecycle(http.HandlerFunc(a.handleThread)))
 	api.HandleFunc("POST /messages/{message}/action", a.withIdempotency(a.handleMessageAction))
+	api.Handle("POST /messages/{message}/trash", a.accountWorkLifecycle(http.HandlerFunc(a.handleMessageTrash)))
 	api.Handle("GET /messages/{message}/attachment/{part}", a.accountWorkLifecycle(http.HandlerFunc(a.handleAttachment)))
 	api.Handle("GET /messages/{message}/eml", a.accountWorkLifecycle(http.HandlerFunc(a.handleMessageEML)))
 	api.HandleFunc("POST /send", withBodyDeadline(sendBodyReadBudget, a.handleSend))

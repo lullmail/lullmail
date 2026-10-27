@@ -29,16 +29,19 @@ vi.mock("./store", () => ({
   refreshCounts: vi.fn(),
   rememberListScroll: vi.fn(),
   resetSelection: vi.fn(),
+  rowIdentity: (r: { account: string; message_id: string }) => r.account + "\u0000" + r.message_id,
   screeningEnabled: { value: true },
   setAccountFilter: vi.fn(),
+  setList: vi.fn(),
   showError: vi.fn(),
   showToast: vi.fn(),
+  trashing: { value: new Set<string>() },
   undoSeconds: { value: 5 },
 }));
 
-import { markDone, markRead } from "./actions";
+import { markDone, markRead, TRASH_UNDO_MS, trashThreads } from "./actions";
 import { api } from "./api";
-import { showError, showToast } from "./store";
+import { showError, showToast, trashing } from "./store";
 import type { Row } from "./types";
 
 const row = (id: string, read: boolean): Row => ({
@@ -175,4 +178,38 @@ it("loads an older envelope page once and discards it after another thread opens
  reader.value = {threadId:"second",account:"acct-a",messages:[]} as never;
  resolve({rows:[{id:"late"}],has_more:false}); await pending;
  expect((reader.value as unknown as {messages: unknown[]}).messages).toEqual([]);
+});
+
+describe("trash holds the provider move for the undo window", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.mocked(api).mockReset().mockResolvedValue({ ok: true });
+    vi.mocked(showToast).mockReset();
+    trashing.value = new Set();
+  });
+
+  const trashCalls = () => vi.mocked(api).mock.calls.filter(([path]) => String(path).includes("/trash"));
+
+  it("hides the rows at once and moves them only after the window", async () => {
+    trashThreads([row("m1", false), row("m2", true)]);
+    expect(trashing.value.size).toBe(2);
+    expect(trashCalls()).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(TRASH_UNDO_MS);
+    expect(trashCalls().map(([path, opts]) => [path, opts])).toEqual([
+      ["/messages/m1/trash?account=acct-a", { method: "POST", keepalive: true }],
+      ["/messages/m2/trash?account=acct-a", { method: "POST", keepalive: true }],
+    ]);
+    expect(trashing.value.size).toBe(0);
+    vi.useRealTimers();
+  });
+
+  it("undo inside the window never reaches the provider", async () => {
+    trashThreads([row("m1", false)]);
+    const undo = vi.mocked(showToast).mock.calls[0][1] as () => void;
+    undo();
+    expect(trashing.value.size).toBe(0);
+    await vi.advanceTimersByTimeAsync(TRASH_UNDO_MS * 2);
+    expect(trashCalls()).toHaveLength(0);
+    vi.useRealTimers();
+  });
 });

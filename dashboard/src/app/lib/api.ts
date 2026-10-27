@@ -64,6 +64,8 @@ interface Opts {
   fresh?: boolean;
   /** Explicit identity supplied by a retryable submission (e.g. send). */
   idempotencyKey?: string;
+  /** Let the request outlive the page, for work committed on pagehide. */
+  keepalive?: boolean;
 }
 
 const MEMORY_TTL = 15_000;
@@ -144,7 +146,7 @@ async function request<T>(path: string, opts: Opts = {}, setupToken = "", protec
   }
   let res: Response;
   try {
-    res = await fetch("/api" + path, { method, headers, body, signal: opts.signal, credentials: "same-origin" });
+    res = await fetch("/api" + path, { method, headers, body, signal: opts.signal, credentials: "same-origin", keepalive: opts.keepalive });
   } catch (error) {
     if (opts.signal?.aborted) throw error;
     if (protectedRoute && method === "GET" && !privateOutbox) {

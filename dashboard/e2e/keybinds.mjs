@@ -112,6 +112,11 @@ function makeApi({ twoAccounts = false } = {}) {
         undoReceipts.set(undo_token, {id:target.id,before});
         return ok({undo_token});
       }
+      if ((m = path.match(/^\/messages\/([^/]+)\/trash$/))) {
+        const target = msgs.find((x) => x.id === decodeURIComponent(m[1]));
+        if (target) target.bucket = "trashed";
+        return ok({ ok: true, trashed: target ? 1 : 0 });
+      }
       if (path === "/board/pin") return ok({ card_id: "card-" + body.thread_id, created: true, subject: "pinned" });
       if (path === "/board/unpin") return ok({});
       if (path === "/screener/decide") {
@@ -281,6 +286,7 @@ const LABEL = {
   snooze: "s",
   inbox: "i",
   pin: "p",
+  trash: "#",
   reply: "r",
   compose: "c",
   screener: "1 2 3 0",
@@ -1136,6 +1142,27 @@ try {
     await expect(t.page.locator(".reader-pane .thread-title")).toHaveCount(0);
     await t.ready();
   }, { layout: "classic" });
+
+  await scenario("trash: # hides at once, undo sends nothing, the move follows the window", [LABEL.trash], async (t) => {
+    await t.ready();
+    let mark = t.api.mark();
+    await t.press("#");
+    await t.expectNoMutations(mark);
+    await t.press("j");
+    await t.press("#");
+    await t.ready(4);
+    await expect(t.toast).toContainText("Moved to Trash");
+    await t.toast.getByRole("button", { name: "Undo" }).click();
+    await t.ready(5);
+    await t.expectNoMutations(mark);
+    mark = t.api.mark();
+    await t.press("j");
+    await t.press("#");
+    await t.ready(4);
+    await t.page.waitForTimeout(6500);
+    await t.expectMutations(mark, [{ method: "POST", path: "/messages/m0/trash", query: { account: ACCOUNT } }]);
+    await t.ready(4);
+  });
 
   /* ---- help vs implementation ---- */
 

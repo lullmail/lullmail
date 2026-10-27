@@ -9,7 +9,7 @@ import { generationCurrent, offlineGeneration, offlineOwner, offlineStorageSuspe
 import { splitFrom } from "./fmt";
 import type { BoardCard, Bucket, Counts, ListBucket, Message, Row, StickyNote } from "./types";
 import {
-  accountCount, accountsFailed, accountFilter, accountQS, accounts, closeReader, counts, list, type Mailbox, mailboxes, openCompose, reader, rememberListScroll, resetSelection, screeningEnabled, setAccountFilter, showError, showToast, undoSeconds,
+  accountCount, accountsFailed, accountFilter, accountQS, accounts, closeReader, counts, list, type Mailbox, mailboxes, openCompose, reader, rememberListScroll, resetSelection, rowIdentity, screeningEnabled, setAccountFilter, setList, showError, showToast, trashing, undoSeconds,
 } from "./store";
 
 /** The one place bucket names are written. Storage values are unchanged. */
@@ -207,6 +207,60 @@ export async function markDone(rows: Row[]) {
   // marked and must not be touched at all.
   const undoRows = done.filter((r) => undoSnapshot(r));
   showToast(describe(done, "Done"), undoRows.length ? () => undoRead(undoRows) : undefined);
+}
+
+/** How long a Trash can be undone before it reaches the provider. */
+export const TRASH_UNDO_MS = 6000;
+const pendingTrash = new Set<() => Promise<void>>();
+
+/** Trash = move the whole thread to the provider's Trash folder. The move is
+    held for the undo window and only then sent, so undo never has to move
+    mail back out of Trash (where IMAP and Outlook may have re-identified it).
+    Leaving the page sends whatever is still pending. */
+export function trashThreads(rows: Row[]) {
+  if (!rows.length) return;
+  const keys = rows.map(rowIdentity);
+  trashing.value = new Set([...trashing.value, ...keys]);
+  if (rows.some((r) => r.thread_id === reader.value.threadId && r.account === reader.value.account)) closeReader();
+  resetSelection();
+  setList({ rows: list.value.rows });
+  let settled = false;
+  const release = () => {
+    trashing.value = new Set([...trashing.value].filter((key) => !keys.includes(key)));
+  };
+  const commit = async () => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    pendingTrash.delete(commit);
+    const results = await Promise.allSettled(rows.map((r) => api(
+      "/messages/" + encodeURIComponent(r.message_id) + "/trash?account=" + encodeURIComponent(r.account),
+      { method: "POST", keepalive: true },
+    )));
+    release();
+    const failed = results.filter((res) => res.status === "rejected") as PromiseRejectedResult[];
+    if (failed.length) {
+      const why = failed[0].reason instanceof Error ? failed[0].reason.message : "";
+      showError(`Could not move ${failed.length} of ${rows.length} threads to Trash${why ? ": " + why : ""}`);
+    }
+    afterMutation();
+  };
+  const timer = setTimeout(() => { void commit(); }, TRASH_UNDO_MS);
+  pendingTrash.add(commit);
+  showToast(describe(rows, "Moved to Trash"), () => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    pendingTrash.delete(commit);
+    release();
+    reload();
+  }, TRASH_UNDO_MS);
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => {
+    for (const commit of [...pendingTrash]) void commit();
+  });
 }
 
 async function undoRead(rows: Row[]) {

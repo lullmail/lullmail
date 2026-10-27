@@ -1,7 +1,7 @@
 import { useState } from "preact/hooks";
 import type { Row } from "../lib/types";
 import { checked, clearChecked, cursor, focusRow, list, rowIdentity, selectRange, toggleChecked } from "../lib/store";
-import { markDone, moveTo, openThread, snooze } from "../lib/actions";
+import { markDone, moveTo, openThread, snooze, trashThreads } from "../lib/actions";
 import { dayLabel, fmtDate, splitFrom } from "../lib/fmt";
 import { Highlight } from "./bits";
 import { Icon } from "./Icon";
@@ -18,6 +18,9 @@ function QuickActs({ row }: { row: Row }) {
     <div class="row-acts" onClick={(e) => e.stopPropagation()}>
       <button class="btn-icon" type="button" title="Done (e)" aria-label="Mark done" onClick={stop(() => markDone([row]))}>
         <Icon name="check" size={15} />
+      </button>
+      <button class="btn-icon" type="button" title="Trash (#)" aria-label="Move to Trash" onClick={stop(() => trashThreads([row]))}>
+        <Icon name="trash" size={15} />
       </button>
       <div style={{ position: "relative" }}>
         <button class="btn-icon" type="button" title="Set aside (s)" aria-label="Set aside" aria-expanded={asideOpen} onClick={stop(() => setAsideOpen((v) => !v))}>

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { generationCurrent, newMutationKey, offlineGeneration, offlineOwner, offlineStorageSuspended } from "../lib/offline";
 import { api } from "../lib/api";
 import { useLoad } from "../lib/useLoad";
-import { accountFilter, accountQS, checked, cursor, resetSelection, rowIdentity, setList, openCompose } from "../lib/store";
+import { accountFilter, accountQS, checked, cursor, resetSelection, rowIdentity, setList, openCompose, trashing } from "../lib/store";
 import { CONFIRM_RESEND, checkEarlierSubmission, loadReplySeed, markDone, openThread, sendMailOutcome } from "../lib/actions";
 import type { Briefing, BriefThread, Row, ScreenerSender } from "../lib/types";
 import { countOf, daysSince, fmtDate, relativeAge, splitFrom } from "../lib/fmt";
@@ -182,7 +182,7 @@ export function TodayView() {
 
   const brief = data?.brief;
   const senders = data?.senders || [];
-  const needs = brief?.needs_you || [];
+  const needs = (brief?.needs_you || []).filter((thread) => !trashing.value.has(rowIdentity(asRow(thread))));
   const waiting = brief?.waiting_on || [];
 
   useEffect(() => { resetSelection(); }, []);

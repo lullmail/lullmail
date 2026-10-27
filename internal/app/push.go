@@ -16,11 +16,11 @@ import (
 // Kept as a named package-level constant so the real-database integration
 // suite executes the production statement itself (mail_messages keys are
 // id, not message_id — exactly the class of mistake a mock cannot catch).
-const pushCandidateSQL = `
+var pushCandidateSQL = `
 SELECT m.account_id,m.id,m.thread_id FROM hey_messages h
 JOIN mail_messages m ON m.account_id=h.account_id AND m.id=h.message_id
 JOIN email_accounts ea ON ea.mirror_account_id=m.account_id AND ea.user_id=h.user_id
-WHERE h.user_id=$1 AND h.bucket='imbox' AND h.read_at IS NULL
+WHERE h.user_id=$1 AND h.bucket='imbox' AND h.read_at IS NULL` + discardedFilter("m") + `
   AND EXISTS (SELECT 1 FROM push_subscriptions s WHERE s.user_id=h.user_id
     AND NOT EXISTS (SELECT 1 FROM push_deliveries p
       WHERE p.user_id=h.user_id AND p.account_id=m.account_id

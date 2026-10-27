@@ -1,6 +1,6 @@
 import { useState } from "preact/hooks";
 import { checked, clearChecked, list, rowIdentity } from "../lib/store";
-import { markDone, markRead, moveTo, snooze } from "../lib/actions";
+import { markDone, markRead, moveTo, snooze, trashThreads } from "../lib/actions";
 import { countOf } from "../lib/fmt";
 import { Icon } from "./Icon";
 import { SnoozeMenu } from "./SnoozeMenu";
@@ -41,6 +41,9 @@ export function BulkBar() {
       <button class="btn btn-ghost btn-sm" type="button" onClick={() => moveTo(rows, "paper_trail")}>Receipts</button>
       <button class="btn btn-ghost btn-sm" type="button" onClick={() => markRead(rows, !allRead)}>
         {allRead ? "Unread" : "Read"}
+      </button>
+      <button class="btn btn-ghost btn-sm" type="button" onClick={() => trashThreads(rows)}>
+        <Icon name="trash" size={14} /> Trash
       </button>
 
       <span class="bulkbar-spacer" />

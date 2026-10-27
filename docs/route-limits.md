@@ -48,6 +48,7 @@ is the register the audit asked for: route, auth, body bound, notes.
 | `GET /api/messages/{message}/body` | session/agent | — | one owned message; body fetch deadline 8 s |
 | `GET /api/threads/{thread}` | session/agent | — | account required; newest envelope page ≤50, keyset cursor for older pages; legacy array bounded to 50 with X-Lullmail-Next-Cursor |
 | `POST /api/messages/{message}/action` | session/agent | 1 MiB | idempotent; snooze `until` absolute RFC3339 or null (audit DATA-07) |
+| `POST /api/messages/{message}/trash` | session/agent | — | account required; moves the whole thread to the provider's Trash folder (never a permanent delete); ≤2000 messages; 422 when the account has no Trash folder |
 | `GET /api/messages/{message}/attachment/{part}` | session/agent | — | streams; aborts the connection on a mid-stream error |
 | `GET /api/messages/{message}/eml` | session/agent | — | provider read ≤128 MiB, mirror fallback beyond |
 | `POST /api/classify` | session/agent | — | |

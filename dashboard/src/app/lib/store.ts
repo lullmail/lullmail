@@ -380,9 +380,16 @@ export function rowIdentity(row: Pick<Row, "account" | "message_id">): string {
   return row.account + "\u0000" + row.message_id;
 }
 
+/** Rows moved to Trash whose provider request has not been sent yet: hidden
+    from every list while their undo toast is up, even across a reload. */
+export const trashing = signal<Set<string>>(new Set());
+
 export function setList(next: Partial<ListState>) {
   const previous = list.value;
   const updated = { ...previous, ...next };
+  if (updated.kind === "rows" && trashing.value.size) {
+    updated.rows = updated.rows.filter((row) => !trashing.value.has(rowIdentity(row)));
+  }
   batch(() => {
     if (previous.key !== updated.key || previous.kind !== updated.kind) {
       resetSelection();

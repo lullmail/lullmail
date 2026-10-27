@@ -5,7 +5,7 @@
 // one handler for the whole app: it reads the current list out of the store, so
 // every surface that publishes rows gets the same keys for free.
 import { closeCompose, compose, composeOpen, cursor, checked, clearChecked, focusRow, list, newDraft, noteKeyUse, openCompose, overlayOpen, palette, reader, readerOwnsPage, selectAllRows, selectRange, shortcuts, snoozePickerRows, toggleChecked, closeReader, targetRows, dismissToast, toast } from "./store";
-import { decide, loadReplySeed, markDone, moveTo, openThread, pinThreads } from "./actions";
+import { decide, loadReplySeed, markDone, moveTo, openThread, pinThreads, trashThreads } from "./actions";
 import { offlineOwner } from "./offline";
 import { navigate } from "./router";
 import { splitFrom } from "./fmt";
@@ -224,6 +224,7 @@ export function installKeys(): () => void {
         { const at = list.value.rows[cursor.value]; if (at) toggleChecked(at); }
         return;
       case "e": ev.preventDefault(); learn(); markDone(rows); return;
+      case "#": ev.preventDefault(); learn(); trashThreads(rows); return;
       // One deferral key. Filing a single message into Reading or Receipts is
       // rare — you change the sender's rule instead — so those lost their keys.
       case "s": ev.preventDefault(); learn(); snoozePickerRows.value = rows; return;
@@ -250,6 +251,7 @@ export const SHORTCUTS: [string, string][] = [
   ["s", "Choose when to snooze"],
   ["i", "Move to the Inbox"],
   ["p", "Pin to the board"],
+  ["#", "Move to Trash (undo for a few seconds)"],
   ["r", "Reply"],
   ["c", "Compose"],
   ["1 2 3 0", "Screener: Inbox, Reading, Receipts, Block"],

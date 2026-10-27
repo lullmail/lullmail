@@ -67,7 +67,7 @@ func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, 
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
-		WHERE h.bucket = 'imbox'`
+		WHERE h.bucket = 'imbox'` + discardedFilter("m")
 	listArgs := []any{uid}
 	if account != "" {
 		listQuery += ` AND ea.id = $2`
@@ -189,7 +189,7 @@ func (a *App) handleBriefing(w http.ResponseWriter, r *http.Request) {
 		FROM hey_messages h
 		JOIN mail_messages m ON m.account_id = h.account_id AND m.id = h.message_id
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-		WHERE h.user_id = $1`
+		WHERE h.user_id = $1` + discardedFilter("m")
 	briefArgs := []any{uid}
 	if account != "" {
 		briefCounts += ` AND ea.id = $2`
@@ -224,7 +224,7 @@ func (a *App) handleRecent(w http.ResponseWriter, r *http.Request) {
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
-		WHERE true`+
+		WHERE true`+discardedFilter("m")+
 		accountClause(r)+`
 		ORDER BY m.account_id, m.thread_id, m.received_at DESC NULLS LAST`, uid)
 }

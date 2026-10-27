@@ -300,7 +300,7 @@ func (a *App) handleCounts(w http.ResponseWriter, r *http.Request) {
 		FROM hey_messages h
 		JOIN mail_messages m ON m.account_id = h.account_id AND m.id = h.message_id
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-		WHERE h.user_id = $1`
+		WHERE h.user_id = $1` + discardedFilter("m")
 	countsArgs := []any{uid}
 	if account := r.URL.Query().Get("account"); account != "" {
 		countsQuery += ` AND ea.id = $2`
@@ -382,7 +382,7 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
 		WHERE (m.subject ILIKE $2 ESCAPE '\' OR m.from_addrs ILIKE $2 ESCAPE '\' OR m.to_addrs ILIKE $2 ESCAPE '\' OR m.preview ILIKE $2 ESCAPE '\')` +
-		accountClause(r)
+		discardedFilter("m") + accountClause(r)
 	args := []any{uid, like}
 	if cursor.ID != "" {
 		query += cursorPredicate("$3", "$4", "$5")
@@ -461,7 +461,7 @@ func (a *App) handleScreener(w http.ResponseWriter, r *http.Request) {
 		FROM hey_messages h
 		JOIN mail_messages m ON m.account_id = h.account_id AND m.id = h.message_id
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = h.user_id
-		WHERE h.user_id = $1 AND h.bucket = 'screener'
+		WHERE h.user_id = $1 AND h.bucket = 'screener'`+discardedFilter("m")+`
 		  AND json_typeof(m.from_addrs::json) = 'array'
 		  AND m.from_addrs::json->0->>'email' IS NOT NULL
 		  AND NOT EXISTS (
@@ -730,7 +730,7 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 	    SELECT m2.id FROM hey_messages h2
 	    JOIN mail_messages m2 ON m2.account_id = h2.account_id AND m2.id = h2.message_id
 	    WHERE h2.user_id = $1 AND h2.bucket = ANY($2)
-	      AND m2.account_id = m.account_id AND m2.thread_id = m.thread_id
+	      AND m2.account_id = m.account_id AND m2.thread_id = m.thread_id` + discardedFilter("m2") + `
 	    ORDER BY m2.received_at DESC NULLS LAST, m2.id DESC LIMIT 1)`
 	nextArg := len(args) + 1
 	if cursor.ID != "" {

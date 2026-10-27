@@ -26,6 +26,7 @@ Select-all means all **loaded** rows. It never silently selects unfetched pages 
 - Ctrl/Command+A selects all loaded messages while the list or bulk bar owns the key; editing fields and unrelated focused links/controls keep their native select-all behavior
 - Enter/o opens the focused thread and clears explicit selection
 - Existing e, s, i, p, r, c, u, g-navigation and search shortcuts remain. Help lists the new selection keys; browser Delete/Backspace are not reassigned to destructive mail operations
+- # moves the focused or selected threads to the provider's Trash folder. The rows leave every list at once, but the move is sent only when the 6-second undo window closes (or the page is left), so Undo never has to bring mail back out of Trash
 - Escape first dismisses the active menu/overlay, then any toast, then visible explicit selection, then the reader. Clearing selection retains row focus. A local snooze menu consumes its Escape and does not also clear the underlying selection
 - Typing fields, contenteditable regions, IME composition, locally handled events and native button/link activation are respected. Global Ctrl/Command+K still opens the palette
 
