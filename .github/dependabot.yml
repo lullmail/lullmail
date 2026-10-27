@@ -18,3 +18,7 @@ updates:
     directory: /dashboard
     schedule:
       interval: weekly
+    ignore:
+      # Neutron core and cli peer on preact ^10; Preact 11 waits for them.
+      - dependency-name: preact
+        update-types: ["version-update:semver-major"]
