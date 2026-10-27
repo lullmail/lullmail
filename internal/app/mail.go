@@ -493,9 +493,15 @@ func apiUnavailable(mux *http.ServeMux, reason string) {
 // is one operator's own accounts and the whole store is measured in hundreds of
 // messages. PREFETCH_BODIES=0 turns it back off for an install where that stops
 // being true.
+//
+// Only the last 30 days are prefetched. A body is a provider request of its
+// own (Gmail meters it like the envelope), so prefetching a whole history
+// doubled a first import for mail that is rarely opened; older bodies load on
+// first open.
 func newSyncEngine(store mail.Store, cfg *Config) *mail.Engine {
 	eng := mail.NewEngine(store, slog.Default())
 	eng.FetchBodies = envOr("PREFETCH_BODIES", "1") != "0"
+	eng.FetchBodiesWithin = 30 * 24 * time.Hour
 	// Identity hooks: the engine's identity transactions (atomic
 	// replacement, destroy-with-references) call back into the product's
 	// tables on the engine's own transaction — identity.go carries them.

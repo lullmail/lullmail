@@ -567,7 +567,7 @@ func (a *App) accountResolver() mail.Resolver {
 	return func(ctx context.Context, acct mail.AccountID, cred mail.Credential) (mail.Adapter, func(), error) {
 		base := a.dial
 		if base == nil {
-			base = newResolverWithGmailRefresh(a.refreshGmailToken)
+			base = newResolverWithRefresh(a.refreshOAuthToken)
 		}
 		ctx, releaseUse, ok := a.beginAccountWorkCtx(ctx, acct)
 		if !ok {

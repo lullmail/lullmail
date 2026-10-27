@@ -119,7 +119,7 @@ func TestGmailExpiredReadRefreshesOnceAndRemainsSchedulerEligible(t *testing.T) 
 	scheduler := mail.NewScheduler(store, eng, nil, log)
 	scheduler.Jitter = false
 	scheduler.Tokens = app
-	scheduler.Resolve = dialer.NewWithGmailRefresh(app.refreshGmailToken)
+	scheduler.Resolve = dialer.NewWithGmailRefresh(app.refreshOAuthToken)
 	var last error
 	scheduler.AfterSync = func(_ context.Context, _ mail.Account, _ []mail.SyncReport, err error) { last = err }
 	scheduler.RunOnce(ctx)

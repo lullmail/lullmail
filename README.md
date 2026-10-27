@@ -38,9 +38,10 @@ RFC 4155) is a table-stakes feature, not a cancellation flow.
   organizes: 30 days, 90 days (default), 1 year, 3 years, or "All history."
   Changing the window grows or shrinks the organized views only; the local
   mirror obeys the separate retention setting, and provider mail is never
-  touched. Message bodies are prefetched during sync by default (so the
-  first open of any thread is local); set `PREFETCH_BODIES=0` to fetch
-  bodies only when a thread is opened.
+  touched. Bodies of the last 30 days of mail are prefetched during sync by
+  default (so opening recent mail is local; older bodies load on first
+  open); set `PREFETCH_BODIES=0` to fetch bodies only when a thread is
+  opened.
 - Installable PWA with an explicit iOS path, account-bound offline reading,
   resilient local drafts, a conservative replay queue for reversible filing
   actions, and optional private web-push alerts.
@@ -111,7 +112,7 @@ recovery codes are opt-in additions, not requirements.
 | `LULL_USER_EMAIL` | no | Owner address used as the internal ident. Setup collects a name (login accepts that name or this address); leave unset to derive `name@owner.local`. |
 | `PUBLIC_URL` | no | Browser origin, e.g. `https://mail.example.com`. Auto-detected from the first setup visit and pinned in the database; the env var forces an origin. WebAuthn and mutation-origin checks reject a different origin. |
 | `DATA_DIR` | no | Where the generated key and setup token live (default `./data`). Mount it as a volume or restarts regenerate them. |
-| `PREFETCH_BODIES` | no | `1` (default) fetches message bodies during sync so first open is local; `0` fetches a body only when its thread is opened. |
+| `PREFETCH_BODIES` | no | `1` (default) fetches bodies of the last 30 days of mail during sync so opening recent mail is local; `0` fetches a body only when its thread is opened. |
 | `WEBAUTHN_RP_ID` | no | Relying-party domain; derived from the effective origin. |
 | `PORT` / `ADDR` | no | Defaults to `:8080`. |
 

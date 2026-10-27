@@ -918,7 +918,7 @@ func (a *App) syncResolver() mail.Resolver {
 	if a.dial != nil {
 		return a.dial
 	}
-	return newResolverWithGmailRefresh(a.refreshGmailToken)
+	return newResolverWithRefresh(a.refreshOAuthToken)
 }
 
 func (a *App) finishSync(ctx context.Context, acct mail.AccountID, reports []mail.SyncReport, syncErr error) error {

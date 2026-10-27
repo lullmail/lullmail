@@ -17,10 +17,12 @@ import (
 	"github.com/neutron-build/neutron/mail/imap"
 )
 
-func newResolver() mail.Resolver { return newResolverWithGmailRefresh(nil) }
+func newResolver() mail.Resolver { return newResolverWithRefresh(nil) }
 
-func newResolverWithGmailRefresh(refresh dialer.GmailRefresh) mail.Resolver {
-	stock := dialer.NewWithPolicy(refresh, dialer.Policy{JMAPAllowedOrigins: jmapAllowedOrigins})
+// newResolverWithRefresh lets Gmail and Graph reads refresh a rejected token
+// once and continue, so a long import outlives its hour-long access token.
+func newResolverWithRefresh(refresh dialer.Refresh) mail.Resolver {
+	stock := dialer.NewWithPolicy(refresh, dialer.Policy{JMAPAllowedOrigins: jmapAllowedOrigins, GraphRefresh: refresh})
 	return func(ctx context.Context, acct mail.AccountID, cred mail.Credential) (mail.Adapter, func(), error) {
 		if cred.Provider == mail.ProviderIMAP && isLoopbackHost(cred.Host) {
 			user := strings.TrimSpace(cred.Username)

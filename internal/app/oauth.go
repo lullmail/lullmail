@@ -257,17 +257,18 @@ func (a *App) oauthToken(ctx context.Context, provider, account, address, sealed
 	return a.oauthTokenAfterRejection(ctx, provider, account, address, sealed, "")
 }
 
-// refreshGmailToken is only installed for stored-account read adapters. The
-// application keeps refresh tokens and client secrets; the engine receives
-// only a replacement short-lived bearer. A replaced credential is reloaded
-// under the same refresh lock and compare-and-swap as ordinary token refresh.
-func (a *App) refreshGmailToken(ctx context.Context, acct mail.AccountID, rejected mail.Credential) (mail.Credential, error) {
+// refreshOAuthToken is only installed for stored-account read adapters
+// (Gmail and Graph). The application keeps refresh tokens and client secrets;
+// the engine receives only a replacement short-lived bearer. A replaced
+// credential is reloaded under the same refresh lock and compare-and-swap as
+// ordinary token refresh.
+func (a *App) refreshOAuthToken(ctx context.Context, acct mail.AccountID, rejected mail.Credential) (mail.Credential, error) {
 	var provider, address, sealed string
 	if err := a.db.QueryRowContext(ctx, `SELECT provider, address, cred_ciphertext FROM email_accounts WHERE mirror_account_id=$1`, string(acct)).Scan(&provider, &address, &sealed); err != nil {
 		return mail.Credential{}, err
 	}
-	if provider != "gmail" || rejected.Provider != mail.ProviderGmail {
-		return mail.Credential{}, fmt.Errorf("account provider changed during Gmail read")
+	if (provider != "gmail" && provider != "graph") || mail.Provider(provider) != rejected.Provider {
+		return mail.Credential{}, fmt.Errorf("account provider changed during %s read", rejected.Provider)
 	}
 	return a.oauthTokenAfterRejection(ctx, provider, string(acct), address, sealed, rejected.AccessToken)
 }
@@ -298,7 +299,7 @@ func (a *App) oauthTokenAfterRejection(ctx context.Context, provider, account, a
 	}
 	if rejected != "" && token.AccessToken == rejected {
 		if token.RefreshToken == "" {
-			return mail.Credential{}, fmt.Errorf("Gmail access token rejected and no refresh token remains: %w", mail.ErrReauthRequired)
+			return mail.Credential{}, fmt.Errorf("%s access token rejected and no refresh token remains: %w", provider, mail.ErrReauthRequired)
 		}
 		// A server can reject a token before its recorded expiry. Only invalidate
 		// the exact rejected bearer; another request may already have replaced it.
