@@ -29,7 +29,13 @@ import (
 // emailed skip the Screener entirely; replying to someone is a decision.
 func (a *App) classifyUser(ctx context.Context, uid string) error {
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT m.account_id, m.id, COALESCE(m.from_addrs, ''), m.received_at, ea.created_at
+		SELECT m.account_id, m.id, COALESCE(m.from_addrs, ''), m.received_at, ea.created_at,
+		       EXISTS (SELECT 1 FROM mail_message_mailboxes sm
+		               JOIN mail_mailboxes sb ON sb.account_id = sm.account_id AND sb.id = sm.mailbox_id
+		               WHERE sm.account_id = m.account_id AND sm.message_id = m.id AND sb.role = 'sent'),
+		       EXISTS (SELECT 1 FROM mail_message_mailboxes nm
+		               JOIN mail_mailboxes nb ON nb.account_id = nm.account_id AND nb.id = nm.mailbox_id
+		               WHERE nm.account_id = m.account_id AND nm.message_id = m.id AND nb.role = 'inbox')
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
@@ -49,12 +55,14 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 	type pending struct {
 		acct, id, sender string
 		historical       bool
+		sentOnly         bool
 	}
 	var batch []pending
 	for rows.Next() {
 		var acct, id, fromJSON string
 		var received, connected sql.NullTime
-		if err := rows.Scan(&acct, &id, &fromJSON, &received, &connected); err != nil {
+		var inSent, inInbox bool
+		if err := rows.Scan(&acct, &id, &fromJSON, &received, &connected, &inSent, &inInbox); err != nil {
 			rows.Close()
 			return err
 		}
@@ -63,6 +71,7 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		batch = append(batch, pending{
 			acct: acct, id: id, sender: firstSenderEmail(fromJSON),
 			historical: received.Valid && connected.Valid && received.Time.Before(connected.Time),
+			sentOnly:   inSent && !inInbox,
 		})
 	}
 	scanErr := rows.Err()
@@ -180,6 +189,17 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		if p.sender == "" {
 			bucket = "paper_trail"
 		}
+		// A message the provider filed only in the owner's Sent folder never
+		// joins the decision queue: it is a copy of something the owner (or
+		// a machine acting for them, like cold outreach over SMTP) already
+		// sent, not mail that arrived. The sender-based rules above would
+		// file it as Imbox — the owner's own address is always a
+		// correspondent — which surfaced every machine-sent message as if
+		// the owner had written to themselves. Inbox membership (a Bcc to
+		// self) means the copy was also received, and classifies as before.
+		if p.sentOnly {
+			bucket = "paper_trail"
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO hey_messages (user_id, account_id, message_id, bucket)
 			VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, account_id, message_id) DO NOTHING`,
@@ -197,6 +217,24 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		WHERE h.user_id = $1 AND h.bucket = 'screener'
 		  AND h.account_id = m.account_id AND h.message_id = m.id AND s.user_id = $1 AND s.sender_key <> ''
 		  AND s.sender_key = lower(COALESCE(m.from_addrs, '[]')::json->0->>'email')`, uid); err != nil {
+		return err
+	}
+	// Sent-only mail misfiled before the rule above (the 2026-10-28 Imbox
+	// report) repairs on every pass, like the other self-heals: sent mail
+	// parked in any arrival bucket moves to Receipts. A 'dropped' row keeps
+	// its block decision — an explicit owner choice outranks the rule.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE hey_messages h SET bucket = 'paper_trail'
+		FROM mail_messages m
+		WHERE h.user_id = $1
+		  AND h.bucket NOT IN ('paper_trail', 'dropped')
+		  AND h.account_id = m.account_id AND h.message_id = m.id
+		  AND EXISTS (SELECT 1 FROM mail_message_mailboxes sm
+		              JOIN mail_mailboxes sb ON sb.account_id = sm.account_id AND sb.id = sm.mailbox_id
+		              WHERE sm.account_id = m.account_id AND sm.message_id = m.id AND sb.role = 'sent')
+		  AND NOT EXISTS (SELECT 1 FROM mail_message_mailboxes nm
+		                  JOIN mail_mailboxes nb ON nb.account_id = nm.account_id AND nb.id = nm.mailbox_id
+		                  WHERE nm.account_id = m.account_id AND nm.message_id = m.id AND nb.role = 'inbox')`, uid); err != nil {
 		return err
 	}
 	// Malformed-From mail parked in 'screener' before the rule above existed
