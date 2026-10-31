@@ -19,7 +19,7 @@
     "@neutron-build/cli": "^0.4.0",
     "@neutron-build/core": "^0.4.0",
     "@neutron-build/mail": "^0.1.0",
-    "@preact/signals": "^2.11.1",
+    "@preact/signals": "^2.11.4",
     "parse5": "^8.0.1",
     "preact": "^10.25.4",
     "preact-render-to-string": "^6.5.0"
