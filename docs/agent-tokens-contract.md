@@ -8,8 +8,10 @@ defects rather than resolving them unilaterally.
 
 1. **Four named scopes**, layered over (not replacing) the existing path
    allowlist, which remains the outer boundary: `mail:read`, `mail:send`,
-   `mail:act`, `agent:manage`. Default for newly minted tokens: all four
-   (byte-for-byte today's trust behavior — no compat break).
+   `mail:act`, `agent:manage`. Default for newly minted tokens: `mail:read`
+   only (changed 2026-11-03; was all four). Send, act and manage must be
+   requested by name; the dashboard asks for send and act explicitly at
+   creation. Tokens minted before the change keep their stored scopes.
 2. **Opaque tokens, server-side claims** — 32 random bytes, `lull_` prefix,
    SHA-256-at-rest like today. No JWT; consistent with the session model.
 3. **Optional expiry**: per-token `expires_at` chosen at mint; default

@@ -1086,3 +1086,16 @@ sign-in-gate click timed out under a concurrently loaded host and passed
 cleanly on the two following runs; the failed receipt is retained, not
 counted). No commits, pushes or engine edits; live provider, deployment and
 upstream-engine gates remain external.
+
+## Security review follow-up (2026-11-03, branch security/review-2026-11-03)
+
+- Dashboard CSP: `script-src` no longer allows `'unsafe-inline'`. Each served
+  HTML page lists the SHA-256 of its inline scripts (theme bootstrap and
+  speculation rules), computed once per page from the embedded build; every
+  other response gets `script-src 'self'`. Mail-body and compose-preview
+  iframes already carried their own `script-src 'none'` policy.
+- Agent tokens: newly minted tokens default to `mail:read`. `mail:send`,
+  `mail:act` and `agent:manage` must be requested by name (the dashboard asks
+  for send and act explicitly). Existing rows, the migration-v12 column
+  default, and rotation (inherits the predecessor's scopes) are unchanged.
+  docs/agent-tokens-contract.md decision 1 updated.

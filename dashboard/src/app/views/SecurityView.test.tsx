@@ -239,3 +239,45 @@ describe("re-authentication prompt", () => {
     expect(dialog?.textContent).toContain("enter your current password to confirm");
   });
 });
+
+describe("agent token creation", () => {
+  const mintWith = async (confirms: boolean[]) => {
+    resetSelection();
+    vi.unstubAllGlobals();
+    let minted: unknown = null;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method || (init?.body ? "POST" : "GET")).toUpperCase();
+      if (url.endsWith("/api/security")) {
+        return jsonResponse(200, { email: "owner@example.test", passkeys: [], totp_enabled: false, password_set: true, recovery_codes_remaining: 10 });
+      }
+      if (url.endsWith("/api/security/agent-tokens") && method === "POST") {
+        minted = JSON.parse(String(init?.body));
+        return jsonResponse(200, { token: "lull_test" });
+      }
+      if (url.endsWith("/api/security/agent-tokens")) return jsonResponse(200, []);
+      if (url.endsWith("/api/security/sessions")) return jsonResponse(200, []);
+      if (url.endsWith("/api/push")) return jsonResponse(200, { configured: false, subscribed: false, public_key: "" });
+      return jsonResponse(404, { title: "Not Found" });
+    }));
+    vi.stubGlobal("prompt", () => "agent");
+    const answers = [...confirms];
+    vi.stubGlobal("confirm", () => answers.shift() ?? false);
+    render(<SecurityView />, host);
+    await vi.waitFor(() => expect(host.textContent).toContain("Create token"));
+    const button = [...host.querySelectorAll("button")].find((b) => b.textContent === "Create token")!;
+    await act(async () => { button.click(); await settle(); });
+    await vi.waitFor(() => expect(minted).not.toBeNull());
+    return minted as { name: string; scopes: string[] };
+  };
+
+  it("mints read-only unless higher scopes are chosen", async () => {
+    expect((await mintWith([false, false])).scopes).toEqual(["mail:read"]);
+  });
+
+  it("adds send and act only when explicitly allowed", async () => {
+    expect((await mintWith([true, false])).scopes).toEqual(["mail:read", "mail:send"]);
+    render(null, host);
+    expect((await mintWith([true, true])).scopes).toEqual(["mail:read", "mail:send", "mail:act"]);
+  });
+});

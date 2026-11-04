@@ -89,10 +89,11 @@ func (v *agentScopesValue) Scan(src any) error {
 
 // normalizeAgentScopes validates a requested scope list against the
 // vocabulary and returns it deduplicated in canonical order. An empty
-// request means the default: every scope.
+// request means the default: read-only. Send, act and manage must be asked
+// for by name; existing rows keep whatever they were minted with.
 func normalizeAgentScopes(requested []string) ([]string, bool) {
 	if len(requested) == 0 {
-		return append([]string(nil), agentScopes...), true
+		return []string{scopeMailRead}, true
 	}
 	var out []string
 	for _, want := range requested {

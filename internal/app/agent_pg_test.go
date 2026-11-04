@@ -228,17 +228,24 @@ func TestIntegrationAgentReducedScopeMint(t *testing.T) {
 		t.Fatalf("reduced token reached /security: %d", w.Code)
 	}
 
-	// Defaults are byte-for-byte today's trust: all four scopes, no expiry.
-	full, w := mintAgentToken(t, p, session, `{"name":"full"}`)
+	defaulted, w := mintAgentToken(t, p, session, `{"name":"defaulted"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("default mint status=%d (%s)", w.Code, w.Body.String())
 	}
+	if len(defaulted.Scopes) != 1 || defaulted.Scopes[0] != scopeMailRead {
+		t.Fatalf("default mint scopes=%v, want read-only", defaulted.Scopes)
+	}
+
+	full, w := mintAgentToken(t, p, session, `{"name":"full","scopes":["mail:read","mail:send","mail:act","agent:manage"]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("full mint status=%d (%s)", w.Code, w.Body.String())
+	}
 	if len(full.Scopes) != len(agentScopes) {
-		t.Fatalf("default mint scopes=%v, want all four", full.Scopes)
+		t.Fatalf("full mint scopes=%v, want all four", full.Scopes)
 	}
 	for _, s := range agentScopes {
 		if !agentScopeGrants(full.Scopes, s) {
-			t.Fatalf("default mint missing %s: %v", s, full.Scopes)
+			t.Fatalf("full mint missing %s: %v", s, full.Scopes)
 		}
 	}
 	if w := p.agentServe(handler, http.MethodPost, "/api/send", full.Token); w.Code != http.StatusOK {
@@ -272,8 +279,8 @@ func TestIntegrationAgentReducedScopeMint(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &listed); err != nil {
 		t.Fatalf("list response: %v", err)
 	}
-	if len(listed) != 2 {
-		t.Fatalf("listed %d tokens, want 2", len(listed))
+	if len(listed) != 3 {
+		t.Fatalf("listed %d tokens, want 3", len(listed))
 	}
 	for _, entry := range listed {
 		if _, leaked := entry["token"]; leaked {

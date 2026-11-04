@@ -245,10 +245,13 @@ export function SecurityView() {
   const createAgentToken = async () => {
     const name = window.prompt("Name this token (what will use it?)", "Purelymail import")?.trim();
     if (!name) return;
+    const scopes = ["mail:read"];
+    if (window.confirm("Allow this token to send mail? Cancel keeps it read-only for sending.")) scopes.push("mail:send");
+    if (window.confirm("Allow this token to change mail and mailboxes (archive, move, classify, connect or remove accounts)? Cancel keeps it read-only.")) scopes.push("mail:act");
     setBusy("agent");
     try {
       await gated(async () => {
-        const out = await api<{ token: string }>("/security/agent-tokens", { body: { name } });
+        const out = await api<{ token: string }>("/security/agent-tokens", { body: { name, scopes } });
         setNewToken(out.token);
       });
       await load();
@@ -362,7 +365,7 @@ export function SecurityView() {
       </section>
 
       <section class="settings-section">
-        <div class="settings-section-head"><div><h2>Agent tokens</h2><p>Let a script or AI agent connect mailboxes and read or send mail on your behalf. Tokens can never touch sign-in or security settings. Shown once — revoke anytime.</p></div>
+        <div class="settings-section-head"><div><h2>Agent tokens</h2><p>Let a script or AI agent read mail on your behalf. New tokens are read-only unless you also allow sending or changing mail and mailboxes when you create them. Tokens can never touch sign-in or security settings. Shown once — revoke anytime.</p></div>
           <button class="btn btn-outline btn-sm" type="button" disabled={!!busy} onClick={createAgentToken}>{busy === "agent" ? "Creating…" : "Create token"}</button></div>
         {newToken && <div class="recovery-sheet">
           <p>Copy this now — it will not be shown again. Send it as <code>Authorization: Bearer …</code> against <code>/api/…</code>.</p>

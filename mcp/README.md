@@ -11,7 +11,9 @@ never its internals, and the main build never compiles it.
 ## Setup
 
 1. In Lull Mail: **Settings → Security → Agent tokens → Create token**.
-   Copy the `lull_...` value (shown once).
+   New tokens are read-only; allow sending and/or changing mail and
+   mailboxes when asked if the agent needs `send_mail`, `add_account`,
+   `delete_account` or other write tools. Copy the `lull_...` value (shown once).
 2. Build: `go build -o lullmail-mcp .`
 3. Point any MCP client at it:
 
