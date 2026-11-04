@@ -55,3 +55,13 @@ it("resolves exact MIME content ids only to authenticated local images", () => {
  expect(html).not.toContain("cid:");
  expect(frameDoc(html, false)).toContain("img-src data: blob:");
 });
+
+describe("link sanitization covers every navigable element", () => {
+  it("drops non-web hrefs from image-map areas and MathML", () => {
+    const html = cleanLinks('<map name="m"><area href="javascript:alert(1)" shape="rect" coords="0,0,9,9"><area href="https://example.com/?utm_source=x" shape="rect" coords="0,0,9,9"></map>' +
+      '<math href="javascript:alert(1)"><mi xlink:href="javascript:alert(1)">x</mi></math>');
+    expect(html).not.toContain("javascript:");
+    expect(html).toContain('href="https://example.com/"');
+    expect(html).toContain('rel="noopener noreferrer"');
+  });
+});

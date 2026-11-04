@@ -170,7 +170,9 @@ export function cleanLinks(html: string): string {
 		if (/@\s*import\b/i.test(node.textContent || "")) node.remove();
 	});
 	sanitizeImageResources(doc, true);
-  doc.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((anchor) => {
+  doc.querySelectorAll("math [href], math[href]").forEach((node) => node.removeAttribute("href"));
+  doc.querySelectorAll("math *, math").forEach((node) => node.removeAttributeNS("http://www.w3.org/1999/xlink", "href"));
+  doc.querySelectorAll<HTMLAnchorElement | HTMLAreaElement>("a[href], area[href]").forEach((anchor) => {
     try {
       const target = new URL(anchor.href);
 			if (!["http:", "https:", "mailto:"].includes(target.protocol)) { anchor.removeAttribute("href"); return; }
