@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -206,12 +208,35 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
-		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "+
-				"script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "+
-				"img-src 'self' data: blob: https:; connect-src 'self'; form-action 'self'")
+		w.Header().Set("Content-Security-Policy", contentSecurityPolicy(""))
 		next.ServeHTTP(w, r)
 	})
+}
+
+func contentSecurityPolicy(scriptHashes string) string {
+	return "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; " +
+		"script-src 'self'" + scriptHashes + "; style-src 'self' 'unsafe-inline'; " +
+		"img-src 'self' data: blob: https:; connect-src 'self'; form-action 'self'"
+}
+
+var inlineScriptPattern = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script\s*>`)
+var scriptSrcAttr = regexp.MustCompile(`(?i)\ssrc\s*=`)
+
+func inlineScriptHashes(page string) string {
+	var out strings.Builder
+	seen := map[string]bool{}
+	for _, m := range inlineScriptPattern.FindAllStringSubmatch(page, -1) {
+		if scriptSrcAttr.MatchString(" " + m[1]) {
+			continue
+		}
+		sum := sha256.Sum256([]byte(m[2]))
+		h := "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+		if !seen[h] {
+			seen[h] = true
+			out.WriteString(" " + h)
+		}
+	}
+	return out.String()
 }
 
 // serveServiceWorker stamps the worker with a fingerprint of the built
@@ -234,6 +259,12 @@ type shellRenderer struct {
 	workerReady bool
 	styleHref   string
 	styleReady  bool
+	pages       map[string]renderedPage
+}
+
+type renderedPage struct {
+	body string
+	csp  string
 }
 
 func newShellRenderer(fsys fs.FS) *shellRenderer {
@@ -307,22 +338,44 @@ func serveServiceWorker(w http.ResponseWriter, r *http.Request, shell *shellRend
 // serve time — the same convention akiroo's static.go uses — so routes never
 // each have to remember it.
 func serveHTML(w http.ResponseWriter, r *http.Request, shell *shellRenderer, name string) {
-	data, err := fs.ReadFile(shell.fsys, name)
-	if err != nil {
+	page, ok := shell.page(name)
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
+	w.Header().Set("Content-Security-Policy", page.csp)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(page.body))
+}
+
+func (c *shellRenderer) page(name string) (renderedPage, bool) {
+	c.mu.Lock()
+	if p, ok := c.pages[name]; ok {
+		c.mu.Unlock()
+		return p, true
+	}
+	c.mu.Unlock()
+	data, err := fs.ReadFile(c.fsys, name)
+	if err != nil {
+		return renderedPage{}, false
+	}
 	s := string(data)
 	const plainHref = `href="/styles.css"`
-	href := shell.stylesheetHref()
+	href := c.stylesheetHref()
 	link := `<link rel="stylesheet" href="` + href + `">`
 	if strings.Contains(s, plainHref) {
 		s = strings.Replace(s, plainHref, `href="`+href+`"`, 1)
 	} else if !strings.Contains(s, link) {
 		s = strings.Replace(s, "</head>", link+"</head>", 1)
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(s))
+	p := renderedPage{body: s, csp: contentSecurityPolicy(inlineScriptHashes(s))}
+	c.mu.Lock()
+	if c.pages == nil {
+		c.pages = map[string]renderedPage{}
+	}
+	c.pages[name] = p
+	c.mu.Unlock()
+	return p, true
 }
 
 func envOr(key, fallback string) string {

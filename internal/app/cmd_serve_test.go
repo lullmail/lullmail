@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"database/sql"
 	"database/sql/driver"
 	"errors"
@@ -175,5 +177,34 @@ func TestServiceWorkerVersionCoversAllShellAssets(t *testing.T) {
 	}
 	if afterManifest == afterIcon {
 		t.Fatal("distinct asset changes produced the same version")
+	}
+}
+
+func TestServeHTMLHashesInlineScripts(t *testing.T) {
+	theme := "(function(){document.documentElement.dataset.t='x'})();"
+	rules := `{"prerender":[{"source":"document"}]}`
+	page := `<html><head><script id="theme-init">` + theme + `</script>` +
+		`<script type="speculationrules">` + rules + `</script>` +
+		`<script type="module" src="/assets/app.js"></script></head><body></body></html>`
+	files := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(page)}}
+	shell := newShellRenderer(files)
+	for i := 0; i < 2; i++ {
+		w := httptest.NewRecorder()
+		serveHTML(w, httptest.NewRequest("GET", "/", nil), shell, "index.html")
+		csp := w.Header().Get("Content-Security-Policy")
+		script := scriptSrcDirective(csp)
+		if strings.Contains(script, "unsafe-inline") {
+			t.Fatalf("script-src allows inline script: %q", script)
+		}
+		for _, body := range []string{theme, rules} {
+			sum := sha256.Sum256([]byte(body))
+			want := "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+			if !strings.Contains(script, want) {
+				t.Fatalf("script-src %q missing %s", script, want)
+			}
+		}
+		if strings.Count(script, "'sha256-") != 2 {
+			t.Fatalf("script-src %q should hash exactly the two inline scripts", script)
+		}
 	}
 }

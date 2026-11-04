@@ -84,4 +84,16 @@ func TestSecurityHeadersCoverEveryResponse(t *testing.T) {
 	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors 'none'") || !strings.Contains(csp, "object-src 'none'") {
 		t.Fatalf("security policy is missing framing/object protections: %q", csp)
 	}
+	if csp := rec.Header().Get("Content-Security-Policy"); strings.Contains(scriptSrcDirective(csp), "unsafe-inline") {
+		t.Fatalf("script-src must not allow inline script: %q", csp)
+	}
+}
+
+func scriptSrcDirective(csp string) string {
+	for _, d := range strings.Split(csp, ";") {
+		if d = strings.TrimSpace(d); strings.HasPrefix(d, "script-src ") {
+			return d
+		}
+	}
+	return ""
 }
