@@ -38,7 +38,9 @@ type server struct {
 	mu   sync.Mutex
 	hook Hook
 	wg   sync.WaitGroup
-	// conns counts accepted connections.
+	// conns counts sessions in which a client spoke or was dropped at the
+	// greeting. Counting at accept would include port probes from dev tools
+	// (T3 Code sends GET / to every new loopback listener).
 	conns int
 	log   []string
 }
@@ -57,9 +59,6 @@ func (s *server) start(handle func(net.Conn)) error {
 			if err != nil {
 				return
 			}
-			s.mu.Lock()
-			s.conns++
-			s.mu.Unlock()
 			s.wg.Add(1)
 			go func() {
 				defer s.wg.Done()
@@ -85,7 +84,18 @@ func (s *server) Port() int {
 // SetHook installs the behavior hook; nil restores normal behavior.
 func (s *server) SetHook(h Hook) { s.mu.Lock(); s.hook = h; s.mu.Unlock() }
 
-// Connections is the number of sessions accepted so far.
+func (s *server) countSession() { s.mu.Lock(); s.conns++; s.mu.Unlock() }
+
+// speak counts the session the first time the client sends a real mail
+// command. Port probes (HTTP or TLS bytes) never get this far.
+func (s *server) speak(counted *bool) {
+	if !*counted {
+		*counted = true
+		s.countSession()
+	}
+}
+
+// Connections is the number of mail sessions seen so far.
 func (s *server) Connections() int { s.mu.Lock(); defer s.mu.Unlock(); return s.conns }
 
 func (s *server) step(name string) Action {
@@ -180,8 +190,10 @@ func (s *SMTP) handle(conn net.Conn) {
 	r := bufio.NewReader(conn)
 	say := func(line string) { fmt.Fprintf(conn, "%s\r\n", line) }
 	if s.step("greeting") == Drop {
+		s.countSession()
 		return
 	}
+	counted := false
 	say("220 fake ESMTP")
 	for {
 		line, err := r.ReadString('\n')
@@ -192,6 +204,7 @@ func (s *SMTP) handle(conn net.Conn) {
 		verb := strings.Fields(cmd + " x")[0]
 		switch verb {
 		case "EHLO", "HELO":
+			s.speak(&counted)
 			switch s.step("ehlo") {
 			case Drop:
 				return
@@ -321,8 +334,10 @@ func (s *IMAP) handle(conn net.Conn) {
 	r := bufio.NewReader(conn)
 	send := func(l string) { _, _ = io.WriteString(conn, l+"\r\n") }
 	if s.step("greeting") == Drop {
+		s.countSession()
 		return
 	}
+	counted := false
 	send("* OK fake ready")
 	for {
 		line, err := r.ReadString('\n')
@@ -335,6 +350,9 @@ func (s *IMAP) handle(conn net.Conn) {
 			return
 		}
 		tag, cmd := fields[0], strings.ToUpper(fields[1])
+		if cmd == "CAPABILITY" || cmd == "LOGIN" {
+			s.speak(&counted)
+		}
 		switch cmd {
 		case "CAPABILITY":
 			if s.step("capability") == Drop {
