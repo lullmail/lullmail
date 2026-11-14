@@ -90,7 +90,8 @@ function NeedsCard({ card, row, index }: { card: BoardCard; row: Row | null; ind
 }
 
 function WaitCard({ card }: { card: BoardCard }) {
-  const who = splitFrom(card.from || "");
+  // `from` on a waiting card is the owner; the card names who owes the reply.
+  const who = splitFrom(card.waiting_on || card.from || "");
   const age = daysSince(card.received_at);
   return (
     <div class="board-card wait" role="button" tabIndex={0} onClick={() => card.thread_id && card.account && openThread(card.thread_id, card.account, null)} onKeyDown={(e) => { if ((e.key === "Enter" || e.key === " ") && card.thread_id && card.account) { e.preventDefault(); openThread(card.thread_id, card.account, null); } }}>

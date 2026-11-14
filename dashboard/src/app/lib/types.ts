@@ -38,6 +38,8 @@ export interface BoardCard {
   message_id?: string;
   subject: string;
   from?: string;
+  /** Waiting cards only: who the thread is waiting on. `from` there is the owner. */
+  waiting_on?: string;
   received_at?: string;
   preview?: string;
   note?: string;
@@ -113,6 +115,8 @@ export interface BriefThread {
   message_id: string;
   subject: string;
   from: string;
+  /** Waiting threads only: who the thread is waiting on. `from` there is the owner. */
+  waiting_on?: string;
   received_at: string;
   preview: string;
 }

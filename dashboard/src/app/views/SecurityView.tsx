@@ -3,7 +3,7 @@ import { ApiError, api, authApi, authed, refreshAuth } from "../lib/api";
 import { createPasskey } from "../lib/passkeys";
 import { fmtDate } from "../lib/fmt";
 import { resetSelection, setList, showError, showToast } from "../lib/store";
-import { Empty, ListSkeleton, LoadError, PageHead, SettingsTabs } from "../ui/bits";
+import { ListSkeleton, LoadError, PageHead, SettingsTabs } from "../ui/bits";
 import { navigate } from "../lib/router";
 import { clearOfflineData } from "../lib/offline";
 
@@ -360,7 +360,7 @@ export function SecurityView() {
 
       <section class="settings-section">
         <div class="settings-section-head"><div><h2>Active sessions</h2><p>Thirty-day server-side sessions. Revoke anything you do not recognise.</p></div><button class="btn btn-outline btn-sm" type="button" disabled={busy === "logout"} onClick={logout}>{busy === "logout" ? "Signing out…" : "Sign out here"}</button></div>
-        {sessions.length === 0 && <Empty title="No active sessions." />}
+        {sessions.length === 0 && <p class="settings-empty">No active sessions.</p>}
         {sessions.map((session) => <div class="security-row" key={session.id}><div><strong>{session.current ? "This session" : "Signed-in device"}</strong><span>{session.user_agent || "Unknown browser"} · seen {fmtDate(session.last_seen_at)}</span></div><button class="btn btn-quiet-danger btn-sm" type="button" onClick={async () => { try { await api("/security/sessions/" + encodeURIComponent(session.id), { method: "DELETE" }); if (session.current) { authed.value = false; await refreshAuth(); } else await load(); } catch (e) { report(e, "Could not revoke session"); } }}>Revoke</button></div>)}
       </section>
 
@@ -372,7 +372,7 @@ export function SecurityView() {
           <div class="totp-setup"><code>{newToken}</code></div>
           <div class="inline-form"><button class="btn btn-primary btn-sm" type="button" onClick={copyNewToken}>Copy</button><button class="btn btn-ghost btn-sm" type="button" onClick={() => setNewToken("")}>Done</button></div>
         </div>}
-        {agentTokens.length === 0 && !newToken && <Empty title="No agent tokens." />}
+        {agentTokens.length === 0 && !newToken && <p class="settings-empty">No agent tokens yet.</p>}
         {agentTokens.map((token) => <div class="security-row" key={token.id}><div><strong>{token.name}</strong><span>Created {fmtDate(token.created_at)}{token.last_used_at ? " · used " + fmtDate(token.last_used_at) : " · not used yet"}</span>
           <span>{token.scopes?.length ? token.scopes.join(", ") : "no scopes"}{token.expires_at ? " · expires " + fmtDate(token.expires_at) : " · no expiry"}{token.rotated_to ? " · superseded (valid until " + fmtDate(token.rotated_grace_until) + ")" : ""}</span></div>
           <button class="btn btn-quiet-danger btn-sm" type="button" onClick={async () => { try { await api("/security/agent-tokens/" + encodeURIComponent(token.id), { method: "DELETE" }); await load(); } catch (e) { report(e, "Could not revoke token"); } }}>Revoke</button></div>)}

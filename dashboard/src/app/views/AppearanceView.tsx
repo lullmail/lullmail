@@ -16,8 +16,8 @@ import { PageHead, SettingsTabs } from "../ui/bits";
 interface ThemeCard { id: Theme; name: string; blurb: string; bg: string; panel: string; ink: string; line: string; accent: string }
 
 const FOUNDATIONS: ThemeCard[] = [
-  { id: "light", name: "Light", blurb: "Paper white, quiet grey ink", bg: "#fbfbfd", panel: "#ffffff", ink: "#15161a", line: "#e9eaef", accent: "#d8402a" },
-  { id: "sepia", name: "Sepia", blurb: "A warm room, aged paper", bg: "#e7dfd2", panel: "#efe8db", ink: "#3d3833", line: "#d8cfbe", accent: "#c25a24" },
+  { id: "light", name: "Light", blurb: "Paper white, quiet grey ink", bg: "#fbfbfd", panel: "#ffffff", ink: "#15161a", line: "#e9eaef", accent: "#d03a25" },
+  { id: "sepia", name: "Sepia", blurb: "A warm room, aged paper", bg: "#e7dfd2", panel: "#efe8db", ink: "#3d3833", line: "#d8cfbe", accent: "#9e4519" },
   { id: "dark", name: "Dark", blurb: "Night, no theatrics", bg: "#0f1013", panel: "#15161a", ink: "#eceef2", line: "#23252b", accent: "#ff6a44" },
 ];
 
@@ -59,7 +59,7 @@ function ThemeCards({ cards }: { cards: ThemeCard[] }) {
 }
 
 const ACCENT_SWATCH: Record<Exclude<Accent, "custom">, string> = {
-  ember: "#d8402a",
+  ember: "#d03a25",
   ocean: "#2f6fed",
   forest: "#2e7d4f",
   violet: "#7a4fd8",
@@ -146,7 +146,7 @@ export function AppearanceView() {
           >
             <input
               type="color"
-              value={accentCustom.value || "#d8402a"}
+              value={accentCustom.value || "#d03a25"}
               onInput={(e) => setAccentCustom((e.target as HTMLInputElement).value)}
             />
           </label>

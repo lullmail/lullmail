@@ -1,4 +1,4 @@
-import { useState } from "preact/hooks";
+import { useRef, useState } from "preact/hooks";
 import type { Row } from "../lib/types";
 import { accountFilter, checked, clearChecked, cursor, focusRow, list, mailboxName, rowIdentity, selectRange, toggleChecked } from "../lib/store";
 import { markDone, moveTo, openThread, snooze, trashThreads } from "../lib/actions";
@@ -53,16 +53,63 @@ export function MsgRow({ row, index, q }: { row: Row; index: number; q?: string 
     isChecked ? "picked" : "",
   ].filter(Boolean).join(" ");
 
+  // Touch: drag a row left to mark it done. The hover cluster does not exist
+  // on a phone, and four buttons under every row doubled the list's height.
+  // Only a deliberate sideways drag arms it; a vertical one is a scroll and
+  // is left to the browser (touch-action: pan-y in the stylesheet).
+  const swipe = useRef<{ id: number; x: number; y: number; on: boolean } | null>(null);
+  const swipedAt = useRef(0);
+  const SWIPE_COMMIT = 96;
+  const endSwipe = (el: HTMLElement, commit: boolean) => {
+    const was = swipe.current;
+    swipe.current = null;
+    el.classList.remove("swiping", "swipe-armed");
+    if (!was?.on) return;
+    swipedAt.current = Date.now();
+    if (!commit) { el.style.removeProperty("--swipe"); return; }
+    el.style.setProperty("--swipe", "-100%");
+    // Let the row slide out before the list closes the gap. If the action
+    // fails and the row stays, it must not stay shoved off-screen.
+    setTimeout(() => { markDone([row]); el.style.removeProperty("--swipe"); }, 150);
+  };
+
   return (
     <div
       class={cls}
       role="listitem"
+      onPointerDown={(ev) => {
+        if (ev.pointerType !== "touch" || checked.value.size) return;
+        if ((ev.target as HTMLElement).closest("a, button, input")) return;
+        swipe.current = { id: ev.pointerId, x: ev.clientX, y: ev.clientY, on: false };
+      }}
+      onPointerMove={(ev) => {
+        const s = swipe.current;
+        if (!s || s.id !== ev.pointerId) return;
+        const dx = ev.clientX - s.x, dy = ev.clientY - s.y;
+        const el = ev.currentTarget as HTMLElement;
+        if (!s.on) {
+          if (Math.abs(dy) > 10 && Math.abs(dy) >= Math.abs(dx)) { swipe.current = null; return; }
+          if (dx > -14 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+          s.on = true;
+          try { el.setPointerCapture(ev.pointerId); } catch { /* already released */ }
+          el.classList.add("swiping");
+        }
+        el.style.setProperty("--swipe", Math.min(0, dx) + "px");
+        el.classList.toggle("swipe-armed", dx <= -SWIPE_COMMIT);
+      }}
+      onPointerUp={(ev) => {
+        const s = swipe.current;
+        if (!s || s.id !== ev.pointerId) return;
+        endSwipe(ev.currentTarget as HTMLElement, s.on && ev.clientX - s.x <= -SWIPE_COMMIT);
+      }}
+      onPointerCancel={(ev) => endSwipe(ev.currentTarget as HTMLElement, false)}
       tabIndex={cursor.value === index || (cursor.value < 0 && index === 0) ? 0 : -1}
       data-cursor-index={index}
       onFocus={(ev) => { if (ev.target === ev.currentTarget) focusRow(index, true); }}
       onMouseDown={(ev) => { if (ev.shiftKey && !(ev.target as HTMLElement).closest("a, button, input")) ev.preventDefault(); }}
       onClick={(ev) => {
         if (ev.defaultPrevented || ev.button !== 0 || ev.altKey) return;
+        if (Date.now() - swipedAt.current < 400) return; // the tail of a swipe is not a tap
         if ((ev.target as HTMLElement).closest("a, button, input, select, textarea, [contenteditable]")) return;
         if (ev.shiftKey) selectRange(index, ev.ctrlKey || ev.metaKey);
         else if (ev.ctrlKey || ev.metaKey) toggleChecked(row);

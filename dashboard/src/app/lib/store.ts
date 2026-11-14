@@ -37,9 +37,25 @@ export const theme = signal<Theme>(
     : ((document.documentElement.getAttribute("data-theme") as Theme) || "light")
 );
 
+/** The browser paints its own chrome — the phone status bar, the installed
+    app's title strip — in the page's theme-color. It follows the ground, whichever palette is on. */
+export function syncThemeColor() {
+  if (typeof document === "undefined") return;
+  const ground = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
+  if (!ground) return;
+  let meta = document.querySelector('meta[name="theme-color"]');
+  if (!meta) {
+    meta = document.createElement("meta");
+    meta.setAttribute("name", "theme-color");
+    document.head.appendChild(meta);
+  }
+  meta.setAttribute("content", ground);
+}
+
 export function setTheme(next: Theme) {
   theme.value = next;
   document.documentElement.setAttribute("data-theme", next);
+  syncThemeColor();
   try {
     localStorage.setItem("es-theme", next);
   } catch {

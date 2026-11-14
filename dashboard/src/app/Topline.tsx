@@ -113,6 +113,18 @@ export function Topline({ classic = false }: { classic?: boolean }) {
   const [stuck, setStuck] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const screenerWaiting = counts.value.screener || 0;
+  const navRef = useRef<HTMLElement>(null);
+
+  // On a phone the nav is a scrolling row. The place you are in must never be
+  // the part that is scrolled out of sight.
+  useEffect(() => {
+    const nav = navRef.current;
+    const active = nav?.querySelector<HTMLElement>(".nav-item.active");
+    if (!nav || !active || nav.scrollWidth <= nav.clientWidth) return;
+    const left = active.offsetLeft - nav.offsetLeft;
+    const target = left - (nav.clientWidth - active.offsetWidth) / 2;
+    nav.scrollLeft = Math.max(0, Math.min(target, nav.scrollWidth - nav.clientWidth));
+  }, [here, screenerWaiting]);
 
   useEffect(() => {
     if (classic) return; // the classic shell doesn't scroll the window
@@ -154,7 +166,7 @@ export function Topline({ classic = false }: { classic?: boolean }) {
         {/* The day's surfaces sit in the center header in BOTH layouts — a
             clock on the wall, not a drawer. The mail places join them only
             in document mode; Classic keeps those in the sidebar. */}
-        <nav class="nav">
+        <nav class="nav" ref={navRef} aria-label="Primary">
           {DAY.map((item) => <NavLink key={item[1]} item={item} here={here} />)}
           {!classic && (
             <>
@@ -180,7 +192,10 @@ export function Topline({ classic = false }: { classic?: boolean }) {
             <Icon name="search" size={16} />
           </button>
           <MoreMenu />
-          <button class="btn btn-accent" type="button" onClick={() => openCompose()}>
+          {/* The text label is hidden on phones, so the name must not depend on it. */}
+          <button class="btn btn-accent" type="button"
+            aria-label={draftStack.value.length > 0 ? "Compose, " + draftStack.value.length + (draftStack.value.length === 1 ? " draft open" : " drafts open") : "Compose"}
+            onClick={() => openCompose()}>
             <Icon name="compose" size={14} /><span class="label">Compose{draftStack.value.length > 0 ? " · " + draftStack.value.length : ""}</span>
           </button>
         </div>
