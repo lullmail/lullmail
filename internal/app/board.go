@@ -76,6 +76,7 @@ type boardCard struct {
 	MessageID   string `json:"message_id,omitempty"`
 	Subject     string `json:"subject"`
 	From        string `json:"from,omitempty"`
+	WaitingOn   string `json:"waiting_on,omitempty"`
 	ReceivedAt  string `json:"received_at,omitempty"`
 	Preview     string `json:"preview,omitempty"`
 	Note        string `json:"note,omitempty"`
@@ -97,6 +98,7 @@ func cardFromThread(t briefThread) boardCard {
 		MessageID:  t.MessageID,
 		Subject:    t.Subject,
 		From:       t.From,
+		WaitingOn:  t.WaitingOn,
 		ReceivedAt: t.ReceivedAt,
 		Preview:    t.Preview,
 	}

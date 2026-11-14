@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
 import { accounts, attachmentBytes, beginDraftAttachmentRead, editedSinceUnconfirmed, finishDraftAttachmentRead, reserveDraftAttachment, closeCompose, compose, cycleDraft, draftIndex, draftsUnsaved, draftStack, newDraft, pendingDraftReads, prepareDraftSend, retireDraft, sendingDrafts, setUnconfirmedSend, showError, showToast, undoSeconds, updateDraft, updateDraftById, type ComposeState } from "../lib/store";
+import { Icon } from "./Icon";
 import { CONFIRM_RESEND, checkEarlierSubmission, sendMailOutcome, type SendAttachment, type SendOutcome } from "../lib/actions";
 import { deleteDraft, generationCurrent, offlineGeneration, offlineOwner, offlineStorageSuspended } from "../lib/offline";
 
@@ -185,6 +186,11 @@ function DraftForm({ seed }: { seed: ComposeState }) {
   };
 
   const accountList = accounts.value;
+  // The select must show what send() will resolve: a new message with no
+  // explicit choice goes out from the first mailbox; a reply with none lets
+  // the server answer from the mailbox that received the original. An empty
+  // value with no matching option rendered as a blank dropdown.
+  const fromValue = accountId || seed.accountId || (seed.replyToId ? "" : accountList[0]?.id) || "";
   const fromLabel = accountList.find((a) => a.id === (accountId || seed.accountId))?.address || accountList[0]?.address || "";
 
   return (
@@ -194,10 +200,11 @@ function DraftForm({ seed }: { seed: ComposeState }) {
         <div class="compose-head-row">
           <select
             class="compose-from" aria-label="Send from account"
-            value={accountId || seed.accountId || ""}
+            value={fromValue}
             onChange={(e) => { const v = (e.target as HTMLSelectElement).value; setAccountId(v); updateDraft({ accountId: v }); }}
           >
             {accountList.length === 0 && <option value="">{fromLabel || "First connected account"}</option>}
+            {accountList.length > 0 && !fromValue && <option value="">Same mailbox as the original</option>}
             {accountList.map((a) => <option value={a.id}>{a.address}</option>)}
           </select>
           <button
@@ -334,6 +341,11 @@ export function Compose() {
               <button class="btn-icon" type="button" aria-label="Next draft" onClick={() => cycleDraft(1)}>›</button>
             </>
           )}
+          {/* Esc and the dimmed surround both park the draft, and a phone has
+              neither: the sheet fills the screen. */}
+          <button class="btn-icon compose-close" type="button" title="Close — the draft is kept (Esc)" aria-label="Close and keep draft" onClick={closeCompose}>
+            <Icon name="close" size={16} />
+          </button>
         </div>
         <DraftForm key={seed.id} seed={seed} />
       </div>

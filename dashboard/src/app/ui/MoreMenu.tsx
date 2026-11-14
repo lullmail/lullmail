@@ -32,7 +32,7 @@ export function MoreMenu() {
   const themeLabel = theme.value.charAt(0).toUpperCase() + theme.value.slice(1);
 
   return (
-    <div style={{ position: "relative" }} ref={ref}>
+    <div class="more-menu" style={{ position: "relative" }} ref={ref}>
       <button
         ref={triggerRef}
         class="btn-icon" type="button" aria-label="Settings and shortcuts"
@@ -43,7 +43,10 @@ export function MoreMenu() {
       </button>
       {open && (
         <div class="menu menu-right" role="menu">
-          <button class="menu-item" type="button" role="menuitem" onClick={pick(() => navigate("/outbox"))}>Outbox</button>
+          <button class="menu-item" type="button" role="menuitem" onClick={pick(() => navigate("/outbox"))}>
+            <Icon name="arrow" size={14} />
+            Outbox
+          </button>
           <button class="menu-item" type="button" role="menuitem" onClick={pick(() => navigate("/settings/appearance"))}>
             <Icon name={theme.value === "dark" ? "sun" : "moon"} size={14} />
             Appearance<span class="note">{themeLabel}</span>

@@ -89,19 +89,19 @@ function Bar({ row }: { row: Row }) {
         <button class="btn btn-accent" type="button" onClick={reply}>
           <Icon name="reply" size={14} /> Reply <span class="kbd">r</span>
         </button>
-        <button class="btn btn-ghost" type="button" onClick={() => markDone([row])}>
-          <Icon name="check" size={14} /> Done <span class="kbd">e</span>
+        <button class="btn btn-ghost" type="button" title="Done" onClick={() => markDone([row])}>
+          <Icon name="check" size={14} /> <span class="lbl">Done</span> <span class="kbd">e</span>
         </button>
-        <button class="btn btn-ghost" type="button" onClick={() => pinThreads([row])}>
-          <Icon name="pin" size={14} /> Pin <span class="kbd">p</span>
+        <button class="btn btn-ghost" type="button" title="Pin to the board" onClick={() => pinThreads([row])}>
+          <Icon name="pin" size={14} /> <span class="lbl">Pin</span> <span class="kbd">p</span>
         </button>
-        <button class="btn btn-ghost" type="button" onClick={() => trashThreads([row])}>
-          <Icon name="trash" size={14} /> Trash <span class="kbd">#</span>
+        <button class="btn btn-ghost" type="button" title="Move to Trash" onClick={() => trashThreads([row])}>
+          <Icon name="trash" size={14} /> <span class="lbl">Trash</span> <span class="kbd">#</span>
         </button>
 
         <div style={{ position: "relative" }}>
-          <button class="btn btn-ghost" type="button" aria-haspopup="menu" aria-expanded={asideOpen} onClick={() => setAsideOpen((v) => !v)}>
-            <Icon name="aside" size={14} /> Snooze <span class="kbd">s</span>
+          <button class="btn btn-ghost" type="button" title="Snooze" aria-haspopup="menu" aria-expanded={asideOpen} onClick={() => setAsideOpen((v) => !v)}>
+            <Icon name="aside" size={14} /> <span class="lbl">Snooze</span> <span class="kbd">s</span>
           </button>
           {asideOpen && (
             <SnoozeMenu
@@ -115,14 +115,15 @@ function Bar({ row }: { row: Row }) {
         <span class="spacer" />
 
         {/* Where it files. The bucket it is already in is not offered. */}
+        <span class="thread-bar-move" aria-hidden="true">Move to</span>
         {(["imbox", "feed", "paper_trail"] as Bucket[])
           .filter((b) => b !== row.bucket)
           .map((b) => (
-            <button class="btn btn-ghost btn-sm" type="button" key={b} onClick={() => moveTo([row], b)}>
+            <button class="btn btn-ghost btn-sm" type="button" key={b} aria-label={"Move to " + BUCKET_LABEL[b]} title={"Move this thread to " + BUCKET_LABEL[b]} onClick={() => moveTo([row], b)}>
               {BUCKET_LABEL[b]}
             </button>
           ))}
-        <button class="btn btn-ghost btn-sm" type="button" onClick={() => markRead([row], false)}>Unread</button>
+        <button class="btn btn-ghost btn-sm" type="button" title="Mark this thread unread" onClick={() => markRead([row], false)}>Unread</button>
       </div>
     </div>
   );
@@ -143,25 +144,30 @@ export function Thread({ backTo, variant = "page" }: { backTo: string; variant?:
     </button>
   );
 
+  // In the one-column layout the thread IS the page, so it is the main
+  // landmark. In Classic the list holds that role and the pane is a region.
+  const Root = variant === "page" ? "main" : "div";
+  const rootProps = variant === "page" ? { id: "main", tabIndex: -1 } : {};
+
   if (state.loading) {
     return (
-      <div class="column thread">
+      <Root class="column thread" {...rootProps}>
         {back}
         <div class="skel" style={{ height: 34, width: "70%", marginTop: 8 }} />
         <div class="skel" style={{ height: 14, width: "30%", marginTop: 14 }} />
-      </div>
+      </Root>
     );
   }
 
   if (state.error) {
     return (
-      <div class="column thread">
+      <Root class="column thread" {...rootProps}>
         {back}
         <div class="empty">
           <div class="empty-big">That thread didn't open.</div>
           <div class="empty-sub">{state.error}</div>
         </div>
-      </div>
+      </Root>
     );
   }
 
@@ -172,7 +178,7 @@ export function Thread({ backTo, variant = "page" }: { backTo: string; variant?:
 
   return (
     <>
-      <div class="column thread">
+      <Root class="column thread" {...rootProps}>
         {back}
         <h1 class="thread-title">{last?.subject || "(no subject)"}</h1>
         <div class="thread-meta">
@@ -181,7 +187,7 @@ export function Thread({ backTo, variant = "page" }: { backTo: string; variant?:
         </div>
         {state.nextCursor && <button class="btn btn-outline" disabled={state.loadingOlder} onClick={loadOlderMessages}>{state.loadingOlder ? "Loading…" : "Load older messages"}</button>}
         {messages.map((m) => <ThreadMessage message={m} key={m.account + "\0" + m.id} />)}
-      </div>
+      </Root>
       {row && <Bar row={row} />}
     </>
   );

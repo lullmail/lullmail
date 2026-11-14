@@ -5,7 +5,7 @@ import { signal } from "@preact/signals";
 import { path, routeFor, startRouter } from "./lib/router";
 import { installKeys } from "./lib/keys";
 import { refreshAccounts, refreshCounts, refreshFolders, refreshPrefs, reload } from "./lib/actions";
-import { accountCount, accountsFailed, accountFilter, attentionTotal, compose, composeOpen, isDarkTheme, layout, palette, privateStateVersion, query, reader, resolveLayout, setSplitWidth, shortcuts, splitWidth, theme } from "./lib/store";
+import { accountCount, accountsFailed, accountFilter, attentionTotal, compose, composeOpen, isDarkTheme, layout, palette, privateStateVersion, query, reader, resolveLayout, setSplitWidth, shortcuts, splitWidth, syncThemeColor, theme } from "./lib/store";
 import { Topline } from "./Topline";
 import { Sidebar } from "./Sidebar";
 import { Thread } from "./reader/Thread";
@@ -22,6 +22,7 @@ import { ScreenerView } from "./views/ScreenerView";
 import { SearchView } from "./views/SearchView";
 import { Welcome } from "./views/Welcome";
 import { KeyHints } from "./ui/KeyHints";
+import { TabBar } from "./ui/TabBar";
 import { offline, startPWA } from "./lib/pwa";
 import { namespaceFor, replayConfirmed, startOfflineData } from "./lib/offline";
 import { startLive, stopLive } from "./lib/live";
@@ -255,6 +256,16 @@ function PaneSplit() {
   );
 }
 
+/** First stop for a keyboard: jump past the header to the content landmark.
+    A button rather than a #hash link, so the in-app router never sees it. */
+function SkipLink() {
+  return (
+    <button class="skip-link" type="button" onClick={() => document.getElementById("main")?.focus()}>
+      Skip to content
+    </button>
+  );
+}
+
 export default function App() {
   const openThreadId = reader.value.threadId;
   const ownerKey = authStatus.value ? namespaceFor(authStatus.value) : "";
@@ -268,6 +279,7 @@ export default function App() {
   useEffect(() => {
     setMounted(true);
     resolveLayout();
+    syncThemeColor();
     const offRouter = startRouter();
     const offKeys = installKeys();
     const offPWA = startPWA();
@@ -321,7 +333,7 @@ export default function App() {
     return (
       <div class="page">
         <Topline classic={classic} />
-        <div class="column"><ListSkeleton /></div>
+        <main class="column"><ListSkeleton /></main>
       </div>
     );
   }
@@ -340,15 +352,16 @@ export default function App() {
         class="page classic"
         style={splitWidth.value ? ({ "--list-w": splitWidth.value + "px" } as any) : undefined}
       >
+        <SkipLink />
         <Topline classic={classic} />
         <div class="nudges">
           <PasskeyNudge />
           <ExposureBanner />
         </div>
         <Sidebar />
-        <div class="list-pane"><div class="column"><Suspense fallback={<RouteSkeleton />}><CurrentView key={privateStateVersion.value + ":" + ownerKey} /></Suspense></div></div>
+        <main class="list-pane" id="main" tabIndex={-1}><div class="column"><Suspense fallback={<RouteSkeleton />}><CurrentView key={privateStateVersion.value + ":" + ownerKey} /></Suspense></div></main>
         <PaneSplit />
-        <div class="reader-pane">
+        <section class="reader-pane" aria-label="Reading pane">
           {openThreadId ? (
             <Thread backTo={routeFor(path.value).title} variant="pane" />
           ) : (
@@ -361,7 +374,7 @@ export default function App() {
               </div>
             </div>
           )}
-        </div>
+        </section>
         <Overlays />
       </div>
     );
@@ -369,6 +382,7 @@ export default function App() {
 
   return (
     <div class="page">
+        <SkipLink />
         <Topline classic={classic} />
         <div class="nudges">
           <PasskeyNudge />
@@ -379,9 +393,11 @@ export default function App() {
       {openThreadId ? (
         <Thread backTo={routeFor(path.value).title} />
       ) : (
-        <div class={columnClass()}><Suspense fallback={<RouteSkeleton />}><CurrentView key={privateStateVersion.value + ":" + ownerKey} /></Suspense></div>
+        <main id="main" tabIndex={-1} class={columnClass()}><Suspense fallback={<RouteSkeleton />}><CurrentView key={privateStateVersion.value + ":" + ownerKey} /></Suspense></main>
       )}
 
+      {/* The thread carries its own verb bar where the tabs would sit. */}
+      {!openThreadId && <TabBar />}
       <Overlays />
     </div>
   );

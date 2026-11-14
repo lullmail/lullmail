@@ -8,7 +8,14 @@ type Mode = "passkey" | "recovery" | "totp";
  *  is a connection problem, not an authentication one, and the browser's
  *  own "Failed to fetch" says neither. */
 export function describeAuthError(e: unknown, fallback: string): string {
-  if (e instanceof ApiError) return e.status >= 500 ? "Lull Mail is not responding right now. Try again in a moment." : e.message;
+  if (e instanceof ApiError) {
+    if (e.status >= 500) return "Lull Mail is not responding right now. Try again in a moment.";
+    // The server's detail strings are terse and lowercase ("invalid email or
+    // password"). Say the common one like a person would — still without
+    // revealing which half was wrong — and sentence-case the rest.
+    if (/^invalid email or password$/i.test(e.message)) return "That name or password isn't right.";
+    return e.message ? e.message.charAt(0).toUpperCase() + e.message.slice(1) : fallback;
+  }
   if (e instanceof TypeError) return "Can't reach Lull Mail. Check your connection, then try again.";
   if (e instanceof DOMException) {
     if (e.name === "NotAllowedError") return "The passkey prompt was dismissed. Try again when you're ready.";
@@ -39,7 +46,7 @@ export function Unreachable() {
   }, [attempt]);
 
   return (
-    <div class="gate-wrap">
+    <main class="gate-wrap">
       <section class="gate" aria-labelledby="gate-title">
         <GateFan />
         <div class="gate-brand">Lull Mail</div>
@@ -50,7 +57,7 @@ export function Unreachable() {
         </button>
         <p class="gate-trust">If you reach Lull Mail through a tunnel or VPN, check that it is still up.</p>
       </section>
-    </div>
+    </main>
   );
 }
 
@@ -123,7 +130,7 @@ export function Gate() {
   if (status && !status.configured) return <SetupWizard status={status} />;
 
   return (
-    <div class="gate-wrap">
+    <main class="gate-wrap">
       <section class="gate" aria-labelledby="gate-title">
         <GateFan />
         <div class="gate-brand">Lull Mail</div>
@@ -175,7 +182,7 @@ export function Gate() {
         {error && <div class="gate-error" role="alert">{error}</div>}
         <p class="gate-trust">Passwords are hashed with argon2id on your server. Recovery codes work once.</p>
       </section>
-    </div>
+    </main>
   );
 }
 
@@ -258,7 +265,7 @@ function SetupWizard({ status }: { status: AuthStatus }) {
   };
 
   return (
-    <div class="gate-wrap">
+    <main class="gate-wrap">
       <section class={"gate" + (step === 3 ? " gate-wide" : "")} aria-labelledby="setup-title">
         <GateFan />
         <div class="gate-brand">Lull Mail</div>
@@ -331,6 +338,6 @@ function SetupWizard({ status }: { status: AuthStatus }) {
         </div>
         <p class="gate-trust">Recovery codes work once. A passkey can be added later in Security.</p>
       </section>
-    </div>
+    </main>
   );
 }

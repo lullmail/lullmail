@@ -293,7 +293,7 @@ function ConnectForm({ onDone }: { onDone: () => void }) {
 
   return (
     <form class="form" onSubmit={submit}>
-      <h3>Connect a mailbox</h3>
+      <h2>Connect a mailbox</h2>
       <div class="form-grid">
         <label class="field">
           Provider
@@ -371,18 +371,27 @@ export function AccountsView() {
       {error && <Empty title="That didn't load." sub={error} />}
       {data?.map((a) => <AccountCard account={a} onChange={reload} key={a.id} />)}
       {data && data.length === 0 && (
-        <Empty title="No mailboxes yet." sub="Connect one below and the Screener starts filling up." />
+        <p class="settings-empty">No mailboxes yet. Connect one below and the Screener starts filling up.</p>
       )}
-      {data && oauth && (
+      {/* Only providers this server can actually reach get a button. A
+          self-hosted install with neither configured used to show two dead
+          buttons and a paragraph explaining why they were dead; one line
+          saying where Gmail and Outlook come from is the whole message. */}
+      {data && oauth && (oauth.google || oauth.microsoft) && (
         <section class="provider-connect">
           <div class="provider-connect-head"><div><h2>Connect in one step</h2><p>OAuth tokens are encrypted at rest and refreshed only by this server.</p></div></div>
           <div class="provider-buttons">
-            <button class="btn btn-primary" type="button" disabled={!oauth.google || !!oauthBusy} onClick={() => startOAuth("google")}>{oauthBusy === "google" ? "Opening Google…" : "Continue with Google"}</button>
-            <button class="btn btn-outline" type="button" disabled={!oauth.microsoft || !!oauthBusy} onClick={() => startOAuth("microsoft")}>{oauthBusy === "microsoft" ? "Opening Microsoft…" : "Continue with Microsoft"}</button>
+            {oauth.google && <button class="btn btn-primary" type="button" disabled={!!oauthBusy} onClick={() => startOAuth("google")}>{oauthBusy === "google" ? "Opening Google…" : "Continue with Google"}</button>}
+            {oauth.microsoft && <button class={"btn " + (oauth.google ? "btn-outline" : "btn-primary")} type="button" disabled={!!oauthBusy} onClick={() => startOAuth("microsoft")}>{oauthBusy === "microsoft" ? "Opening Microsoft…" : "Continue with Microsoft"}</button>}
           </div>
-          {(!oauth.google || !oauth.microsoft) && <p class="form-note">Provider buttons stay disabled until their client ID and secret are configured. IMAP/JMAP below remains fully available.</p>}
         </section>
       )}
+      {data && oauth && !oauth.google && !oauth.microsoft && (
+        <p class="form-note provider-hint">Gmail and Outlook sign-in appear here once this server has a Google or Microsoft client ID and secret. IMAP and JMAP below work without either.</p>
+      )}
+      {/* Connecting is why people open this page; installing and exporting
+          are side trips, so they follow the form instead of preceding it. */}
+      {data && <ConnectForm onDone={reload} />}
       {data && installKind.value && (
         <section class="device-install">
           <div>
@@ -406,7 +415,6 @@ export function AccountsView() {
           <button class="btn btn-outline btn-sm" type="button" onClick={async () => { try { await download("/personal/export", "lullmail-personal-data.zip"); showToast("Personal data downloaded"); } catch (e) { showError(e instanceof Error ? e.message : "Export failed"); } }}>Export personal data</button>
         </section>
       )}
-      {data && <ConnectForm onDone={reload} />}
     </>
   );
 }

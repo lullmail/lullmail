@@ -11,6 +11,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 )
@@ -110,5 +111,63 @@ func TestSentOnlyMailSelfHealsOutOfTheImbox(t *testing.T) {
 	}
 	if got := bucketOf(t, pg.db, "m-sent"); got != "paper_trail" {
 		t.Errorf("misfiled sent-only row still %q after a pass; the self-heal did not repair it", got)
+	}
+}
+
+// Gmail over IMAP files a copy of every sent message under "[Gmail]/All
+// Mail", and that folder syncs before "Sent Mail". Until the Sent copy
+// lands the mirror knows the message only as All Mail — no sent role — and
+// the owner's address is always a correspondent, so it used to open in the
+// Imbox. Outside the Inbox, mail from the owner is outbound whatever folder
+// holds it.
+func TestOwnersMailOutsideTheInboxIsNeverTheImbox(t *testing.T) {
+	pg := newProductPG(t)
+	ctx := context.Background()
+	seedClassifyFixture(t, pg.db, pg.uid)
+	now := time.Now().UTC()
+	add := func(id, from string, boxes ...string) {
+		t.Helper()
+		mustClassifyExec(t, pg.db,
+			`INSERT INTO mail_messages (account_id, id, thread_id, subject, received_at, from_addrs, to_addrs)
+			 VALUES ('acct-1', $1, $1, 's', $2, $3, '[{"email":"someone@else.test"}]')`,
+			id, now, `[{"email":"`+from+`"}]`)
+		for _, b := range boxes {
+			mustClassifyExec(t, pg.db,
+				`INSERT INTO mail_message_mailboxes (account_id, message_id, mailbox_id) VALUES ('acct-1', $1, $2)`, id, b)
+		}
+	}
+	add("m-allonly", "Tyler@DreamLucidMail.com", "mb-all")
+	// An archived reply from a correspondent is still mail that arrived.
+	add("m-archived", "rbeskau@rlelectrical.ca", "mb-all")
+
+	if err := pg.app.classifyUser(ctx, pg.uid); err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if got := bucketOf(t, pg.db, "m-allonly"); got != "paper_trail" {
+		t.Errorf("owner's All Mail copy bucketed %q; want paper_trail", got)
+	}
+	if got := bucketOf(t, pg.db, "m-archived"); got != "imbox" {
+		t.Errorf("archived correspondent mail bucketed %q; want imbox", got)
+	}
+
+	// Rows misfiled before the rule repair on the next pass.
+	mustClassifyExec(t, pg.db,
+		`UPDATE hey_messages SET bucket='imbox' WHERE account_id='acct-1' AND message_id='m-allonly'`)
+	if err := pg.app.classifyUser(ctx, pg.uid); err != nil {
+		t.Fatalf("second classify: %v", err)
+	}
+	if got := bucketOf(t, pg.db, "m-allonly"); got != "paper_trail" {
+		t.Errorf("misfiled All Mail copy still %q after a pass", got)
+	}
+	if got := bucketOf(t, pg.db, "m-selfcopy"); got != "imbox" {
+		t.Errorf("self-copy in the Inbox moved to %q; Inbox membership still wins", got)
+	}
+}
+
+// A provider draft is unsent work. It carries the drafts role (plus All Mail
+// on Gmail) and must not be listed as mail in any view.
+func TestProviderDraftsAreHiddenFromViews(t *testing.T) {
+	if got := discardedFilter("m"); !strings.Contains(got, "'drafts'") {
+		t.Fatalf("discardedFilter does not exclude drafts: %s", got)
 	}
 }

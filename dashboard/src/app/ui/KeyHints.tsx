@@ -22,7 +22,7 @@ function hintsFor(): [string, string][] {
 export function KeyHints() {
   if (!showHints.value) return null;
   return (
-    <div class="hints">
+    <aside class="hints" aria-label="Keyboard shortcuts">
       <div class="hints-in">
         {hintsFor().map(([k, label]) => (
           <span class="hint" key={k}>
@@ -37,6 +37,6 @@ export function KeyHints() {
           <Icon name="close" size={13} />
         </button>
       </div>
-    </div>
+    </aside>
   );
 }

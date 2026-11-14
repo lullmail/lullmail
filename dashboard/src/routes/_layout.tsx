@@ -4,12 +4,9 @@ import App from "../app/App";
 export function head() {
   return {
     titleTemplate: "%s — Lull Mail",
-    meta: [
-      { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { name: "theme-color", content: "#15161a" },
-      { name: "apple-mobile-web-app-capable", content: "yes" },
-      { name: "apple-mobile-web-app-status-bar-style", content: "default" },
-    ],
+    // The framework writes its own viewport tag and has no slot for other
+    // <meta> elements: a `meta` list here is silently dropped. The head script
+    // below sets viewport-fit and theme-color instead.
     // Linked explicitly from public/ rather than imported into the module graph.
     // The client bundle is rooted at the islands entry, so a layout-level CSS
     // import never reaches it, and letting the island chunk pull its own
@@ -29,6 +26,10 @@ export function head() {
         id: "theme-init",
         content:
           "(function(){try{var d=document.documentElement;" +
+          // viewport-fit=cover is what makes env(safe-area-inset-*) non-zero,
+          // so the bars can clear the notch and the home indicator.
+          "var vp=document.querySelector('meta[name=viewport]');" +
+          "if(vp){vp.setAttribute('content','width=device-width, initial-scale=1, viewport-fit=cover');}" +
           "var ok=['light','sepia','dark','terminal','amber','nord','dracula','rose','solarized','blueprint','y2k','1999','vapor'];" +
           "var t=localStorage.getItem('es-theme');" +
           "if(ok.indexOf(t)<0){t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light';}" +
@@ -45,6 +46,11 @@ export function head() {
           "d.style.setProperty('--accent',cx);" +
           "d.style.setProperty('--accent-ink',(0.2126*r+0.7152*g+0.0722*b)>150?'#111111':'#ffffff');" +
           "d.style.setProperty('--accent-soft','color-mix(in srgb '+cx+' 12%, transparent)');}" +
+          // The browser chrome (phone status bar, installed-app title strip)
+          // takes the page ground, whichever palette that is.
+          "var tc=document.createElement('meta');tc.name='theme-color';" +
+          "tc.content=(getComputedStyle(d).getPropertyValue('--bg')||'').trim()||'#fbfbfd';" +
+          "document.head.appendChild(tc);" +
           "}catch(e){}})();",
       },
     ],

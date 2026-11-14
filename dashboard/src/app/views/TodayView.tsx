@@ -158,7 +158,8 @@ function NeedsRow({ thread, index }: { thread: BriefThread; index: number }) {
 }
 
 function WaitingRow({ thread }: { thread: BriefThread }) {
-  const who = splitFrom(thread.from);
+  // `from` on a waiting thread is the owner; the row names who owes the reply.
+  const who = splitFrom(thread.waiting_on || thread.from);
   const age = daysSince(thread.received_at);
   return (
     <div class="wait-row" role="button" tabIndex={0} onClick={() => openThread(thread.thread_id, thread.account, "imbox")} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openThread(thread.thread_id, thread.account, "imbox"); } }}>

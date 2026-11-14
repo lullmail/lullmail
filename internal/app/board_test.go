@@ -17,7 +17,7 @@ func TestBoardReturns500OnRowsError(t *testing.T) {
 	a := &App{db: openStepDB(t,
 		dbStep{kind: "exec"},
 		dbStep{kind: "query", rows: emptyRows("address")},
-		dbStep{kind: "query", rows: emptyRows("account", "thread", "message", "subject", "from", "received", "preview")},
+		dbStep{kind: "query", rows: emptyRows("account", "thread", "message", "subject", "from", "received", "preview", "to", "bucket")},
 		dbStep{kind: "query", rows: emptyRows("account", "thread", "mine", "theirs")},
 		dbStep{kind: "query", rows: emptyRows("account", "message", "read")},
 		dbStep{kind: "query", rows: &testRows{columns: []string{"id", "account", "thread", "title", "note"}, terminalErr: dbErr}},
@@ -43,7 +43,7 @@ func boardSteps(openPin bool) []dbStep {
 	steps := []dbStep{
 		{kind: "exec"},
 		{kind: "query", rows: emptyRows("address")},
-		{kind: "query", rows: emptyRows("account", "thread", "message", "subject", "from", "received", "preview")},
+		{kind: "query", rows: emptyRows("account", "thread", "message", "subject", "from", "received", "preview", "to", "bucket")},
 		{kind: "query", rows: emptyRows("account", "thread", "mine", "theirs")},
 		{kind: "query", rows: emptyRows("account", "message", "read")},
 		pinned,
@@ -119,8 +119,8 @@ func TestBoardPinnedMutationSnapshot(t *testing.T) {
 func TestBoardDerivedCardCarriesKnownUnreadInboxState(t *testing.T) {
 	steps := boardSteps(false)
 	steps[2].rows = &testRows{
-		columns: []string{"account", "thread", "message", "subject", "from", "received", "preview"},
-		values:  [][]driver.Value{{"acct-a", "thread-1", "message-1", "Title", `[{"email":"sender@example.test"}]`, nil, "Preview"}},
+		columns: []string{"account", "thread", "message", "subject", "from", "received", "preview", "to", "bucket"},
+		values:  [][]driver.Value{{"acct-a", "thread-1", "message-1", "Title", `[{"email":"sender@example.test"}]`, nil, "Preview", `[]`, "imbox"}},
 	}
 	a := &App{db: openStepDB(t, steps...)}
 	w := httptest.NewRecorder()

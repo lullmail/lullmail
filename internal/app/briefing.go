@@ -10,10 +10,14 @@ package app
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/neutron-build/neutron/mail"
 )
 
 type briefThread struct {
@@ -24,6 +28,10 @@ type briefThread struct {
 	From       string `json:"from"`
 	ReceivedAt string `json:"received_at"`
 	Preview    string `json:"preview"`
+	// WaitingOn names who a waiting thread is waiting on: the first
+	// recipient of the owner's last message who is not the owner. From on
+	// such a thread is always the owner, which is no use as a label.
+	WaitingOn string `json:"waiting_on,omitempty"`
 }
 
 // briefThreads computes the two derived card sets the Briefing and the Board
@@ -61,17 +69,30 @@ func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, 
 		rows.Close()
 	}
 
-	// Latest message of every Imbox thread the user owns.
+	// Latest message of every Imbox thread the user owns. The owner's own
+	// messages count toward "latest" whatever bucket they sit in: a reply
+	// the provider filed only in Sent is classified out of the Imbox
+	// (sent-only mail is not arrival), and if the turn analysis looked at
+	// Imbox rows alone the owner could never be seen to have spoken last —
+	// "you're waiting" would stay empty forever. The thread must still hold
+	// Imbox mail, so machine-sent outreach nobody answered stays out.
 	listQuery := `
 		SELECT DISTINCT ON (m.account_id, m.thread_id)
-		       m.account_id, m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at, COALESCE(m.preview,'')
+		       m.account_id, m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at, COALESCE(m.preview,''),
+		       COALESCE(m.to_addrs,'[]'), COALESCE(h.bucket,'')
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
-		JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
-		WHERE h.bucket = 'imbox'` + discardedFilter("m")
-	listArgs := []any{uid}
+		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
+		WHERE (h.bucket = 'imbox'
+		       OR (COALESCE(h.bucket,'') <> 'dropped'
+		           AND lower(COALESCE(m.from_addrs,'[]')::json->0->>'email') = ANY ($2)))
+		  AND EXISTS (
+		    SELECT 1 FROM mail_messages mi
+		    JOIN hey_messages hi ON hi.account_id = mi.account_id AND hi.message_id = mi.id AND hi.user_id = $1
+		    WHERE mi.account_id = m.account_id AND mi.thread_id = m.thread_id AND hi.bucket = 'imbox')` + discardedFilter("m")
+	listArgs := []any{uid, addrList(myAddr)}
 	if account != "" {
-		listQuery += ` AND ea.id = $2`
+		listQuery += ` AND ea.id = $3`
 		listArgs = append(listArgs, account)
 	}
 	listQuery += ` ORDER BY m.account_id, m.thread_id, m.received_at DESC NULLS LAST`
@@ -135,9 +156,9 @@ func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, 
 
 	for rows.Next() {
 		var bt briefThread
-		var fromJSON string
+		var fromJSON, toJSON, bucket string
 		var received *time.Time
-		if err := rows.Scan(&bt.Account, &bt.ThreadID, &bt.MessageID, &bt.Subject, &fromJSON, &received, &bt.Preview); err != nil {
+		if err := rows.Scan(&bt.Account, &bt.ThreadID, &bt.MessageID, &bt.Subject, &fromJSON, &received, &bt.Preview, &toJSON, &bucket); err != nil {
 			return nil, nil, err
 		}
 		if received != nil {
@@ -148,11 +169,12 @@ func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, 
 		bt.From = firstSenderName(fromJSON)
 
 		switch {
-		case !fromMe && !readState[bt.Account+"\x00"+bt.MessageID]:
+		case !fromMe && bucket == "imbox" && !readState[bt.Account+"\x00"+bt.MessageID]:
 			needsYou = append(needsYou, bt)
 		case fromMe && spoke[bt.Account+"\x00"+bt.ThreadID][0] && spoke[bt.Account+"\x00"+bt.ThreadID][1]:
 			// My move was the last one and someone else is in the thread.
 			// Their turn — and if it stays theirs for long, this is the nudge.
+			bt.WaitingOn = firstOtherRecipient(toJSON, myAddr)
 			waiting = append(waiting, bt)
 		}
 	}
@@ -368,7 +390,7 @@ func (a *App) handlePeople(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT s.sender_key, s.route, s.allowed,
 		       count(h.message_id) AS total,
-		       max(m.received_at)::text AS last_at,
+		       to_char(max(m.received_at), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS last_at,
 		       (array_agg(m.subject ORDER BY m.received_at DESC NULLS LAST))[1] AS last_subject
 		FROM hey_senders s
 		LEFT JOIN mail_messages m ON lower(m.from_addrs::json->0->>'email') = s.sender_key
@@ -505,6 +527,26 @@ func (a *App) handlePeopleLastSent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, out)
+}
+
+// firstOtherRecipient formats the first To address that is not one of the
+// owner's own, in the same "Name <email>" shape firstSenderName uses. Empty
+// when the header is missing, malformed, or addressed only to the owner.
+func firstOtherRecipient(toJSON string, mine map[string]bool) string {
+	var addrs []mail.Address
+	if err := json.Unmarshal([]byte(toJSON), &addrs); err != nil {
+		return ""
+	}
+	for _, a := range addrs {
+		if a.Email == "" || mine[strings.ToLower(a.Email)] {
+			continue
+		}
+		if a.Name != "" {
+			return fmt.Sprintf("%s <%s>", a.Name, a.Email)
+		}
+		return a.Email
+	}
+	return ""
 }
 
 func addrList(m map[string]bool) []string {

@@ -162,7 +162,7 @@ export function NotesView() {
       <div class="canvas-frame">
         {loading && !data && <ListSkeleton rows={3} />}
         {error && <LoadError title="The notes didn't load." error={error} retry={reload} />}
-        <div class="note-canvas">
+        <div class="note-canvas" tabIndex={0} role="region" aria-label="Notes wall — scroll to move around it">
           <div
             class="note-wall"
             ref={wallRef}

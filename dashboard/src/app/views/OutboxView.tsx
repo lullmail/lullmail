@@ -70,30 +70,43 @@ export function OutboxView() {
       attachments: (r.attachments || []).map((a) => ({ filename: a.filename, contentType: a.content_type, dataBase64: a.data_base64 })) });
     setReview(null);
   };
-  return <section class="settings-section">
-    <h1>Outbox</h1>
-    <p>The server saves accepted sends before provider submission. “Submitted” means the provider accepted the message, not that a recipient received it. Saved compositions are removed 30 days after a send settles and records of outcomes after 90 days; disconnecting an account removes its entries here (export your personal data first to keep them), and is refused while one of its sends is still waiting.</p>
-    {loading && <p role="status">Loading saved sends…</p>}
-    {error && <p role="alert">{error}</p>}
-    {!loading && !error && rows.length === 0 && <p>No saved sends</p>}
-    <ul>{rows.map((r) => <li key={r.id}>
-      <strong>{r.status}</strong> · {accounts.value.find((a) => a.id === r.account_id)?.address || "Connected account"} · <time>{new Date(r.created_at).toLocaleString()}</time>
-      {r.status === "failed" && <p>{failureNote(r.error_code)}</p>}
-      {r.status === "ambiguous" && <p>The provider may already have sent this message. Check Sent and the recipient before creating another submission.</p>}
-      {r.status === "submitted" && r.filing_status === "ambiguous" && <p>The message was submitted, but its Sent copy is unconfirmed. Do not resend it. {r.saved_sent_copy && <><a href={"/api/outbox/" + encodeURIComponent(r.id) + "?format=eml"} download>Download the submitted copy</a> <button type="button" disabled={busy !== null} onClick={() => discard(r.id)}>Remove saved Sent copy</button></>}</p>}
-      {r.status === "pending" && Date.parse(r.undo_until) > Date.now() && <button type="button" disabled={busy !== null} onClick={() => cancel(r.id)}>Cancel send</button>}
-      {r.recoverable && ["failed", "cancelled", "ambiguous"].includes(r.status) && <>
-        <button type="button" disabled={busy !== null} onClick={() => inspect(r.id)}>Review saved composition</button>
-        <button type="button" disabled={busy !== null} onClick={() => discard(r.id)}>Remove saved composition</button>
-      </>}
+  // Text and roles here are a contract with the durable-outbox browser suite
+  // (e2e/outbox.mjs): the heading, each row's <strong> status word, and every
+  // button label are matched exactly. Restyle freely; reword deliberately.
+  return <section class="settings-section outbox">
+    <div class="page-head">
+      <div class="page-kicker">Sending</div>
+      <h1 class="page-title">Outbox</h1>
+      <p class="page-sub">The server saves accepted sends before provider submission. “Submitted” means the provider accepted the message, not that a recipient received it. Saved compositions are removed 30 days after a send settles and records of outcomes after 90 days; disconnecting an account removes its entries here (export your personal data first to keep them), and is refused while one of its sends is still waiting.</p>
+    </div>
+    {loading && <p class="settings-empty" role="status">Loading saved sends…</p>}
+    {error && <p class="outbox-error" role="alert">{error}</p>}
+    {!loading && !error && rows.length === 0 && <p class="settings-empty">No saved sends</p>}
+    <ul class="outbox-list">{rows.map((r) => <li class="outbox-row" key={r.id}>
+      <div class="outbox-line">
+        <strong class={"outbox-status is-" + r.status}>{r.status}</strong>
+        <span class="outbox-meta">{accounts.value.find((a) => a.id === r.account_id)?.address || "Connected account"} · <time dateTime={r.created_at}>{new Date(r.created_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</time></span>
+      </div>
+      {r.status === "failed" && <p class="outbox-note">{failureNote(r.error_code)}</p>}
+      {r.status === "ambiguous" && <p class="outbox-note">The provider may already have sent this message. Check Sent and the recipient before creating another submission.</p>}
+      {r.status === "submitted" && r.filing_status === "ambiguous" && <p class="outbox-note">The message was submitted, but its Sent copy is unconfirmed. Do not resend it. {r.saved_sent_copy && <><a href={"/api/outbox/" + encodeURIComponent(r.id) + "?format=eml"} download>Download the submitted copy</a> <button class="btn btn-quiet-danger btn-sm" type="button" disabled={busy !== null} onClick={() => discard(r.id)}>Remove saved Sent copy</button></>}</p>}
+      <div class="outbox-acts">
+        {r.status === "pending" && Date.parse(r.undo_until) > Date.now() && <button class="btn btn-outline btn-sm" type="button" disabled={busy !== null} onClick={() => cancel(r.id)}>Cancel send</button>}
+        {r.recoverable && ["failed", "cancelled", "ambiguous"].includes(r.status) && <>
+          <button class="btn btn-outline btn-sm" type="button" disabled={busy !== null} onClick={() => inspect(r.id)}>Review saved composition</button>
+          <button class="btn btn-quiet-danger btn-sm" type="button" disabled={busy !== null} onClick={() => discard(r.id)}>Remove saved composition</button>
+        </>}
+      </div>
     </li>)}</ul>
-    {review && <section aria-label="Saved composition review">
-      <h2>{review.recovery.request.subject}</h2><p>To: {review.recovery.request.to}</p>
-      <pre style={{ whiteSpace: "pre-wrap" }}>{review.recovery.request.text || review.recovery.request.html}</pre>
-      <p>{review.recovery.request.attachments?.length || 0} saved attachments</p>
-      {review.recovery.status === "ambiguous" && <p role="alert">Creating a new draft can result in a duplicate message if you send it. Confirm the previous outcome first.</p>}
-      <button type="button" onClick={() => restore(review.recovery)}>Create a new draft from this copy</button>
-      <button type="button" onClick={() => setReview(null)}>Close review</button>
+    {review && <section class="outbox-review" aria-label="Saved composition review">
+      <h2>{review.recovery.request.subject}</h2><p class="outbox-meta">To: {review.recovery.request.to}</p>
+      <pre class="outbox-body">{review.recovery.request.text || review.recovery.request.html}</pre>
+      <p class="outbox-meta">{review.recovery.request.attachments?.length || 0} saved attachments</p>
+      {review.recovery.status === "ambiguous" && <p class="outbox-note" role="alert">Creating a new draft can result in a duplicate message if you send it. Confirm the previous outcome first.</p>}
+      <div class="outbox-acts">
+        <button class="btn btn-primary btn-sm" type="button" onClick={() => restore(review.recovery)}>Create a new draft from this copy</button>
+        <button class="btn btn-ghost btn-sm" type="button" onClick={() => setReview(null)}>Close review</button>
+      </div>
     </section>}
   </section>;
 }

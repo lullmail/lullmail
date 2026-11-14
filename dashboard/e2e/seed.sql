@@ -2,6 +2,11 @@
 -- Run only against a disposable database after the app has created its owner.
 \set ON_ERROR_STOP on
 
+-- The mirror stores naive TIMESTAMPs holding UTC digits (the engine writes
+-- t.UTC()). now() into those columns must therefore run in a UTC session, or
+-- every seeded time lands off by the database's local offset.
+SET TIME ZONE 'UTC';
+
 INSERT INTO email_accounts (
   user_id, mirror_account_id, provider, address, label, username, host, port,
   smtp_host, smtp_port, cred_ciphertext, backfill_days, retention_days,

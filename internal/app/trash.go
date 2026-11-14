@@ -8,7 +8,9 @@ import (
 	"github.com/neutron-build/neutron/mail"
 )
 
-// discardedFilter excludes messages the provider holds in Trash or Junk.
+// discardedFilter excludes messages the provider holds in Trash, Junk or
+// Drafts. A provider draft is unsent work, not mail: Gmail also lists it under
+// "All Mail", where it used to be classified like something that arrived.
 // Views are built from local classification, which does not change when the
 // owner trashes or junks mail here or in another client; without this a
 // deleted message kept appearing in Inbox, Reading and the counts. Folder
@@ -19,7 +21,7 @@ func discardedFilter(alias string) string {
 		  SELECT 1 FROM mail_message_mailboxes dm
 		  JOIN mail_mailboxes db ON db.account_id = dm.account_id AND db.id = dm.mailbox_id
 		  WHERE dm.account_id = ` + alias + `.account_id AND dm.message_id = ` + alias + `.id
-		    AND db.role IN ('trash', 'junk'))`
+		    AND db.role IN ('trash', 'junk', 'drafts'))`
 }
 
 // maxTrashThread bounds one request, like thread actions.
