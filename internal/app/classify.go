@@ -200,20 +200,24 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		if p.sender == "" {
 			bucket = "paper_trail"
 		}
-		// A message the provider filed only in the owner's Sent folder never
-		// joins the decision queue: it is a copy of something the owner (or
-		// a machine acting for them, like cold outreach over SMTP) already
-		// sent, not mail that arrived. The sender-based rules above would
-		// file it as Imbox — the owner's own address is always a
-		// correspondent — which surfaced every machine-sent message as if
-		// the owner had written to themselves. Inbox membership (a Bcc to
-		// self) means the copy was also received, and classifies as before.
+		// Mail the owner sent never joins a decision queue: it is a copy of
+		// something the owner (or a machine acting for them, like cold
+		// outreach over SMTP) already sent, not mail that arrived. The
+		// sender-based rules above would file it as Imbox — the owner's own
+		// address is always a correspondent — which surfaced every sent
+		// message as if the owner had written to themselves. It has its own
+		// place, 'sent', and is born read: nobody needs telling about mail
+		// they wrote. (It used to file under Receipts, where every reply
+		// showed up as a row from the owner beside the order confirmations.)
+		// Inbox membership (a Bcc to self) means the copy was also received,
+		// and classifies as before.
 		if p.sentOnly {
-			bucket = "paper_trail"
+			bucket = "sent"
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO hey_messages (user_id, account_id, message_id, bucket)
-			VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, account_id, message_id) DO NOTHING`,
+			INSERT INTO hey_messages (user_id, account_id, message_id, bucket, read_at)
+			VALUES ($1, $2, $3, $4, CASE WHEN $4 = 'sent' THEN now() END)
+			ON CONFLICT (user_id, account_id, message_id) DO NOTHING`,
 			uid, p.acct, p.id, bucket); err != nil {
 			return err
 		}
@@ -230,15 +234,17 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		  AND s.sender_key = lower(COALESCE(m.from_addrs, '[]')::json->0->>'email')`, uid); err != nil {
 		return err
 	}
-	// Sent-only mail misfiled before the rule above (the 2026-10-28 Imbox
-	// report) repairs on every pass, like the other self-heals: sent mail
-	// parked in any arrival bucket moves to Receipts. A 'dropped' row keeps
-	// its block decision — an explicit owner choice outranks the rule.
+	// Sent mail filed anywhere else repairs on every pass, like the other
+	// self-heals — which is also the migration: rows the classifier put in
+	// the Imbox before 2026-10-28, or in Receipts before 'sent' existed,
+	// move on the first pass after an upgrade. Two things are left alone:
+	// a 'dropped' row keeps its block decision, and a snoozed row stays
+	// snoozed with its thread until it comes back.
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE hey_messages h SET bucket = 'paper_trail'
+		UPDATE hey_messages h SET bucket = 'sent', read_at = COALESCE(h.read_at, now())
 		FROM mail_messages m
 		WHERE h.user_id = $1
-		  AND h.bucket NOT IN ('paper_trail', 'dropped')
+		  AND h.bucket NOT IN ('sent', 'dropped', 'set_aside', 'later')
 		  AND h.account_id = m.account_id AND h.message_id = m.id
 		  AND (EXISTS (SELECT 1 FROM mail_message_mailboxes sm
 		               JOIN mail_mailboxes sb ON sb.account_id = sm.account_id AND sb.id = sm.mailbox_id
@@ -725,6 +731,7 @@ var bucketNames = map[string][]string{
 	"imbox":       {"imbox"},
 	"paper_trail": {"paper_trail"},
 	"feed":        {"feed"},
+	"sent":        {"sent"},
 	"snoozed":     {"set_aside", "later"},
 	"set_aside":   {"set_aside"},
 	"later":       {"later"},
@@ -765,7 +772,7 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 		       h.read_at IS NOT NULL AS is_read,
 		       CASE m.attachment_state WHEN 2 THEN 'present' WHEN 1 THEN 'absent' ELSE 'unknown' END AS attachment_state,
 		       COALESCE(m.preview,''), h.bucket,
-		       h.set_aside_until,
+		       h.set_aside_until, COALESCE(m.to_addrs,'[]'),
 		       (SELECT count(*) FROM mail_messages t
 	          WHERE t.account_id = m.account_id AND t.thread_id = m.thread_id) AS thread_len
 		FROM hey_messages h
@@ -813,6 +820,9 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 		Bucket      string `json:"bucket"`
 		ThreadLen   int    `json:"thread_len"`
 		SnoozeUntil string `json:"snooze_until,omitempty"`
+		// To is set on Sent rows only: there the sender is always the owner,
+		// and the person written to is what tells two rows apart.
+		To string `json:"to,omitempty"`
 	}
 	out := []threadRow{}
 	next := listCursor{}
@@ -828,13 +838,17 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 		var fromJSON string
 		var received sql.NullTime
 		var snoozeUntil sql.NullTime
+		var toJSON string
 		if err := rows.Scan(&row.Account, &row.ThreadID, &row.MessageID, &row.Subject, &fromJSON,
 			&received, &row.Read, &row.Attachment, &row.Preview, &row.Bucket,
-			&snoozeUntil, &row.ThreadLen); err != nil {
+			&snoozeUntil, &toJSON, &row.ThreadLen); err != nil {
 			writeProblem(w, http.StatusInternalServerError, "Scan Failed", err.Error())
 			return
 		}
 		row.From = firstSenderName(fromJSON)
+		if row.Bucket == "sent" {
+			row.To = firstSenderName(toJSON)
+		}
 		if received.Valid {
 			row.ReceivedAt = received.Time.Format(time.RFC3339)
 			t := received.Time

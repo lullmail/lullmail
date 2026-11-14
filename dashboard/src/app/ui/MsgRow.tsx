@@ -43,7 +43,10 @@ function QuickActs({ row }: { row: Row }) {
 /** Sender, subject, snippet. No avatar: the subject of a list row is a message,
     and a 40px colour disc on every line is what made this read like Gmail. */
 export function MsgRow({ row, index, q }: { row: Row; index: number; q?: string }) {
-  const who = splitFrom(row.from);
+  // In Sent the sender is always the owner; the row is told apart by who it
+  // was written to.
+  const sentTo = row.bucket === "sent" && row.to ? splitFrom(row.to) : null;
+  const who = sentTo || splitFrom(row.from);
   const mailbox = mailboxName(row.account);
   const isChecked = checked.value.has(rowIdentity(row));
   const cls = [
@@ -135,7 +138,7 @@ export function MsgRow({ row, index, q }: { row: Row; index: number; q?: string 
       </button>
 
       <div class="row-top">
-        <span class="row-sender">{who.name || who.email}</span>
+        <span class="row-sender">{sentTo && <span class="row-to">To </span>}{who.name || who.email}</span>
         <span class="row-meta">
           {row.attachment_state === "present" && <span class="chip" title="Has attachments"><Icon name="clip" size={11} /></span>}
           {(row.thread_len || 0) > 1 && <span class="chip">{row.thread_len}</span>}

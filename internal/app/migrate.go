@@ -147,6 +147,17 @@ var productMigrations = []productMigration{
 	{Version: 10, Name: "verified Graph mailbox binding", Statements: []string{`ALTER TABLE email_accounts ADD COLUMN graph_mailbox_key text NOT NULL DEFAULT ''`}},
 	{Version: 11, Name: "message identity aliases", Statements: identityAliasStatements},
 	{Version: 12, Name: "agent token scopes", Statements: agentTokenScopeStatements},
+	{Version: 13, Name: "sent mail bucket", Statements: sentBucketStatements},
+}
+
+// sentBucketStatements admits 'sent' as a hey_messages.bucket value. Mail the
+// owner sent used to file under Receipts; it has its own place now, and the
+// classifier's per-pass self-heal moves existing rows there — no data moves
+// in this migration, only the constraint widens.
+var sentBucketStatements = []string{
+	`ALTER TABLE hey_messages DROP CONSTRAINT IF EXISTS hey_messages_bucket_check`,
+	`ALTER TABLE hey_messages ADD CONSTRAINT hey_messages_bucket_check
+		CHECK (bucket IN ('screener','imbox','paper_trail','feed','set_aside','later','dropped','sent'))`,
 }
 
 // reconcileClaimStatements stamps account_reconcile_jobs with the claim

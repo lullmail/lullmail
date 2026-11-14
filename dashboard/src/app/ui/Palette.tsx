@@ -29,6 +29,7 @@ const JUMPS: [string, string][] = [
   ["Reading", "/reading"],
   // Not in the nav — this is how you actually reach receipts.
   ["Receipts", "/receipts"],
+  ["Sent", "/sent"],
   ["Snoozed", "/snoozed"],
   ["People", "/people"],
   ["Accounts", "/settings/accounts"],

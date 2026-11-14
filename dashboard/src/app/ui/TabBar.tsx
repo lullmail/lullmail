@@ -24,7 +24,8 @@ const MORE: { title: string; items: [href: string, nav: string, label: string, s
     ["/notes", "notes", "Notes", "Thoughts, not tasks"],
   ] },
   { title: "Mail", items: [
-    ["/receipts", "paper_trail", "Receipts", "Orders, confirmations, sent mail"],
+    ["/receipts", "paper_trail", "Receipts", "Orders, confirmations, notifications"],
+    ["/sent", "sent", "Sent", "Everything you've written"],
     ["/snoozed", "snoozed", "Snoozed", "Everything you put off"],
     ["/people", "people", "People", "Who you've decided about"],
     ["/outbox", "outbox", "Outbox", "Sends in progress"],

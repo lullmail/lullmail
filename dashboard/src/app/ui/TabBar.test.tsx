@@ -99,6 +99,13 @@ describe("swipe a row to mark it done", () => {
     vi.useRealTimers();
   });
 
+  it("names a Sent row by who it was written to", () => {
+    const sent: Row = { ...row, bucket: "sent", from: "Tyler <me@example.test>", to: "Ari Patel <ari@example.test>" };
+    setList({ kind: "rows", key: "s", rows: [sent], senders: [], origin: "sent", loading: false, error: null });
+    mount(<MsgList rows={[sent]} />);
+    expect(host.querySelector(".row-sender")!.textContent).toBe("To Ari Patel");
+  });
+
   it("snaps back from a short drag, ignores a vertical one, and ignores a mouse", () => {
     const el = mountRow();
     pointer(el, "pointerdown", 300, 100);

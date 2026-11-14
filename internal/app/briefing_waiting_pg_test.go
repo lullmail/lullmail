@@ -31,13 +31,13 @@ func TestIntegrationWaitingCountsTheOwnersSentOnlyReply(t *testing.T) {
 
 	// They wrote, the owner answered from Sent: waiting on Ari.
 	msg("a1", "answered", "INBOX", "imbox", ari, me, "2026-10-01 10:00:00")
-	msg("a2", "answered", "Sent", "paper_trail", me, ari, "2026-10-01 12:00:00")
+	msg("a2", "answered", "Sent", "sent", me, ari, "2026-10-01 12:00:00")
 	// The owner answered, then they wrote back: their mail needs the owner.
 	msg("b1", "theirs", "INBOX", "imbox", cara, me, "2026-10-02 10:00:00")
-	msg("b2", "theirs", "Sent", "paper_trail", me, cara, "2026-10-02 11:00:00")
+	msg("b2", "theirs", "Sent", "sent", me, cara, "2026-10-02 11:00:00")
 	msg("b3", "theirs", "INBOX", "imbox", cara, me, "2026-10-02 12:00:00")
 	// Outreach nobody answered: no Imbox mail in the thread, so not a card.
-	msg("c1", "cold", "Sent", "paper_trail", me, `[{"email":"stranger@else.test"}]`, "2026-10-03 10:00:00")
+	msg("c1", "cold", "Sent", "sent", me, `[{"email":"stranger@else.test"}]`, "2026-10-03 10:00:00")
 
 	needs, waiting, err := p.app.briefThreads(context.Background(), p.uid, "")
 	if err != nil {

@@ -80,7 +80,7 @@ FROM users u CROSS JOIN (VALUES
   ('m-001','imbox',NULL::timestamptz,NULL::timestamptz),
   ('m-002','imbox',NULL,NULL),
   ('m-003','imbox',now()-interval '20 hours',NULL),
-  ('m-004','imbox',now()-interval '17 hours',NULL),
+  ('m-004','sent',now()-interval '17 hours',NULL),
   ('m-005','feed',NULL,NULL),
   ('m-006','feed',now()-interval '1 day',NULL),
   ('m-007','paper_trail',NULL,NULL),
