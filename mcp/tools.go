@@ -89,8 +89,9 @@ func registerTools(s *mcp.Server, c *client) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "today_briefing",
-		Description: "The owner's daily briefing: what needs a reply, who is being waited on, what arrived quietly.",
+		Name: "today_briefing",
+		Description: "The owner's daily briefing: what needs a reply (needs_you), who is being waited on (waiting_on), what arrived quietly. " +
+			"On a waiting_on thread the newest message is the owner's own, so `from` is the owner; the `waiting_on` field names who owes the reply. Times are UTC.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
 		return text(c.get(ctx, "/briefing", nil))
 	})
@@ -310,7 +311,7 @@ func registerTools(s *mcp.Server, c *client) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "board_list",
-		Description: "The personal kanban: unread Inbox mail as to-dos, answered threads as waiting-on, dated snoozes as deferred, plus pinned cards.",
+		Description: "The personal kanban: unread Inbox mail as to-dos, answered threads as waiting-on (each names who owes the reply in `waiting_on`), dated snoozes as deferred, plus pinned cards.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
 		AccountID string `json:"account_id,omitempty" jsonschema:"limit to one mailbox; default all"`
 	}) (*mcp.CallToolResult, any, error) {

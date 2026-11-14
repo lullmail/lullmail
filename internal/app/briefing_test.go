@@ -215,3 +215,21 @@ func TestBriefingReturns500OnDatabaseErrors(t *testing.T) {
 		})
 	}
 }
+
+// A waiting thread's From is always the owner, so the label has to come from
+// the recipients: the first one who is not the owner, tolerating bad JSON.
+func TestFirstOtherRecipientSkipsTheOwner(t *testing.T) {
+	mine := map[string]bool{"me@example.test": true}
+	for _, tc := range []struct{ to, want string }{
+		{`[{"name":"Me","email":"Me@Example.test"},{"name":"Ari Patel","email":"ari@northstar.test"}]`, "Ari Patel <ari@northstar.test>"},
+		{`[{"email":"ari@northstar.test"}]`, "ari@northstar.test"},
+		{`[{"email":"me@example.test"}]`, ""},
+		{`[]`, ""},
+		{`not json`, ""},
+		{``, ""},
+	} {
+		if got := firstOtherRecipient(tc.to, mine); got != tc.want {
+			t.Errorf("firstOtherRecipient(%q) = %q, want %q", tc.to, got, tc.want)
+		}
+	}
+}
