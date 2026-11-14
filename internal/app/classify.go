@@ -35,7 +35,10 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		               WHERE sm.account_id = m.account_id AND sm.message_id = m.id AND sb.role = 'sent'),
 		       EXISTS (SELECT 1 FROM mail_message_mailboxes nm
 		               JOIN mail_mailboxes nb ON nb.account_id = nm.account_id AND nb.id = nm.mailbox_id
-		               WHERE nm.account_id = m.account_id AND nm.message_id = m.id AND nb.role = 'inbox')
+		               WHERE nm.account_id = m.account_id AND nm.message_id = m.id AND nb.role = 'inbox'),
+		       EXISTS (SELECT 1 FROM email_accounts o
+		               WHERE o.user_id = $1
+		                 AND lower(o.address) = lower(COALESCE(m.from_addrs, '[]')::json->0->>'email'))
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
@@ -61,8 +64,8 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 	for rows.Next() {
 		var acct, id, fromJSON string
 		var received, connected sql.NullTime
-		var inSent, inInbox bool
-		if err := rows.Scan(&acct, &id, &fromJSON, &received, &connected, &inSent, &inInbox); err != nil {
+		var inSent, inInbox, fromOwner bool
+		if err := rows.Scan(&acct, &id, &fromJSON, &received, &connected, &inSent, &inInbox, &fromOwner); err != nil {
 			rows.Close()
 			return err
 		}
@@ -71,7 +74,15 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		batch = append(batch, pending{
 			acct: acct, id: id, sender: firstSenderEmail(fromJSON),
 			historical: received.Valid && connected.Valid && received.Time.Before(connected.Time),
-			sentOnly:   inSent && !inInbox,
+			// Outside the Inbox, the owner's own mail is outbound whichever
+			// folder holds it. Gmail over IMAP keeps a copy of every sent
+			// message in "[Gmail]/All Mail", which syncs before "Sent Mail",
+			// so for a while the only membership is a folder with no sent
+			// role; a provider with no SPECIAL-USE attributes never reports
+			// one at all. Trusting From here cannot promote anything: the
+			// result is Receipts, and a forged copy that reached the Inbox
+			// still classifies by the ordinary rules.
+			sentOnly: !inInbox && (inSent || fromOwner),
 		})
 	}
 	scanErr := rows.Err()
@@ -229,9 +240,12 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		WHERE h.user_id = $1
 		  AND h.bucket NOT IN ('paper_trail', 'dropped')
 		  AND h.account_id = m.account_id AND h.message_id = m.id
-		  AND EXISTS (SELECT 1 FROM mail_message_mailboxes sm
-		              JOIN mail_mailboxes sb ON sb.account_id = sm.account_id AND sb.id = sm.mailbox_id
-		              WHERE sm.account_id = m.account_id AND sm.message_id = m.id AND sb.role = 'sent')
+		  AND (EXISTS (SELECT 1 FROM mail_message_mailboxes sm
+		               JOIN mail_mailboxes sb ON sb.account_id = sm.account_id AND sb.id = sm.mailbox_id
+		               WHERE sm.account_id = m.account_id AND sm.message_id = m.id AND sb.role = 'sent')
+		       OR EXISTS (SELECT 1 FROM email_accounts o
+		                  WHERE o.user_id = $1
+		                    AND lower(o.address) = lower(COALESCE(m.from_addrs, '[]')::json->0->>'email')))
 		  AND NOT EXISTS (SELECT 1 FROM mail_message_mailboxes nm
 		                  JOIN mail_mailboxes nb ON nb.account_id = nm.account_id AND nb.id = nm.mailbox_id
 		                  WHERE nm.account_id = m.account_id AND nm.message_id = m.id AND nb.role = 'inbox')`, uid); err != nil {
@@ -494,7 +508,7 @@ func (a *App) handleScreener(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT COALESCE(lower(m.from_addrs::json->0->>'email'), '') AS sender,
 		       count(*) AS waiting,
-		       COALESCE(max(m.received_at)::text, '') AS newest,
+		       COALESCE(to_char(max(m.received_at), 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS newest,
 		       COALESCE((array_agg(m.subject ORDER BY m.received_at DESC NULLS LAST))[1], '') AS sample_subject
 		FROM hey_messages h
 		JOIN mail_messages m ON m.account_id = h.account_id AND m.id = h.message_id
