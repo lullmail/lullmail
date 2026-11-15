@@ -34,7 +34,7 @@ never its internals, and the main build never compiles it.
 ## Tools
 
 **Accounts:** `list_accounts` · `add_account` (IMAP/JMAP; backfill 0 = all
-history) · `update_account` (pause sync / retention) · `set_backfill`
+history) · `update_account` (pause sync / retention / mark as outreach) · `set_backfill`
 (history window: 0 = all, or days) · `delete_account` · `sync_account`
 
 **Read:** `list_bucket` (screener / imbox / paper_trail / feed / snoozed /
