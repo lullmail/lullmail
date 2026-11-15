@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
 import { accounts, attachmentBytes, beginDraftAttachmentRead, editedSinceUnconfirmed, finishDraftAttachmentRead, reserveDraftAttachment, closeCompose, compose, cycleDraft, draftIndex, draftsUnsaved, draftStack, newDraft, pendingDraftReads, prepareDraftSend, retireDraft, sendingDrafts, setUnconfirmedSend, showError, showToast, undoSeconds, updateDraft, updateDraftById, type ComposeState } from "../lib/store";
 import { Icon } from "./Icon";
+import { RecipientInput } from "./RecipientInput";
 import { CONFIRM_RESEND, checkEarlierSubmission, sendMailOutcome, type SendAttachment, type SendOutcome } from "../lib/actions";
 import { deleteDraft, generationCurrent, offlineGeneration, offlineOwner, offlineStorageSuspended } from "../lib/offline";
 
@@ -69,6 +70,8 @@ function DraftForm({ seed }: { seed: ComposeState }) {
   // the keyboard shortcut, which funnel through one send() (audit 4 F03).
   const sending = useRef(false);
   const fileBytes = attachments.reduce((n, a) => n + attachmentBytes(a), 0);
+  // Ids tie each visible label to its field; one draft form is mounted at a time.
+  const fid = "compose-" + seed.id;
 
   // The autofocus attribute is honoured once per page load; a draft opened
   // later (reply, stacked draft, reopened ring) needs an explicit focus.
@@ -197,44 +200,95 @@ function DraftForm({ seed }: { seed: ComposeState }) {
     <>
       <fieldset class="compose-form" disabled={busy} style={{ border: 0, margin: 0, minWidth: 0 }}>
         <div class="compose-kicker">{seed.context || "New message"}</div>
-        <div class="compose-head-row">
-          <select
-            class="compose-from" aria-label="Send from account"
-            value={fromValue}
-            onChange={(e) => { const v = (e.target as HTMLSelectElement).value; setAccountId(v); updateDraft({ accountId: v }); }}
-          >
-            {accountList.length === 0 && <option value="">{fromLabel || "First connected account"}</option>}
-            {accountList.length > 0 && !fromValue && <option value="">Same mailbox as the original</option>}
-            {accountList.map((a) => <option value={a.id}>{a.address}</option>)}
-          </select>
-          <button
-            class={"btn btn-ghost btn-sm" + (showCc ? " lens-on" : "")} type="button"
-            aria-pressed={showCc}
-            title="Show or hide the Cc and Bcc fields"
-            onClick={() => setShowCc((v) => !v)}
-          >Cc/Bcc</button>
+        {/* A labelled address block, one hairline row per field — the shape
+            every mail composer shares, so nobody has to learn this one. The
+            placeholders stay for assistive tech and tests; the labels are
+            what is read. */}
+        <div class="compose-fields">
+          <div class="compose-row">
+            <label class="compose-label" for={fid + "-from"}>From</label>
+            <select
+              id={fid + "-from"}
+              class="compose-from" aria-label="Send from account"
+              value={fromValue}
+              onChange={(e) => { const v = (e.target as HTMLSelectElement).value; setAccountId(v); updateDraft({ accountId: v }); }}
+            >
+              {accountList.length === 0 && <option value="">{fromLabel || "First connected account"}</option>}
+              {accountList.length > 0 && !fromValue && <option value="">Same mailbox as the original</option>}
+              {accountList.map((a) => <option value={a.id}>{a.address}</option>)}
+            </select>
+          </div>
+          <div class="compose-row">
+            <label class="compose-label" for={fid + "-to"}>To</label>
+            <RecipientInput
+              id={fid + "-to"} inputRef={toRef} placeholder="To — comma-separated"
+              value={to} onChange={(v) => { setTo(v); updateDraft({ to: v }); }}
+            />
+            <button
+              class={"compose-cc-toggle" + (showCc ? " on" : "")} type="button"
+              aria-pressed={showCc}
+              title="Show or hide the Cc and Bcc fields"
+              onClick={() => setShowCc((v) => !v)}
+            >Cc/Bcc</button>
+          </div>
+          {showCc && (
+            <>
+              <div class="compose-row">
+                <label class="compose-label" for={fid + "-cc"}>Cc</label>
+                <RecipientInput
+                  id={fid + "-cc"} placeholder="Cc"
+                  value={cc} onChange={(v) => { setCc(v); updateDraft({ cc: v }); }}
+                />
+              </div>
+              <div class="compose-row">
+                <label class="compose-label" for={fid + "-bcc"}>Bcc</label>
+                <RecipientInput
+                  id={fid + "-bcc"} placeholder="Bcc"
+                  value={bcc} onChange={(v) => { setBcc(v); updateDraft({ bcc: v }); }}
+                />
+              </div>
+            </>
+          )}
+          <div class="compose-row compose-row-subject">
+            <label class="compose-label" for={fid + "-subject"}>Subject</label>
+            <input
+              id={fid + "-subject"}
+              class="compose-subject" type="text" placeholder="Subject"
+              value={subject} onInput={(e) => { const v = (e.target as HTMLInputElement).value; setSubject(v); updateDraft({ subject: v }); }}
+            />
+          </div>
         </div>
-        <input
-          ref={toRef}
-          class="compose-to" type="text" placeholder="To — comma-separated" autocomplete="off"
-          value={to} onInput={(e) => { const v = (e.target as HTMLInputElement).value; setTo(v); updateDraft({ to: v }); }}
-        />
-        {showCc && (
-          <>
-            <input
-              class="compose-to" type="text" placeholder="Cc" autocomplete="off"
-              value={cc} onInput={(e) => { const v = (e.target as HTMLInputElement).value; setCc(v); updateDraft({ cc: v }); }}
-            />
-            <input
-              class="compose-to" type="text" placeholder="Bcc" autocomplete="off"
-              value={bcc} onInput={(e) => { const v = (e.target as HTMLInputElement).value; setBcc(v); updateDraft({ bcc: v }); }}
-            />
-          </>
+        {htmlMode && preview ? (
+          /* sandbox with no allow-* tokens: styles render, scripts never run. */
+          <iframe
+            class="compose-preview" title="HTML preview" sandbox=""
+            srcDoc={previewPolicy + (body || "<p>(nothing written yet)</p>")}
+          />
+        ) : (
+          <textarea
+            ref={bodyRef}
+            class={"compose-body" + (htmlMode ? " html-source" : "")}
+            placeholder={htmlMode ? "Write or paste HTML — inline styles travel best in email." : "Write something worth reading."}
+            spellcheck={!htmlMode}
+            value={body}
+            onInput={(e) => { const v = (e.target as HTMLTextAreaElement).value; setBody(v); updateDraft({ body: v }); }}
+            onKeyDown={(ev) => {
+              if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") { ev.preventDefault(); send(); }
+            }}
+          />
         )}
-        <input
-          class="compose-subject" type="text" placeholder="Subject"
-          value={subject} onInput={(e) => { const v = (e.target as HTMLInputElement).value; setSubject(v); updateDraft({ subject: v }); }}
-        />
+        {attachments.length > 0 && (
+          <div class="compose-files">
+            {attachments.map((a, i) => (
+              <span class="compose-file" key={i}>
+                <span class="compose-file-name">{a.filename}</span>
+                <span class="compose-file-size">{formatBytes(attachmentBytes(a))}</span>
+                <button class="btn-icon" type="button" aria-label={"Remove " + a.filename} onClick={() => removeAttachment(i)}>×</button>
+              </span>
+            ))}
+            <span class="compose-files-total">{formatBytes(fileBytes)} attached</span>
+          </div>
+        )}
         <div class="compose-modes">
           <button
             class={"btn btn-ghost btn-sm" + (htmlMode ? " lens-on" : "")} type="button"
@@ -260,47 +314,16 @@ function DraftForm({ seed }: { seed: ComposeState }) {
             class="btn btn-ghost btn-sm" type="button"
             title="Attach files (they upload with the message, not before)"
             onClick={() => fileInput.current?.click()}
-          >Attach</button>
+          ><Icon name="clip" size={13} />Attach</button>
           <input
             ref={fileInput} type="file" multiple hidden
             onChange={(e) => { const el = e.target as HTMLInputElement; addFiles(el.files); el.value = ""; }}
           />
           {htmlMode && !preview && <span class="compose-modes-note">plain-text readers get an automatic fallback</span>}
         </div>
-        {attachments.length > 0 && (
-          <div class="compose-files">
-            {attachments.map((a, i) => (
-              <span class="compose-file" key={i}>
-                <span class="compose-file-name">{a.filename}</span>
-                <span class="compose-file-size">{formatBytes(attachmentBytes(a))}</span>
-                <button class="btn-icon" type="button" aria-label={"Remove " + a.filename} onClick={() => removeAttachment(i)}>×</button>
-              </span>
-            ))}
-            <span class="compose-files-total">{formatBytes(fileBytes)} attached</span>
-          </div>
-        )}
-        {htmlMode && preview ? (
-          /* sandbox with no allow-* tokens: styles render, scripts never run. */
-          <iframe
-            class="compose-preview" title="HTML preview" sandbox=""
-            srcDoc={previewPolicy + (body || "<p>(nothing written yet)</p>")}
-          />
-        ) : (
-          <textarea
-            ref={bodyRef}
-            class={"compose-body" + (htmlMode ? " html-source" : "")}
-            placeholder={htmlMode ? "Write or paste HTML — inline styles travel best in email." : "Write something worth reading."}
-            spellcheck={!htmlMode}
-            value={body}
-            onInput={(e) => { const v = (e.target as HTMLTextAreaElement).value; setBody(v); updateDraft({ body: v }); }}
-            onKeyDown={(ev) => {
-              if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") { ev.preventDefault(); send(); }
-            }}
-          />
-        )}
       </fieldset>
       <div class="compose-btns">
-        <span class="hint"><span class="kbd">⌘↵</span> send · <span class="kbd">Esc</span> park · <span class="kbd">c</span> new draft · {undoSeconds}s to undo</span>
+        <span class="hint"><span class="kbd">⌘↵</span> send · <span class="kbd">Esc</span> keep as draft · {undoSeconds}s to undo</span>
         <button class="btn btn-ghost btn-sm" type="button" disabled={busy} onClick={retireLocalDraft}>Discard</button>
         <button class="btn btn-accent" type="button" disabled={!to.trim() || busy || pendingReads > 0} onClick={send}>
           {busy ? "Sending…" : pendingReads > 0 ? "Reading files…" : "Send"}
@@ -328,8 +351,8 @@ export function Compose() {
         }}
       >
         <div class="compose-ring">
-          <button class="btn btn-ghost btn-sm" type="button" onClick={() => newDraft()}>
-            + New draft
+          <button class="btn btn-ghost btn-sm" type="button" title="Start another draft (c)" onClick={() => newDraft()}>
+            <Icon name="plus" size={13} />New draft
           </button>
           {draftsUnsaved.value && (
             <span class="compose-ring-count" role="status">drafts are NOT saved on this device</span>
