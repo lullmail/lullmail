@@ -6,8 +6,10 @@ package app
 // in a row lock it for fifteen minutes.
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -45,21 +47,50 @@ func acquirePasswordWork() (func(), error) {
 // burnPasswordVerify runs argon2 against a dummy hash so a miss costs the
 // same as a hit. Without this, "no such user" returns in milliseconds and
 // "wrong password" pays 64MiB.
-func burnPasswordVerify(password string) {
+//
+// It reports busy when the work limiter is saturated and the burn did not
+// run. The caller must then answer exactly as the real-verify path does
+// when it cannot get a slot (429 Busy): a known ident that answers "Busy"
+// while an unknown one answers 401 tells a flooder which names exist.
+func burnPasswordVerify(password string) (busy bool) {
 	dummyPHCOnce.Do(func() {
 		dummyPHC, _ = hashPassword("not-a-user-password")
 	})
 	if dummyPHC == "" {
-		return
+		return false
 	}
 	release, err := acquirePasswordWork()
 	if err != nil {
-		// The limiter is already saturated with real work; skipping the
-		// burn only narrows a timing signal the flood itself created.
-		return
+		return true
 	}
 	defer release()
 	_, _ = verifyPassword(dummyPHC, password)
+	return false
+}
+
+// unknownLockKeyCap bounds how many distinct unknown identifiers hold their
+// own failure state; past it they share one bucket, as they all did before.
+const unknownLockKeyCap = 2048
+
+// unknownPasswordLockKey is the failure bucket for an identifier that
+// resolves to no account. Each unknown name gets its own, so it locks
+// after five failures exactly as a real account does. One bucket shared by
+// every unknown name leaked which names exist: lock it with a garbage
+// ident, and afterwards any name that still answers 401 instead of 429 is
+// real. Keys are a digest, so the map never holds what was typed, and the
+// per-host limiter in front bounds how fast it can grow.
+func (a *App) unknownPasswordLockKey(ident string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(ident))))
+	key := "unk:" + hex.EncodeToString(sum[:12])
+	a.authMu.Lock()
+	defer a.authMu.Unlock()
+	if _, held := a.pwFails[key]; !held && len(a.pwFails) >= unknownLockKeyCap {
+		a.prunePasswordFails(time.Now())
+		if len(a.pwFails) >= unknownLockKeyCap {
+			return sharedUnknownLockKey
+		}
+	}
+	return key
 }
 
 // OWASP-recommended argon2id profile for interactive login (m=64MiB, t=3,
@@ -131,11 +162,10 @@ func verifyPassword(encoded, password string) (bool, error) {
 }
 
 // passwordFails is failed-attempt state. Keyed by the resolved lock key —
-// "uid:<id>" for a known account, the shared unknown-user bucket otherwise —
-// so identifier aliases (email vs display name) cannot multiply one
-// account's guessing allowance, and unknown identifiers cannot grow the map
-// without bound. Lock responses are identical either way, so the bucket
-// choice still reveals nothing about which identifiers exist.
+// "uid:<id>" for a known account, a per-identifier digest for an unknown
+// one (see unknownPasswordLockKey) — so identifier aliases (email vs display
+// name) cannot multiply one account's guessing allowance, and an unknown
+// name locks exactly as a real one does.
 type passwordFails struct {
 	Count       int
 	Window      time.Time

@@ -35,6 +35,7 @@ type App struct {
 	authMu            sync.Mutex
 	authAttempts      map[string]authAttempt
 	pwFails           map[string]passwordFails
+	unknownTOTP       map[string]authAttempt
 	accountOwnerMu    sync.RWMutex
 	accountStatesMu   sync.Mutex
 	accountStates     map[mail.AccountID]*accountLifecycle

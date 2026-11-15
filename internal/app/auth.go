@@ -125,6 +125,16 @@ func (a *App) allowAuthAttempt(r *http.Request) bool {
 	return attempt.Count <= 10
 }
 
+// authAttemptsExhausted reports whether this host has used up its window,
+// without charging it.
+func (a *App) authAttemptsExhausted(r *http.Request) bool {
+	host := clientHost(r)
+	a.authMu.Lock()
+	defer a.authMu.Unlock()
+	attempt, seen := a.authAttempts[host]
+	return seen && attempt.Count >= 10 && time.Since(attempt.Window) <= 5*time.Minute
+}
+
 func (a *App) clearAuthAttempts(r *http.Request) {
 	host := clientHost(r)
 	a.authMu.Lock()
@@ -264,9 +274,19 @@ func (a *App) authenticateRequest(r *http.Request) (string, string, error) {
 	}
 	if !configured && a.setupTokenValid() {
 		got := r.Header.Get("Authorization")
+		// A wrong setup token is a guess at the one credential an
+		// unconfigured install has, so it is throttled per host like every
+		// other auth attempt. Only misses are charged: the setup screens
+		// make many requests with the right token.
+		if got != "" && a.authAttemptsExhausted(r) {
+			return "", "", sql.ErrNoRows
+		}
 		if constantTimeBearer(got, a.config().APIToken) {
 			uid, err := a.firstUserID(r.Context())
 			return uid, "bootstrap", err
+		}
+		if got != "" {
+			a.allowAuthAttempt(r)
 		}
 	}
 	return "", "", sql.ErrNoRows
@@ -497,6 +517,10 @@ func ownerConfiguredDB(ctx context.Context, q queryRower) (bool, error) {
 }
 
 func (a *App) handleBootstrapBegin(w http.ResponseWriter, r *http.Request) {
+	if !a.allowAuthAttempt(r) {
+		writeProblem(w, 429, "Too Many Attempts", "wait a few minutes and try again")
+		return
+	}
 	if !a.bootstrapAuthorized(r) {
 		writeProblem(w, 401, "Unauthorized", "the one-time setup token is required")
 		return
@@ -562,6 +586,10 @@ func lockBootstrapInstallation(ctx context.Context, tx *sql.Tx) error {
 }
 
 func (a *App) handleBootstrapFinish(w http.ResponseWriter, r *http.Request) {
+	if !a.allowAuthAttempt(r) {
+		writeProblem(w, 429, "Too Many Attempts", "wait a few minutes and try again")
+		return
+	}
 	if !a.bootstrapAuthorized(r) {
 		writeProblem(w, 401, "Unauthorized", "the one-time setup token is required")
 		return
@@ -627,6 +655,10 @@ func (a *App) handleBootstrapFinish(w http.ResponseWriter, r *http.Request) {
 // passkey can be added later from Security; it is no longer required to
 // finish installing.
 func (a *App) handleBootstrapPassword(w http.ResponseWriter, r *http.Request) {
+	if !a.allowAuthAttempt(r) {
+		writeProblem(w, 429, "Too Many Attempts", "wait a few minutes and try again")
+		return
+	}
 	if !a.bootstrapAuthorized(r) {
 		writeProblem(w, 401, "Unauthorized", "the one-time setup token is required")
 		return
@@ -1025,13 +1057,15 @@ func (a *App) handlePasswordLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Lock keys are resolved, not typed: "uid:<id>" once the ident resolves,
-	// the shared unknown-user bucket otherwise. Aliases of one account (email
-	// vs display name) share a single allowance, and unknown idents cannot
-	// grow attempt state without bound (audit AUTH-02).
-	lockKey := unknownPasswordLockKey
+	// a per-identifier digest otherwise. Aliases of one account (email vs
+	// display name) share a single allowance, and unknown idents are capped
+	// (audit AUTH-02).
 	uid, err := a.recoveryUser(r.Context(), req.Email)
+	var lockKey string
 	if err == nil {
 		lockKey = "uid:" + uid
+	} else {
+		lockKey = a.unknownPasswordLockKey(req.Email)
 	}
 	if remaining := a.passwordLockRemaining(lockKey); remaining > 0 {
 		writePasswordLocked(w, remaining)
@@ -1041,7 +1075,10 @@ func (a *App) handlePasswordLogin(w http.ResponseWriter, r *http.Request) {
 	// still run argon2 against a dummy hash so the wall-clock cost matches
 	// a real verify.
 	rejected := func() {
-		burnPasswordVerify(req.Password)
+		if burnPasswordVerify(req.Password) {
+			writeAuthBusy(w)
+			return
+		}
 		a.recordPasswordFailure(lockKey)
 		writeProblem(w, 401, "Sign In Failed", "invalid email or password")
 	}
@@ -1418,7 +1455,7 @@ func (a *App) handleRecoveryLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	uid, err := a.recoveryUser(r.Context(), req.Email)
 	if err != nil {
-		writeProblem(w, 401, "Recovery Failed", "that recovery code is not valid")
+		writeProblem(w, 401, "Recovery Failed", "that recovery code is not valid or was already used")
 		return
 	}
 	tx, err := a.db.BeginTx(r.Context(), nil)
@@ -1429,7 +1466,7 @@ func (a *App) handleRecoveryLogin(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback()
 	epoch, err := lockAuthUser(r.Context(), tx, uid)
 	if err != nil {
-		writeProblem(w, 401, "Recovery Failed", "that recovery code is not valid")
+		writeProblem(w, 401, "Recovery Failed", "that recovery code is not valid or was already used")
 		return
 	}
 	result, err := tx.ExecContext(r.Context(), `UPDATE auth_recovery_codes SET used_at=now()
@@ -1507,6 +1544,14 @@ func (a *App) handleTOTPLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	uid, err := a.recoveryUser(r.Context(), req.Email)
 	if err != nil {
+		// An unknown name spends a budget shaped like a real one's, so the
+		// eleventh attempt in a window answers 429 either way.
+		if admitted, retryAfter := a.reserveUnknownTOTPAttempt(req.Email); !admitted {
+			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
+			writeProblem(w, 429, "Too Many Attempts",
+				"too many invalid authenticator codes — retry after the current window")
+			return
+		}
 		writeProblem(w, 401, "Sign In Failed", "invalid authenticator code")
 		return
 	}
@@ -1714,9 +1759,9 @@ func writePasswordLocked(w http.ResponseWriter, remaining time.Duration) {
 		"too many failed attempts — try again in "+(time.Duration(int64(remaining.Seconds())+1)*time.Second).String())
 }
 
-// unknownPasswordLockKey is the shared failure bucket for identifiers that
-// resolve to no account: bounded storage, identical lock responses.
-const unknownPasswordLockKey = "unknown-user"
+// sharedUnknownLockKey is the overflow bucket for unknown identifiers once
+// unknownLockKeyCap distinct ones hold failure state.
+const sharedUnknownLockKey = "unknown-user"
 
 // writeAuthBusy answers a KDF admission rejection: retryable, and distinct
 // from a wrong-password result.
