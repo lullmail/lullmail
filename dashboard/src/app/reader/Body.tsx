@@ -18,9 +18,33 @@ function parseMailDocument(html: string) {
   template.innerHTML = serializeOuter(head).replace(/^<head/, '<div data-mail-head=""').replace(/<\/head>$/, "</div>") +
     serializeOuter(body).replace(/^<body/, '<div data-mail-body=""').replace(/<\/body>$/, "</div>");
   const fragment = template.content;
+  // The two wrappers are taken by POSITION, never by looking for the marker
+  // attribute: mail can carry that attribute too. A sender's
+  // <template data-mail-body> in the head used to be found first and handed
+  // back as "the body" — and nothing inside a <template> is reachable by
+  // querySelectorAll, so its contents skipped every sanitizing pass below
+  // and came out byte for byte.
+  const headEl = fragment.firstElementChild as HTMLElement;
+  let bodyEl = headEl.nextElementSibling as HTMLElement | null;
+  if (!bodyEl || fragment.lastElementChild !== bodyEl || fragment.childNodes.length !== 2) {
+    // The re-parse did not land as exactly two wrappers. Whatever follows the
+    // head is body content; gather it so every pass still sees all of it.
+    bodyEl = template.content.ownerDocument.createElement("div");
+    while (headEl.nextSibling) bodyEl.appendChild(headEl.nextSibling);
+    fragment.appendChild(bodyEl);
+  }
+  // Containers whose contents the passes cannot see (template) or that parse
+  // as text here and as live markup in the script-less reading frame
+  // (noscript and the other raw-text relics) are dropped whole.
+  fragment.querySelectorAll("template,noscript,noembed,noframes,plaintext,xmp").forEach((node) => node.remove());
+  fragment.querySelectorAll("[data-mail-head],[data-mail-body]").forEach((node) => {
+    if (node === headEl || node === bodyEl) return;
+    node.removeAttribute("data-mail-head");
+    node.removeAttribute("data-mail-body");
+  });
   return {
-    head: fragment.querySelector<HTMLElement>("[data-mail-head]")!,
-    body: fragment.querySelector<HTMLElement>("[data-mail-body]")!,
+    head: headEl,
+    body: bodyEl,
     querySelectorAll: <T extends Element = Element>(selector: string) => fragment.querySelectorAll<T>(selector),
     createElement: (tag: string) => template.content.ownerDocument.createElement(tag),
   };

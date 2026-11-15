@@ -67,13 +67,13 @@ export function MsgRow({ row, index, q }: { row: Row; index: number; q?: string 
     const was = swipe.current;
     swipe.current = null;
     el.classList.remove("swiping", "swipe-armed");
+    // Always settle back, whatever state the gesture was in. Done marks the
+    // thread handled; it does not take the row out of the list, so sliding
+    // it off-screen only to have it reappear read as a failed action.
+    el.style.removeProperty("--swipe");
     if (!was?.on) return;
     swipedAt.current = Date.now();
-    if (!commit) { el.style.removeProperty("--swipe"); return; }
-    el.style.setProperty("--swipe", "-100%");
-    // Let the row slide out before the list closes the gap. If the action
-    // fails and the row stays, it must not stay shoved off-screen.
-    setTimeout(() => { markDone([row]); el.style.removeProperty("--swipe"); }, 150);
+    if (commit) void markDone([row]);
   };
 
   return (
@@ -81,7 +81,9 @@ export function MsgRow({ row, index, q }: { row: Row; index: number; q?: string 
       class={cls}
       role="listitem"
       onPointerDown={(ev) => {
-        if (ev.pointerType !== "touch" || checked.value.size) return;
+        // One finger owns a swipe. A second touch on the row is ignored
+        // rather than replacing the first and stranding the row mid-slide.
+        if (ev.pointerType !== "touch" || checked.value.size || swipe.current) return;
         if ((ev.target as HTMLElement).closest("a, button, input")) return;
         swipe.current = { id: ev.pointerId, x: ev.clientX, y: ev.clientY, on: false };
       }}
@@ -105,7 +107,7 @@ export function MsgRow({ row, index, q }: { row: Row; index: number; q?: string 
         if (!s || s.id !== ev.pointerId) return;
         endSwipe(ev.currentTarget as HTMLElement, s.on && ev.clientX - s.x <= -SWIPE_COMMIT);
       }}
-      onPointerCancel={(ev) => endSwipe(ev.currentTarget as HTMLElement, false)}
+      onPointerCancel={(ev) => { if (swipe.current?.id === ev.pointerId) endSwipe(ev.currentTarget as HTMLElement, false); }}
       tabIndex={cursor.value === index || (cursor.value < 0 && index === 0) ? 0 : -1}
       data-cursor-index={index}
       onFocus={(ev) => { if (ev.target === ev.currentTarget) focusRow(index, true); }}

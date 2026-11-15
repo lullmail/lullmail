@@ -260,6 +260,14 @@ export function trashThreads(rows: Row[]) {
   }, TRASH_UNDO_MS);
 }
 
+/** Sends every Trash still inside its undo window, and waits for them.
+    Sign-out must call this first: a move left on its timer fires after the
+    session is gone and is silently lost — or goes out under whoever signs in
+    next. */
+export async function flushPendingTrash(): Promise<void> {
+  await Promise.all([...pendingTrash].map((commit) => commit()));
+}
+
 if (typeof window !== "undefined") {
   window.addEventListener("pagehide", () => {
     for (const commit of [...pendingTrash]) void commit();

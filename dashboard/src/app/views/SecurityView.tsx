@@ -1,4 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
+import { flushPendingTrash } from "../lib/actions";
 import { ApiError, api, authApi, authed, refreshAuth } from "../lib/api";
 import { createPasskey } from "../lib/passkeys";
 import { fmtDate } from "../lib/fmt";
@@ -173,6 +174,8 @@ export function SecurityView() {
   const logout = async () => {
     setBusy("logout");
     try {
+      // A Trash still inside its undo window has not reached the server yet.
+      await flushPendingTrash().catch(() => {});
       await authApi("/auth/logout", { method: "POST" });
       // Ratified logout semantics (offline-v2): this device's offline
       // caches, queued work, and drafts belong to the session owner and

@@ -2165,6 +2165,8 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
   }
   .notice-stack { bottom: calc(var(--tabbar-h) + var(--sp-3)); }
   .page:has(.thread-bar) .notice-stack { bottom: calc(64px + env(safe-area-inset-bottom, 0px) + var(--sp-3)); }
+  /* The docked bulk bar takes the strip above the tabs; a toast goes above it. */
+  .page:has(.bulkbar) .notice-stack { bottom: calc(var(--tabbar-h) + 104px); }
 
   .tabbar {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 32;
