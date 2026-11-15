@@ -477,7 +477,8 @@ func (a *App) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		"passkey_supported":   a.webAuthn() != nil || a.config().RPID == "",
 		// Warn-only exposure signal for the dashboard (D10). Classified here,
 		// once per boot, against the pinned origin — never enforced.
-		"exposed": publicExposure(a.config().PublicURL),
+		// A demo is public on purpose and has no credentials to harden.
+		"exposed": !demo && publicExposure(a.config().PublicURL),
 	}
 	if authenticated {
 		// The offline-v2 namespace pair (audit WEB-07/WEB-01/R08): the

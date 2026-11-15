@@ -22,7 +22,14 @@ func TestIntegrationDemoModeNeedsNoSignInAndRefusesWhatLeavesTheShowroom(t *test
 	if err := json.Unmarshal(w.Body.Bytes(), &status); err != nil {
 		t.Fatalf("status: %d %s", w.Code, w.Body.String())
 	}
-	if status["demo"] != true || status["authenticated"] != true || status["configured"] != true || status["bootstrap_available"] != false {
+	p.cfg.PublicURL = "https://demo.example.com" // public, and still no "harden your sign-in" warning
+	w = httptest.NewRecorder()
+	p.app.handleAuthStatus(w, jsonBody(t, http.MethodGet, "/api/auth/status", ""))
+	status = map[string]any{}
+	if err := json.Unmarshal(w.Body.Bytes(), &status); err != nil {
+		t.Fatalf("status: %d %s", w.Code, w.Body.String())
+	}
+	if status["demo"] != true || status["authenticated"] != true || status["configured"] != true || status["bootstrap_available"] != false || status["exposed"] != false {
 		t.Fatalf("demo status = %v", status)
 	}
 

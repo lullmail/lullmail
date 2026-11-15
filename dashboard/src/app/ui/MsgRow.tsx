@@ -140,7 +140,7 @@ export function MsgRow({ row, index, q }: { row: Row; index: number; q?: string 
       </button>
 
       <div class="row-top">
-        <span class="row-sender">{sentTo && <span class="row-to">To </span>}{who.name || who.email}</span>
+        <span class="row-sender" title={who.email && who.email !== who.name ? who.email : undefined}>{sentTo && <span class="row-to">To </span>}{who.name || who.email}</span>
         <span class="row-meta">
           {row.attachment_state === "present" && <span class="chip" title="Has attachments"><Icon name="clip" size={11} /></span>}
           {(row.thread_len || 0) > 1 && <span class="chip">{row.thread_len}</span>}

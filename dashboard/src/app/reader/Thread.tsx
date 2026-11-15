@@ -29,7 +29,13 @@ function ThreadMessage({ message }: { message: Message }) {
         {/* Avatars belong where a person is the subject. Here they are. */}
         <Avatar email={who.email} name={who.name} size="sm" />
         <div class="thread-msg-names">
-          <span class="thread-msg-from">{who.name || who.email}</span>
+          {/* The address is always shown, not just the name the sender chose
+              for themselves: a display name is whatever they typed, and
+              "PayPal Support" over a stranger's address is how phishing reads. */}
+          <span class="thread-msg-from">
+            {who.name || who.email}
+            {who.name && who.email && who.name !== who.email && <span class="thread-msg-addr">{who.email}</span>}
+          </span>
           <span class="thread-msg-to">to {message.to || "you"}{mailbox && <> · in <span class="thread-msg-mailbox">{mailbox}</span></>}</span>
         </div>
         <span class="thread-msg-date">{fmtFull(message.received_at)}</span>

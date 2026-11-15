@@ -1005,6 +1005,11 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 .thread-msg-head { display: flex; align-items: center; gap: var(--sp-3); margin-bottom: var(--sp-4); }
 .thread-msg-names { display: flex; flex-direction: column; min-width: 0; }
 .thread-msg-from { font-size: var(--t-md); font-weight: 700; }
+.thread-msg-from { display: flex; align-items: baseline; flex-wrap: wrap; column-gap: var(--sp-2); min-width: 0; }
+.thread-msg-addr {
+  font-size: var(--t-sm); font-weight: 520; color: var(--ink-3);
+  min-width: 0; overflow-wrap: anywhere; user-select: all;
+}
 .thread-msg-to { font-size: var(--t-sm); color: var(--ink-3); }
 .thread-msg-mailbox { color: var(--ink-2); font-weight: 560; }
 .thread-msg-date { margin-left: auto; font-size: var(--t-sm); color: var(--ink-3); flex: none; }
