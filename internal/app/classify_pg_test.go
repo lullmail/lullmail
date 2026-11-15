@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -440,7 +441,11 @@ func TestFolderListIsOneRowPerRoleAndTheViewCoversEverySpelling(t *testing.T) {
 	for _, f := range list {
 		got = append(got, f.Name)
 	}
+	// The database orders by its own collation, which differs between
+	// installs (and the client sorts the list anyway): compare contents.
 	want := []string{"[gmail]/starred", "all mail", "inbox", "junk", "sent", "trash"}
+	sort.Strings(got)
+	sort.Strings(want)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("folder list = %v\nwant        %v", got, want)
 	}
