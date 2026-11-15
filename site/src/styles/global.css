@@ -170,7 +170,19 @@ button, a { font: inherit; }
 .availability { padding: 190px var(--edge) 0; color: var(--ink); background: var(--paper-deep); scroll-margin-top: 72px; }
 .availability-copy { max-width: 1050px; }
 .availability h2 { max-width: 980px; font-size: clamp(72px, 9.5vw, 146px); line-height: .82; }
-.availability-copy > p:last-child { max-width: 650px; margin: 42px 0 0; color: var(--ink-soft); font-size: 17px; }
+.availability-copy > p:last-of-type { max-width: 650px; margin: 42px 0 0; color: var(--ink-soft); font-size: 17px; }
+.availability-links { display: flex; flex-wrap: wrap; gap: 14px 48px; margin-top: 46px; }
+.install { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 clamp(40px, 6vw, 96px); max-width: var(--max); margin-top: 120px; padding-top: 56px; border-top: 1px solid var(--line); scroll-margin-top: 90px; }
+.install-way { min-width: 0; display: flex; flex-direction: column; }
+.install-index { color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .1em; }
+.install-way h3 { margin: 14px 0 0; font-family: var(--serif); font-size: clamp(30px, 3vw, 42px); font-weight: 450; letter-spacing: -.035em; line-height: 1; }
+.install-way > p { max-width: 46ch; margin: 18px 0 26px; color: var(--ink-soft); font-size: 15px; flex: 1; }
+.cmd { position: relative; border-radius: 10px; color: rgba(251,250,247,.9); background: var(--night); }
+.cmd pre { margin: 0; padding: 46px 24px 24px; overflow-x: auto; font: 500 12.5px/1.85 ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace; tab-size: 2; }
+.cmd pre:focus-visible { outline-offset: -3px; }
+.cmd-copy { position: absolute; top: 10px; right: 10px; padding: 5px 11px; border: 1px solid rgba(255,255,255,.22); border-radius: 999px; color: rgba(251,250,247,.82); background: rgba(32,36,43,.9); font-size: 11px; font-weight: 650; cursor: pointer; transition: border-color .2s ease, color .2s ease; }
+.cmd-copy:hover { border-color: rgba(255,255,255,.5); color: var(--white); }
+.install-next { grid-column: 1 / -1; max-width: 70ch; margin: 44px 0 0; color: var(--ink-soft); font-size: 15px; }
 .availability-meta { display: flex; flex-wrap: wrap; gap: 12px 34px; margin-top: 90px; padding: 24px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--ink-soft); font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
 .site-foot { min-height: 135px; display: grid; grid-template-columns: 1fr auto 1fr; gap: 25px; align-items: center; }
 .site-foot > p { margin: 0; color: var(--ink-soft); font-size: 11px; }
@@ -248,8 +260,11 @@ button, a { font: inherit; }
 
   .availability { padding-top: 120px; scroll-margin-top: 62px; }
   .availability h2 { font-size: 66px; }
-  .availability-copy > p:last-child { font-size: 15px; }
+  .availability-copy > p:last-of-type { font-size: 15px; }
   .availability-meta { margin-top: 65px; }
+  .install { grid-template-columns: 1fr; gap: 56px; margin-top: 80px; padding-top: 44px; }
+  .install-next { margin-top: 0; }
+  .cmd pre { font-size: 11.5px; padding: 46px 18px 20px; }
   .site-foot { grid-template-columns: 1fr; gap: 16px; padding: 38px 0; }
   .site-foot > div { justify-self: start; flex-wrap: wrap; }
 }

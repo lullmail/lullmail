@@ -35,6 +35,28 @@ export function head() {
   };
 }
 
+// The public demo, once one is deployed. Empty hides every link to it, so
+// the page never points at something that is not there.
+const DEMO_URL = "";
+
+const DOCKER = `curl -fsSLO https://raw.githubusercontent.com/lullmail/lullmail/main/compose.yaml
+docker compose up -d
+docker compose logs app`;
+
+const TEPLOY = `teploy setup my-server
+teploy template install lullmail --server my-server \\
+  --domain mail.example.com --var db_password=$(openssl rand -hex 16)
+teploy logs --app lullmail --host my-server`;
+
+function Commands({ label, text }: { label: string; text: string }) {
+  return (
+    <div class="cmd">
+      <pre tabIndex={0} aria-label={label}><code>{text}</code></pre>
+      <button class="cmd-copy" type="button" data-copy={text}>Copy</button>
+    </div>
+  );
+}
+
 function BrandMark() {
   return (
     <svg class="brand-mark" viewBox="9 17 46 32" width="31" height="21" aria-hidden="true">
@@ -58,6 +80,7 @@ export default function Home() {
           <nav aria-label="Main navigation">
             <a href="#product">Product</a>
             <a href="#trust">Trust</a>
+            <a href="#install">Install</a>
           </nav>
           <a class="head-cta" href="https://github.com/lullmail/lullmail" target="_blank" rel="noopener noreferrer">GitHub <span aria-hidden="true">&#8599;</span></a>
         </div>
@@ -205,8 +228,27 @@ export default function Home() {
           <div class="availability-copy">
             <p class="overline">Free and source-available</p>
             <h2 id="availability-title">Yours to run.</h2>
-            <p>The complete product is licensed under FSL-1.1-MIT and self-hostable: one Go binary and Postgres, deployable with Docker or teploy. Each release becomes MIT after two years; a hosted offering may come later — the source is yours now.</p>
-            <a class="arrow-link" href="https://github.com/lullmail/lullmail">Read the source on GitHub <span aria-hidden="true">&#8599;</span></a>
+            <p>The complete product is licensed under FSL-1.1-MIT and self-hostable: one Go binary and Postgres. Each release becomes MIT after two years; a hosted offering may come later — the source is yours now.</p>
+            <div class="availability-links">
+              {DEMO_URL && <a class="arrow-link" href={DEMO_URL}>Try the demo first <span aria-hidden="true">&#8599;</span></a>}
+              <a class="arrow-link" href="https://github.com/lullmail/lullmail">Read the source on GitHub <span aria-hidden="true">&#8599;</span></a>
+            </div>
+          </div>
+
+          <div class="install" id="install">
+            <article class="install-way">
+              <span class="install-index">01</span>
+              <h3>With Docker</h3>
+              <p>One file, nothing to clone or build. It serves plain HTTP on port 8080, so keep it on your own machine or a private network, or put your HTTPS proxy in front.</p>
+              <Commands label="Docker install commands" text={DOCKER} />
+            </article>
+            <article class="install-way">
+              <span class="install-index">02</span>
+              <h3>With teploy</h3>
+              <p>For a server you can SSH into. The first command prepares it once; the second gives Lull Mail a domain with automatic HTTPS. <a href="https://teploy.com" target="_blank" rel="noopener noreferrer">teploy</a> is free and open source.</p>
+              <Commands label="teploy install commands" text={TEPLOY} />
+            </article>
+            <p class="install-next">Either way, the last command prints a one-time setup link. Open it, pick a name and a password, then connect a mailbox over IMAP or JMAP. Nothing phones home: new versions are announced on <a href="https://github.com/lullmail/lullmail/releases">GitHub</a>, and upgrading is pulling the new image.</p>
           </div>
           <div class="availability-meta">
             <span>IMAP + JMAP</span><span>One owner</span><span>FSL-1.1-MIT</span><span>Self-hostable</span>
@@ -214,7 +256,7 @@ export default function Home() {
           <footer class="site-foot">
             <a class="brand" href="#top"><BrandMark /><span>Lull Mail</span></a>
             <p>lullmail.com · 2026</p>
-            <div><a href="#product">Product</a><a href="#trust">Trust</a><a href="https://github.com/lullmail/lullmail">GitHub</a><a href="#top">Back to top &#8593;</a></div>
+            <div><a href="#product">Product</a><a href="#trust">Trust</a><a href="#install">Install</a><a href="https://github.com/lullmail/lullmail">GitHub</a><a href="#top">Back to top &#8593;</a></div>
             <p class="site-foot-credit">Built with <a href="https://neutron.build" target="_blank" rel="noopener noreferrer">Neutron</a> · Deployed with <a href="https://teploy.com" target="_blank" rel="noopener noreferrer">Teploy</a></p>
           </footer>
         </section>
