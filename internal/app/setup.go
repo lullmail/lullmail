@@ -364,6 +364,16 @@ func (a *App) prepareSetup() {
 			}
 		}
 	}
+	if a.cfg.Demo {
+		// A showroom has no first-run setup and must never mint a token
+		// that would let a stranger claim it. It only needs its owner row.
+		if err := a.ensureOwner(context.Background(), "Demo", demoOwnerEmail); err != nil {
+			log.Printf("demo: could not create the demo owner: %v", err)
+		}
+		a.cfg.APIToken = ""
+		log.Println("demo: LULL_DEMO is on — no sign-in, every visitor is the owner. Never point this at real mail.")
+		return
+	}
 	configured, err := a.ownerConfigured(context.Background())
 	if err != nil {
 		return
@@ -387,14 +397,24 @@ func (a *App) prepareSetup() {
 			remaining := setupTokenLifetime - setupNow().Sub(a.setupTokenCreated)
 			expires = remaining.Round(time.Minute).String()
 		}
+		// The link carries the token in the URL fragment, which a browser
+		// never sends to a server: it reaches the setup screen and nothing
+		// else — no proxy log, no Referer. Without a known origin the host
+		// is left for the operator to fill in.
+		origin := strings.TrimRight(a.cfg.PublicURL, "/")
+		if origin == "" {
+			origin = "http://<this server's address>"
+		}
 		log.Printf("\n=======================================================================\n"+
 			"  Lull Mail first-run setup\n"+
-			"  Open the site in your browser and paste this one-time token:\n\n"+
+			"  Open this one-time link in your browser:\n\n"+
+			"      %s/#setup=%s\n\n"+
+			"  Or open the site and paste the token:\n\n"+
 			"      %s\n\n"+
 			"  It expires in %s. Find it again later with:\n"+
 			"      docker compose logs app   (or your platform's log viewer)\n"+
 			"=======================================================================",
-			a.cfg.APIToken, expires)
+			origin, a.cfg.APIToken, a.cfg.APIToken, expires)
 	}
 }
 

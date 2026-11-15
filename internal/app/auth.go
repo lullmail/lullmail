@@ -224,6 +224,11 @@ func (a *App) clearCookie(w http.ResponseWriter, name string) {
 }
 
 func (a *App) authenticateRequest(r *http.Request) (string, string, error) {
+	// A demo has one made-up owner and no credentials: every visitor is it.
+	if a.config().Demo {
+		uid, err := a.firstUserID(r.Context())
+		return uid, "demo", err
+	}
 	if cookie, err := r.Cookie(sessionCookie); err == nil && cookie.Value != "" {
 		hash := tokenHash(cookie.Value)
 		var uid string
@@ -324,6 +329,10 @@ func (a *App) requireAuth(next http.Handler) http.Handler {
 				return
 			}
 			writeProblem(w, http.StatusUnauthorized, "Unauthorized", "sign in to continue")
+			return
+		}
+		if a.config().Demo && !demoAllows(r) {
+			writeDemoRefusal(w)
 			return
 		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
@@ -456,7 +465,13 @@ func (a *App) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		via = a.sessionLoginMethod(r.Context(), session)
 	}
+	demo := a.config().Demo
+	if demo {
+		// No credential will ever exist; the setup wizard must not appear.
+		configured = true
+	}
 	status := map[string]any{
+		"demo":       demo,
 		"configured": configured, "authenticated": authenticated, "email": email,
 		"bootstrap_available": !configured && a.setupTokenValid(),
 		"passkey_supported":   a.webAuthn() != nil || a.config().RPID == "",

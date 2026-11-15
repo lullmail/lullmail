@@ -132,6 +132,21 @@ const exposureDismissed = signal(
   typeof sessionStorage !== "undefined" && sessionStorage.getItem("es-exposure-off") === "1"
 );
 
+/** A demo says so, always: the mail is made up, other visitors share it, and
+    the things that are switched off are switched off on purpose. */
+function DemoBanner() {
+  if (!authStatus.value?.demo) return null;
+  return (
+    <div class="nudge nudge-demo" role="status">
+      <span>
+        <strong>This is a demo.</strong> The mail is made up and it resets every fifteen minutes.
+        <span class="nudge-more"> Other visitors are in here too, and sending and connecting a mailbox are switched off.</span>
+      </span>
+      <a class="nudge-link" href="https://lullmail.com/#install" rel="noopener">Run your own</a>
+    </div>
+  );
+}
+
 function ExposureBanner() {
   if (!authStatus.value?.exposed || exposureDismissed.value) return null;
   return (
@@ -355,6 +370,7 @@ export default function App() {
         <SkipLink />
         <Topline classic={classic} />
         <div class="nudges">
+          <DemoBanner />
           <PasskeyNudge />
           <ExposureBanner />
         </div>
@@ -385,6 +401,7 @@ export default function App() {
         <SkipLink />
         <Topline classic={classic} />
         <div class="nudges">
+          <DemoBanner />
           <PasskeyNudge />
           <ExposureBanner />
         </div>
