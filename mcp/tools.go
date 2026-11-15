@@ -547,12 +547,14 @@ func registerTools(s *mcp.Server, c *client) {
 		Name: "update_account",
 		Description: "Change one mailbox's settings: sync_enabled pauses background sync, retention_days sets how " +
 			"long the local mirror keeps mail (0 = forever), backfill_days sets how much history the product " +
-			"organizes (0 = all history). Only the fields you pass change.",
+			"organizes (0 = all history), outreach marks a mailbox a machine sends from so its sent mail lists " +
+			"under the outreach bucket instead of sent. Only the fields you pass change.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
 		AccountID     string `json:"account_id" jsonschema:"account id from list_accounts"`
 		SyncEnabled   *bool  `json:"sync_enabled,omitempty" jsonschema:"pause or resume background sync"`
 		RetentionDays *int   `json:"retention_days,omitempty" jsonschema:"local mirror retention in days, 0 = forever"`
 		BackfillDays  *int   `json:"backfill_days,omitempty" jsonschema:"days of history to organize, 0 = all history"`
+		Outreach      *bool  `json:"outreach,omitempty" jsonschema:"true lists this mailbox's sent mail under outreach instead of sent"`
 	}) (*mcp.CallToolResult, any, error) {
 		if args.AccountID == "" {
 			return nil, nil, errArgs("account_id is required")
@@ -580,8 +582,15 @@ func registerTools(s *mcp.Server, c *client) {
 			}
 			results = append(results, "backfill: "+string(out))
 		}
+		if args.Outreach != nil {
+			out, err := c.postQuery(ctx, base, map[string]bool{"outreach": *args.Outreach}, url.Values{"op": {"outreach"}})
+			if err != nil {
+				return nil, nil, err
+			}
+			results = append(results, "outreach: "+string(out))
+		}
 		if len(results) == 0 {
-			return nil, nil, errArgs("pass at least one of sync_enabled, retention_days, backfill_days")
+			return nil, nil, errArgs("pass at least one of sync_enabled, retention_days, backfill_days, outreach")
 		}
 		return text([]byte(strings.Join(results, "\n")), nil)
 	})
