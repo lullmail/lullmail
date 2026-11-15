@@ -196,3 +196,38 @@ func TestIntegrationUndoSnapshotAboveSmallMutationBudget(t *testing.T) {
 		t.Fatalf("restore: %d %+v", code, response)
 	}
 }
+
+// Filing a thread leaves the owner's sent rows alone. They used to be moved
+// with it and then moved back by the classifier's next pass, and that second
+// write made Undo answer 409 two minutes after any move of a thread the
+// owner had replied in.
+func TestIntegrationThreadMoveLeavesSentRowsAndUndoSurvivesAClassifyPass(t *testing.T) {
+	p := newProductPG(t)
+	msg, _ := seedSnoozeTarget(t, p)
+	ctx := context.Background()
+	reply := mail.NativeMessageID(mail.ProviderIMAP, "owner-reply")
+	if err := p.app.store.PutEnvelopes(ctx, "snooze-acct", []mail.Envelope{{ID: reply, ThreadID: "thread-snooze"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.db.ExecContext(ctx, `INSERT INTO hey_messages(user_id,account_id,message_id,bucket,read_at) VALUES($1,'snooze-acct',$2,'sent',now())`, p.uid, string(reply)); err != nil {
+		t.Fatal(err)
+	}
+	code, response := actionRequest(t, p, msg, `{"action":"feed"}`)
+	if code != 200 {
+		t.Fatalf("move: %d %+v", code, response)
+	}
+	var bucket string
+	if err := p.db.QueryRowContext(ctx, `SELECT bucket FROM hey_messages WHERE user_id=$1 AND message_id=$2`, p.uid, string(reply)).Scan(&bucket); err != nil {
+		t.Fatal(err)
+	}
+	if bucket != "sent" {
+		t.Fatalf("the owner's reply moved to %q with the thread; want it left in sent", bucket)
+	}
+	if err := p.app.classifyUser(ctx, p.uid); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{"action": "restore", "undo_token": response["undo_token"]})
+	if code, body := actionRequest(t, p, msg, string(raw)); code != 200 {
+		t.Fatalf("undo after a classify pass: %d %+v", code, body)
+	}
+}

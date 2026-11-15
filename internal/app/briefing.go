@@ -44,13 +44,10 @@ func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, 
 	// The user's own addresses, for whose-turn analysis.
 	myAddr := map[string]bool{}
 	{
-		myQuery := `SELECT lower(address) FROM email_accounts WHERE user_id = $1`
-		myArgs := []any{uid}
-		if account != "" {
-			myQuery += ` AND id = $2`
-			myArgs = append(myArgs, account)
-		}
-		rows, err := a.db.QueryContext(ctx, myQuery, myArgs...)
+		// Every address, whatever the mailbox lens: who counts as "me" must
+		// not change with the view, or mail the owner sent from one mailbox
+		// to another "needs you" under one lens and not under the other.
+		rows, err := a.db.QueryContext(ctx, `SELECT lower(address) FROM email_accounts WHERE user_id = $1`, uid)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -79,7 +76,16 @@ func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, 
 	listQuery := `
 		SELECT DISTINCT ON (m.account_id, m.thread_id)
 		       m.account_id, m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at, COALESCE(m.preview,''),
-		       COALESCE(m.to_addrs,'[]'), COALESCE(h.bucket,'')
+		       COALESCE(m.to_addrs,'[]'), COALESCE(h.bucket,''),
+		       -- Someone else has written since, in a bucket this list does
+		       -- not consider (Reading, Receipts, the Screener): the owner is
+		       -- no longer the one waiting.
+		       EXISTS (SELECT 1 FROM mail_messages o
+		               LEFT JOIN hey_messages ho ON ho.account_id = o.account_id AND ho.message_id = o.id AND ho.user_id = $1
+		               WHERE o.account_id = m.account_id AND o.thread_id = m.thread_id
+		                 AND o.received_at > m.received_at
+		                 AND COALESCE(ho.bucket,'') <> 'dropped'
+		                 AND lower(COALESCE(o.from_addrs,'[]')::json->0->>'email') <> ALL ($2)` + discardedFilter("o") + `)
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
@@ -89,7 +95,7 @@ func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, 
 		  AND EXISTS (
 		    SELECT 1 FROM mail_messages mi
 		    JOIN hey_messages hi ON hi.account_id = mi.account_id AND hi.message_id = mi.id AND hi.user_id = $1
-		    WHERE mi.account_id = m.account_id AND mi.thread_id = m.thread_id AND hi.bucket = 'imbox')` + discardedFilter("m")
+		    WHERE mi.account_id = m.account_id AND mi.thread_id = m.thread_id AND hi.bucket = 'imbox'` + discardedFilter("mi") + `)` + discardedFilter("m")
 	listArgs := []any{uid, addrList(myAddr)}
 	if account != "" {
 		listQuery += ` AND ea.id = $3`
@@ -158,7 +164,8 @@ func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, 
 		var bt briefThread
 		var fromJSON, toJSON, bucket string
 		var received *time.Time
-		if err := rows.Scan(&bt.Account, &bt.ThreadID, &bt.MessageID, &bt.Subject, &fromJSON, &received, &bt.Preview, &toJSON, &bucket); err != nil {
+		var answered bool
+		if err := rows.Scan(&bt.Account, &bt.ThreadID, &bt.MessageID, &bt.Subject, &fromJSON, &received, &bt.Preview, &toJSON, &bucket, &answered); err != nil {
 			return nil, nil, err
 		}
 		if received != nil {
@@ -171,7 +178,7 @@ func (a *App) briefThreads(ctx context.Context, uid, account string) (needsYou, 
 		switch {
 		case !fromMe && bucket == "imbox" && !readState[bt.Account+"\x00"+bt.MessageID]:
 			needsYou = append(needsYou, bt)
-		case fromMe && spoke[bt.Account+"\x00"+bt.ThreadID][0] && spoke[bt.Account+"\x00"+bt.ThreadID][1]:
+		case fromMe && !answered && spoke[bt.Account+"\x00"+bt.ThreadID][0] && spoke[bt.Account+"\x00"+bt.ThreadID][1]:
 			// My move was the last one and someone else is in the thread.
 			// Their turn — and if it stays theirs for long, this is the nudge.
 			bt.WaitingOn = firstOtherRecipient(toJSON, myAddr)

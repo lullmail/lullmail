@@ -39,6 +39,17 @@ func TestIntegrationWaitingCountsTheOwnersSentOnlyReply(t *testing.T) {
 	// Outreach nobody answered: no Imbox mail in the thread, so not a card.
 	msg("c1", "cold", "Sent", "sent", me, `[{"email":"stranger@else.test"}]`, "2026-10-03 10:00:00")
 
+	// The owner answered, then the answer came from a sender routed to
+	// Reading: an answer arrived, so the owner is not waiting.
+	msg("d1", "elsewhere", "INBOX", "imbox", ari, me, "2026-10-04 10:00:00")
+	msg("d2", "elsewhere", "Sent", "sent", me, ari, "2026-10-04 11:00:00")
+	msg("d3", "elsewhere", "INBOX", "feed", cara, me, "2026-10-04 12:00:00")
+	// The owner answered, then deleted their message in another client: the
+	// only Imbox mail in the thread is in Trash, so there is nothing to wait on.
+	exec(`INSERT INTO mail_mailboxes(account_id,id,name,role,native) VALUES('outbox-acct','Trash','Trash','trash','Trash')`)
+	msg("e1", "binned", "Trash", "imbox", ari, me, "2026-10-05 10:00:00")
+	msg("e2", "binned", "Sent", "sent", me, ari, "2026-10-05 11:00:00")
+
 	needs, waiting, err := p.app.briefThreads(context.Background(), p.uid, "")
 	if err != nil {
 		t.Fatal(err)

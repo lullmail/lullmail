@@ -237,15 +237,25 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 	// Sent mail filed anywhere else repairs on every pass, like the other
 	// self-heals — which is also the migration: rows the classifier put in
 	// the Imbox before 2026-10-28, or in Receipts before 'sent' existed,
-	// move on the first pass after an upgrade. Two things are left alone:
-	// a 'dropped' row keeps its block decision, and a snoozed row stays
-	// snoozed with its thread until it comes back.
+	// move on the first pass after an upgrade. Three things are left alone:
+	// a 'dropped' row keeps its block decision; a snoozed row stays snoozed
+	// with its thread until it comes back; and a returned snooze of a thread
+	// nobody else has written in stays in the Imbox — the owner snoozed
+	// their own unanswered mail as a follow-up reminder, and filing it
+	// straight back under Sent would make the reminder vanish. (The sweep
+	// leaves set_aside_until on a returned row; any later move clears it.)
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE hey_messages h SET bucket = 'sent', read_at = COALESCE(h.read_at, now())
 		FROM mail_messages m
 		WHERE h.user_id = $1
 		  AND h.bucket NOT IN ('sent', 'dropped', 'set_aside', 'later')
 		  AND h.account_id = m.account_id AND h.message_id = m.id
+		  AND (h.set_aside_until IS NULL
+		       OR EXISTS (SELECT 1 FROM mail_messages other
+		                  WHERE other.account_id = m.account_id AND other.thread_id = m.thread_id
+		                    AND NOT EXISTS (SELECT 1 FROM email_accounts o2
+		                                    WHERE o2.user_id = $1
+		                                      AND lower(o2.address) = lower(COALESCE(other.from_addrs, '[]')::json->0->>'email'))))
 		  AND (EXISTS (SELECT 1 FROM mail_message_mailboxes sm
 		               JOIN mail_mailboxes sb ON sb.account_id = sm.account_id AND sb.id = sm.mailbox_id
 		               WHERE sm.account_id = m.account_id AND sm.message_id = m.id AND sb.role = 'sent')
@@ -255,6 +265,20 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		  AND NOT EXISTS (SELECT 1 FROM mail_message_mailboxes nm
 		                  JOIN mail_mailboxes nb ON nb.account_id = nm.account_id AND nb.id = nm.mailbox_id
 		                  WHERE nm.account_id = m.account_id AND nm.message_id = m.id AND nb.role = 'inbox')`, uid); err != nil {
+		return err
+	}
+	// And back the other way. Folders sync one at a time, so a note to self
+	// (or a Bcc to self) can be classified while only its Sent or All Mail
+	// copy has landed — filed as sent and read. Once the Inbox copy arrives
+	// it is mail that was received: it returns to the Imbox, unread.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE hey_messages h SET bucket = 'imbox', read_at = NULL
+		FROM mail_messages m
+		WHERE h.user_id = $1 AND h.bucket = 'sent'
+		  AND h.account_id = m.account_id AND h.message_id = m.id
+		  AND EXISTS (SELECT 1 FROM mail_message_mailboxes nm
+		              JOIN mail_mailboxes nb ON nb.account_id = nm.account_id AND nb.id = nm.mailbox_id
+		              WHERE nm.account_id = m.account_id AND nm.message_id = m.id AND nb.role = 'inbox')`, uid); err != nil {
 		return err
 	}
 	// Malformed-From mail parked in 'screener' before the rule above existed
@@ -1506,9 +1530,16 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 	case "imbox", "paper_trail", "feed", "later", "screener":
 		// Leaving set_aside must drop the return date too, or the Snoozed
 		// list shows a stale (possibly past) promise the message no longer keeps.
+		// The owner's own sent rows stay where they are when a thread is
+		// filed: the classifier would only move them back to 'sent' on its
+		// next pass, and that second write is what made Undo answer "State
+		// Changed" two minutes after any move of a thread the owner had
+		// replied in. "later" is a snooze, and a snooze takes the whole
+		// thread with it.
 		q = `UPDATE hey_messages h SET bucket=$4, set_aside_until=NULL FROM mail_messages m
 		     WHERE h.user_id=$1 AND h.account_id=$2 AND h.account_id=m.account_id
-		       AND h.message_id=m.id AND m.thread_id=$3`
+		       AND h.message_id=m.id AND m.thread_id=$3
+		       AND (h.bucket <> 'sent' OR $4 = 'later')`
 		args = []any{uid, acct, thread, req.Action}
 	case "set_aside":
 		until, someday, problem := parseSnoozeUntil()

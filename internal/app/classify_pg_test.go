@@ -232,3 +232,62 @@ func TestSentMailHasItsOwnPlace(t *testing.T) {
 		t.Errorf("sent list = %+v; want the one sent thread with its recipient", page.Rows)
 	}
 }
+
+// A note to self classified while only its Sent copy had synced comes back
+// to the Imbox, unread, once the Inbox copy lands.
+func TestSentMailReturnsToTheImboxWhenItsInboxCopyArrives(t *testing.T) {
+	pg := newProductPG(t)
+	ctx := context.Background()
+	seedClassifyFixture(t, pg.db, pg.uid)
+	mustClassifyExec(t, pg.db, `DELETE FROM mail_message_mailboxes WHERE message_id='m-selfcopy' AND mailbox_id='mb-in'`)
+	if err := pg.app.classifyUser(ctx, pg.uid); err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if got := bucketOf(t, pg.db, "m-selfcopy"); got != "sent" {
+		t.Fatalf("Sent-only copy bucketed %q; want sent", got)
+	}
+	mustClassifyExec(t, pg.db, `INSERT INTO mail_message_mailboxes (account_id, message_id, mailbox_id) VALUES ('acct-1','m-selfcopy','mb-in')`)
+	if err := pg.app.classifyUser(ctx, pg.uid); err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	var bucket string
+	var read bool
+	if err := pg.db.QueryRow(`SELECT bucket, read_at IS NOT NULL FROM hey_messages WHERE message_id='m-selfcopy'`).Scan(&bucket, &read); err != nil {
+		t.Fatal(err)
+	}
+	if bucket != "imbox" || read {
+		t.Errorf("after its Inbox copy arrived: bucket=%q read=%v; want imbox, unread", bucket, read)
+	}
+}
+
+// A snoozed thread nobody else has written in is a follow-up reminder: when
+// the snooze returns it to the Imbox it must stay there, not be filed
+// straight back under Sent.
+func TestReturnedSnoozeOfTheOwnersOwnMailStaysInTheImbox(t *testing.T) {
+	pg := newProductPG(t)
+	ctx := context.Background()
+	seedClassifyFixture(t, pg.db, pg.uid)
+	mustClassifyExec(t, pg.db,
+		`INSERT INTO mail_messages (account_id, id, thread_id, subject, received_at, from_addrs, to_addrs)
+		 VALUES ('acct-1', 'm-nudge', 't-nudge', 's', now(), '[{"email":"tyler@dreamlucidmail.com"}]', '[{"email":"quiet@else.test"}]')`)
+	mustClassifyExec(t, pg.db, `INSERT INTO mail_message_mailboxes (account_id, message_id, mailbox_id) VALUES ('acct-1','m-nudge','mb-sent')`)
+	if err := pg.app.classifyUser(ctx, pg.uid); err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	// Snoozed, and its day has come.
+	mustClassifyExec(t, pg.db, `UPDATE hey_messages SET bucket='set_aside', set_aside_until=now() - interval '1 minute' WHERE message_id IN ('m-nudge','m-sent')`)
+	if err := pg.app.sweepSnoozed(ctx, pg.uid, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := pg.app.classifyUser(ctx, pg.uid); err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if got := bucketOf(t, pg.db, "m-nudge"); got != "imbox" {
+		t.Errorf("returned reminder bucketed %q; want imbox", got)
+	}
+	// A reply that came back with a thread someone else wrote in is still
+	// sent mail, not an arrival.
+	if got := bucketOf(t, pg.db, "m-sent"); got != "sent" {
+		t.Errorf("returned reply in an answered thread bucketed %q; want sent", got)
+	}
+}
