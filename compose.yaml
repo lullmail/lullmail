@@ -1,14 +1,24 @@
-# Self-host with no configuration:
+# Self-host with no configuration. This file is all you need — it runs the
+# published image, so there is nothing to clone or build:
+#
+#   curl -fsSLO https://raw.githubusercontent.com/lullmail/lullmail/main/compose.yaml
 #   docker compose up -d
-#   docker compose logs app        <- one-time setup token (valid 24h)
-#   open http://localhost:8080     <- paste token, set a password (or a passkey), done
+#   docker compose logs app        <- one-time setup link (valid 24h)
+#
+# Open the link, pick a name and password, done. To upgrade later:
+#
+#   docker compose pull && docker compose up -d
+#
+# Pin a release by setting LULL_VERSION (e.g. LULL_VERSION=v0.2.0); the
+# default follows the latest build of main. To build from a checkout instead
+# of pulling: docker compose -f compose.yaml -f compose.build.yaml up -d --build
 #
 # SECRET_KEY and the setup token are generated on first boot and kept in the
 # appdata volume. Every env var below is optional and overrides the generated
 # value — see the README env table.
 services:
   app:
-    build: .
+    image: ghcr.io/lullmail/lullmail:${LULL_VERSION:-latest}
     ports:
       - "8080:8080"
     environment:

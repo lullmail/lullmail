@@ -63,21 +63,50 @@ tenancy, no campaign-sending infrastructure.
 
 ## Quickstart (self-host)
 
-No configuration required:
+Want to look first? There is a demo on made-up mail linked from
+[lullmail.com](https://lullmail.com).
+
+**Docker.** One file, nothing to clone or build:
 
 ```
+curl -fsSLO https://raw.githubusercontent.com/lullmail/lullmail/main/compose.yaml
 docker compose up -d
-docker compose logs app      # one-time setup token, valid 24h
+docker compose logs app      # prints a one-time setup link, valid 24h
 ```
 
-Open `http://localhost:8080` and finish setup in the browser: paste the
-token, pick a name and password (or create a passkey instead), save the
-recovery codes. The token stops authenticating the moment the first
-credential exists. You can sign in with that name or the account email.
+Open the link, pick a name and password (or create a passkey instead), save
+the recovery codes. The link stops working the moment the first credential
+exists. You can sign in with that name or the account email. This serves
+plain HTTP on port 8080: keep it on localhost or a private network, or put
+your own HTTPS proxy in front.
 
-Deploying with [teploy](https://teploy.com) instead of raw Docker? A
-template `teploy.yml` is committed — point `server:` at a host from your
-`~/.teploy/servers.yml` and `teploy deploy <server>`.
+**[teploy](https://teploy.com).** A domain with automatic HTTPS on any Linux
+server you can SSH into, in two commands:
+
+```
+teploy setup <server>          # once per server: Docker, Caddy, firewall
+teploy template install lullmail --server <server> \
+  --domain mail.example.com --var db_password=$(openssl rand -hex 16)
+teploy logs --app lullmail --host <server>     # the setup link
+```
+
+Prefer to keep the deploy config in your own repo? A template `teploy.yml`
+is committed — point `server:` at a host from your `~/.teploy/servers.yml`
+and `teploy deploy <server>`.
+
+**Upgrading.** Releases are listed on
+[GitHub](https://github.com/lullmail/lullmail/releases); nothing phones
+home, so the app will not tell you one exists. Migrations run at boot.
+
+```
+docker compose pull && docker compose up -d
+```
+
+With teploy, redeploy the app with the same `db_password` you installed with
+— a new one would not match the database already on the server.
+
+To stay on a known version, set `LULL_VERSION=v0.2.0` for Docker (the
+compose file defaults to the latest build of `main`).
 
 `SECRET_KEY` (seals credentials) and the setup token are generated on first
 boot and kept in the `appdata` volume; the browser origin is detected from
@@ -122,6 +151,7 @@ recovery codes are opt-in additions, not requirements.
 | `PREFETCH_BODIES` | no | `1` (default) fetches bodies of the last 30 days of mail during sync so opening recent mail is local; `0` fetches a body only when its thread is opened. |
 | `WEBAUTHN_RP_ID` | no | Relying-party domain; derived from the effective origin. |
 | `PORT` / `ADDR` | no | Defaults to `:8080`. |
+| `LULL_DEMO` | no | `1` turns the install into a public showroom on made-up mail: no sign-in, most changes refused. Never set it on an install that holds real mail. See [`tools/demo/`](tools/demo/). |
 
 Optional Google: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`. Redirect URI:
 `$PUBLIC_URL/api/oauth/google/callback`. Required scopes are `gmail.modify`

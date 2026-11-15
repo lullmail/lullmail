@@ -14,6 +14,8 @@ export const authReady = signal(false);
 export const unreachable = signal(false);
 
 export interface AuthStatus {
+  /** A public showroom on made-up mail: no sign-in, most changes refused. */
+  demo?: boolean;
   configured: boolean;
   authenticated: boolean;
   email: string;

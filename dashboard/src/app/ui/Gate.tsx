@@ -186,6 +186,31 @@ export function Gate() {
   );
 }
 
+// The server logs a one-time setup link ending in #setup=<token>. The token
+// is read from the fragment (which never left this browser) and the fragment
+// removed at once, so it is not left in the address bar or the history
+// entry. It then waits in sessionStorage — this tab only, gone when the tab
+// closes — because a first visit reloads itself once when the offline worker
+// installs, and the gate remounts while sign-in status loads; neither
+// component state nor a module variable survives both.
+const LINKED_SETUP_KEY = "es-setup-link";
+function takeLinkedSetupToken(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    const match = /^#setup=([A-Za-z0-9_-]{16,200})$/.exec(window.location.hash);
+    if (match) {
+      sessionStorage.setItem(LINKED_SETUP_KEY, match[1]);
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
+    return sessionStorage.getItem(LINKED_SETUP_KEY) || "";
+  } catch {
+    return ""; // storage blocked: the paste field still works
+  }
+}
+function forgetLinkedSetupToken() {
+  try { sessionStorage.removeItem(LINKED_SETUP_KEY); } catch { /* nothing stored */ }
+}
+
 function SetupWizard({ status }: { status: AuthStatus }) {
   const [step, setStep] = useState(0);
   const [token, setToken] = useState("");
@@ -197,6 +222,14 @@ function SetupWizard({ status }: { status: AuthStatus }) {
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
 
   const goTo = (next: number) => { setError(""); setStep(next); };
+
+  // Arriving by the setup link: the token is already here, so skip the paste.
+  useEffect(() => {
+    const linked = takeLinkedSetupToken();
+    if (!linked) return;
+    setToken(linked);
+    setStep(2);
+  }, []);
 
   const enterToken = (ev: Event) => {
     ev.preventDefault();
@@ -212,6 +245,7 @@ function SetupWizard({ status }: { status: AuthStatus }) {
     try {
       const result = await authApi<{ recovery_codes: string[] }>("/auth/bootstrap/password", { body: { name: name.trim(), password } }, token.trim());
       setPassword("");
+      forgetLinkedSetupToken(); // spent: the token died with the first credential
       setRecoveryCodes(result.recovery_codes);
       setError("");
       setStep(3);

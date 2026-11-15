@@ -7,6 +7,8 @@ import (
 )
 
 type Config struct {
+	// Demo makes this a public showroom on made-up mail (see demo.go).
+	Demo                  bool
 	Addr                  string
 	DatabaseURL           string
 	SecretKey             string
@@ -61,7 +63,9 @@ func loadConfig() *Config {
 	if vapidSubject == "" && ownerEmail != "" {
 		vapidSubject = "mailto:" + ownerEmail
 	}
+	demo := strings.TrimSpace(os.Getenv("LULL_DEMO"))
 	return &Config{
+		Demo:                  demo == "1" || strings.EqualFold(demo, "true"),
 		Addr:                  addr,
 		DatabaseURL:           os.Getenv("DATABASE_URL"),
 		SecretKey:             strings.TrimSpace(os.Getenv("SECRET_KEY")),
