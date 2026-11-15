@@ -37,7 +37,7 @@ export function head() {
 
 // The public demo, once one is deployed. Empty hides every link to it, so
 // the page never points at something that is not there.
-const DEMO_URL = "";
+const DEMO_URL = "https://demo.lullmail.com";
 
 const DOCKER = `curl -fsSLO https://raw.githubusercontent.com/lullmail/lullmail/main/compose.yaml
 docker compose up -d
