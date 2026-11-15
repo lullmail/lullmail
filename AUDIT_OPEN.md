@@ -1099,3 +1099,61 @@ upstream-engine gates remain external.
   for send and act explicitly). Existing rows, the migration-v12 column
   default, and rotation (inherits the predecessor's scopes) are unchanged.
   docs/agent-tokens-contract.md decision 1 updated.
+
+## Independent review round (2026-11-14) — all findings FIXED
+
+Three scoped read-only reviews (auth and HTTP boundary; mail classification
+and derivation; the dashboard client) ran against `3cc7ff1` plus the Sent
+bucket work. Nothing below is open; this entry records what was found so a
+later round does not rediscover it. No report file exists for this round —
+the findings were delivered in session and are summarised here.
+
+Mail data (`internal/app/classify.go`, `briefing.go`):
+
+- **A snoozed sent-only thread never came back.** The sweep returned it to
+  the Imbox and the classifier's heal filed it under Sent on the next pass.
+  FIXED: the heal leaves a returned snooze alone when nobody else has
+  written in the thread.
+- **Owner mail classified mid-sync stayed filed as sent.** A note to self
+  whose Sent copy synced first was marked sent and read, and nothing moved
+  it back when the Inbox copy landed. FIXED: a reverse heal returns sent
+  rows with Inbox membership to the Imbox, unread.
+- **Undo of a thread move answered 409 after a classify pass.** The move
+  rewrote the owner's sent rows, the heal rewrote them back, and the
+  revision check failed. FIXED: bucket moves leave `sent` rows alone
+  (a snooze still takes the whole thread).
+- **"You're waiting" ignored answers outside the Imbox, and trashed mail.**
+  FIXED: the thread's Imbox mail must not be in Trash, and a later message
+  from anyone else in any non-blocked bucket ends the wait.
+- **The mailbox lens changed who counted as the owner.** FIXED: every
+  owner address is loaded regardless of the lens.
+
+Auth (`internal/app/auth.go`, `password.go`, `reauth.go`):
+
+- **Sign-in endpoints revealed whether a login name exists**, four ways:
+  differing recovery-code text; 429 "Busy" for a known name vs 401 for an
+  unknown one under KDF saturation; one lock bucket shared by every unknown
+  name; a TOTP budget only real names could exhaust. FIXED: one recovery
+  message; the dummy verify reports saturation and answers Busy; unknown
+  names hold their own (digested, capped) lock and TOTP state.
+- **First-run setup routes were outside the per-host limiter.** Only
+  exploitable with an operator-chosen short `LULL_TOKEN`. FIXED: the three
+  bootstrap handlers are throttled, and a wrong setup bearer is charged.
+
+Dashboard (`dashboard/src/app/`):
+
+- **A `<template data-mail-body>` in a message's head returned the mail
+  unsanitized** (links, forms, handlers, remote images uncounted). The
+  reading frame's sandbox and CSP still held — no script ran and no image
+  loaded — but the sanitizer was bypassed as a layer. FIXED: wrappers are
+  taken by position, opaque containers (`template`, `noscript`, raw-text
+  relics) are removed, and stray marker attributes are stripped.
+- **The phone's More sheet did not fence global shortcuts or focus.** FIXED:
+  it counts as an overlay and keeps Tab inside.
+- **A Trash inside its undo window was lost on sign-out.** FIXED: sign-out
+  flushes pending moves first.
+- **"Always load images for this sender" survived sign-out.** FIXED: it is
+  cleared with the rest of the owner's local state.
+- Swipe-to-Done slid the row away and back; a second finger stranded a row
+  mid-swipe; tapping the current tab left the sheet open; a toast covered
+  the docked bulk bar. All FIXED.

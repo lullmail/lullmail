@@ -955,6 +955,13 @@ export function resetPrivateState(): void {
   accountFilter.value = "";
   counts.value = {};
   mailboxes.value = [];
+  // "Always load images for this sender" is the owner's decision and names
+  // who they correspond with. It leaves with the session like everything
+  // else here, or the next person to sign in on this browser inherits it —
+  // remote images would load for them unasked.
+  imageSenders.value = new Set();
+  try { localStorage.removeItem(imageSenderKey); } catch { /* privacy mode */ }
+  moreSheet.value = false;
   privateStateVersion.value++;
 }
 
@@ -972,9 +979,14 @@ export const shortcuts = signal<boolean>(false);
 /** Rows awaiting a date choice from the global keyboard snooze command. */
 export const snoozePickerRows = signal<Row[]>([]);
 
+/** The phone's More sheet. Held here, not in the tab bar, so it counts as
+    an overlay: while it is up, single-key verbs must not reach the list
+    lying behind its veil. */
+export const moreSheet = signal<boolean>(false);
+
 /** True when a modal surface owns the keyboard. */
 export const overlayOpen = computed(
-  () => palette.value || shortcuts.value || composeOpen.value || snoozePickerRows.value.length > 0
+  () => palette.value || shortcuts.value || composeOpen.value || snoozePickerRows.value.length > 0 || moreSheet.value
 );
 
 /* ---- list-column search ---- */

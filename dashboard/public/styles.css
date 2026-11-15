@@ -127,7 +127,7 @@
   --raise: #0f170f;
   --ink: #b8f5b4;
   --ink-2: #7ccf7c;
-  --ink-3: #559355;
+  --ink-3: #599959;
   --line: #142014;
   --line-strong: #233423;
   --hover: #121c12;
@@ -152,7 +152,7 @@
   --raise: #1e170b;
   --ink: #f2c078;
   --ink-2: #c99a56;
-  --ink-3: #a17e49;
+  --ink-3: #a4804a;
   --line: #241b0f;
   --line-strong: #38301c;
   --hover: #1d150a;
@@ -177,7 +177,7 @@
   --raise: #3b4252;
   --ink: #eceff4;
   --ink-2: #d1d9e4;
-  --ink-3: #9aa7bb;
+  --ink-3: #b5becd;
   --line: #3b4252;
   --line-strong: #4c566a;
   --hover: #3f4859;
@@ -202,7 +202,7 @@
   --raise: #343849;
   --ink: #f8f8f2;
   --ink-2: #ced0e0;
-  --ink-3: #919bc1;
+  --ink-3: #aab2cf;
   --line: #3a3d4e;
   --line-strong: #4d5268;
   --hover: #383b4b;
@@ -251,13 +251,15 @@
   --panel: #fffdf4;
   --raise: #f2ead2;
   --ink: #2c3f45;
-  --ink-2: #586e75;
-  --ink-3: #586e74;
+  --ink-2: #54696f;
+  --ink-3: #54686e;
   --line: #e9e0c8;
   --line-strong: #d3cab0;
   --hover: #f4ecd6;
   --sel: #efe6cb;
-  --accent: #b58900;
+  /* Solarized's own yellow (#b58900) is 3.0:1 on this ground. Same hue,
+     darkened until it clears AA on the page, panels and its own tint. */
+  --accent: #7f6000;
   --accent-ink: #fffbef;
   --accent-soft: #f0e4bd;
   --danger: #cb4b16;
@@ -277,7 +279,7 @@
   --raise: #15345c;
   --ink: #dbe9ff;
   --ink-2: #b3cbef;
-  --ink-3: #7d9cc7;
+  --ink-3: #94add1;
   --line: #1c3a63;
   --line-strong: #2b4f80;
   --hover: #16335a;
@@ -302,12 +304,13 @@
   --raise: #eaf2fb;
   --ink: #16344f;
   --ink-2: #47617a;
-  --ink-3: #566f87;
+  --ink-3: #516980;
   --line: #c9dcef;
   --line-strong: #a8c4e0;
   --hover: #f0f6fd;
   --sel: #dbe9f8;
-  --accent: #2f7dc9;
+  /* #2f7dc9 was 3.8:1 on this ground; AA needs 4.5. */
+  --accent: #286bac;
   --accent-ink: #ffffff;
   --accent-soft: #dcebfa;
   --danger: #c0392b;
@@ -328,7 +331,7 @@
   --raise: #d8d4cc;
   --ink: #101010;
   --ink-2: #3c3c3c;
-  --ink-3: #555555;
+  --ink-3: #494949;
   --line: #b4b0a8;
   --line-strong: #8f8b84;
   --hover: #e6e2da;
@@ -355,7 +358,7 @@
   --raise: #2f1a52;
   --ink: #f4e9ff;
   --ink-2: #cdaef0;
-  --ink-3: #aa87da;
+  --ink-3: #b08fdc;
   --line: #3a1f63;
   --line-strong: #55307f;
   --hover: #351e5c;
@@ -756,6 +759,7 @@ main:focus { outline: none; }
   font-size: var(--t-base); font-weight: 680; color: var(--ink-2);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.row-to { font-weight: 520; color: var(--ink-3); }
 .row-meta { margin-left: auto; display: flex; align-items: center; gap: var(--sp-2); flex: none; }
 .row-date { font-size: var(--t-sm); color: var(--ink-3); font-weight: 520; }
 .row-mailbox, .digest-mailbox {
@@ -2161,6 +2165,8 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
   }
   .notice-stack { bottom: calc(var(--tabbar-h) + var(--sp-3)); }
   .page:has(.thread-bar) .notice-stack { bottom: calc(64px + env(safe-area-inset-bottom, 0px) + var(--sp-3)); }
+  /* The docked bulk bar takes the strip above the tabs; a toast goes above it. */
+  .page:has(.bulkbar) .notice-stack { bottom: calc(var(--tabbar-h) + 104px); }
 
   .tabbar {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 32;

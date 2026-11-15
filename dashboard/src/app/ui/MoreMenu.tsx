@@ -43,6 +43,10 @@ export function MoreMenu() {
       </button>
       {open && (
         <div class="menu menu-right" role="menu">
+          <button class="menu-item" type="button" role="menuitem" onClick={pick(() => navigate("/sent"))}>
+            <Icon name="reply" size={14} />
+            Sent
+          </button>
           <button class="menu-item" type="button" role="menuitem" onClick={pick(() => navigate("/outbox"))}>
             <Icon name="arrow" size={14} />
             Outbox

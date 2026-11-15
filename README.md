@@ -17,6 +17,9 @@ RFC 4155) is a table-stakes feature, not a cancellation flow.
   aging), what quietly arrived. "You're done." is a real state.
 - **Inbox / Reading / Receipts / Snoozed** — mail files itself by your
   sender rules; dated snoozes return to the Inbox on their day.
+- **Sent** — everything you have written, from here or any other client on
+  the mailbox, in one place of its own. Sent mail never lands in the Inbox
+  or Receipts; replies also stay with their thread.
 - **Board** — a personal kanban where the cards write themselves: unread
   Inbox mail is the to-do column, threads you answered are the waiting-on
   column, dated snoozes are the deferred pile. Pin anything; pins are

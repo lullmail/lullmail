@@ -2,7 +2,7 @@
 import { render } from "preact";
 import { act } from "preact/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { counts, screeningEnabled } from "../lib/store";
+import { counts, moreSheet, overlayOpen, screeningEnabled } from "../lib/store";
 import { path } from "../lib/router";
 import { markDone, openThread } from "../lib/actions";
 import { setList } from "../lib/store";
@@ -24,6 +24,7 @@ beforeEach(() => {
   document.body.append(host);
   path.value = "/";
   counts.value = { imbox: 3, screener: 2 };
+  moreSheet.value = false;
   screeningEnabled.value = true;
 });
 afterEach(() => { act(() => render(null, host)); host.remove(); vi.clearAllMocks(); });
@@ -64,6 +65,29 @@ describe("phone tab bar", () => {
     act(() => { path.value = "/notes"; });
     expect(host.querySelector("[role='dialog']")).toBeNull();
   });
+
+  it("counts as an overlay while open, keeps Tab inside, and closes when the current tab is tapped", () => {
+    mount(<TabBar />);
+    const more = tabs().at(-1) as HTMLButtonElement;
+    expect(overlayOpen.value).toBe(false);
+    act(() => more.click());
+    expect(overlayOpen.value).toBe(true);
+
+    const links = [...host.querySelectorAll<HTMLAnchorElement>("[role='dialog'] a")];
+    const tab = (shiftKey = false) => act(() => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey, bubbles: true, cancelable: true })); });
+    links.at(-1)!.focus();
+    tab();
+    expect(document.activeElement).toBe(more);
+    tab();
+    expect(document.activeElement).toBe(links[0]);
+    tab(true);
+    expect(document.activeElement).toBe(more);
+
+    // Inbox is the current place: no route change, so the tap itself closes.
+    act(() => { tabs()[1].dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); });
+    expect(host.querySelector("[role='dialog']")).toBeNull();
+    expect(overlayOpen.value).toBe(false);
+  });
 });
 
 describe("swipe a row to mark it done", () => {
@@ -92,11 +116,18 @@ describe("swipe a row to mark it done", () => {
     expect(el.classList.contains("swipe-armed")).toBe(true);
     pointer(el, "pointerup", 180, 103);
     act(() => el.click());
-    act(() => { vi.advanceTimersByTime(200); });
     expect(markDone).toHaveBeenCalledWith([row]);
     expect(openThread).not.toHaveBeenCalled();
+    // Done does not remove the row, so it settles back rather than sliding off.
     expect(el.style.getPropertyValue("--swipe")).toBe("");
     vi.useRealTimers();
+  });
+
+  it("names a Sent row by who it was written to", () => {
+    const sent: Row = { ...row, bucket: "sent", from: "Tyler <me@example.test>", to: "Ari Patel <ari@example.test>" };
+    setList({ kind: "rows", key: "s", rows: [sent], senders: [], origin: "sent", loading: false, error: null });
+    mount(<MsgList rows={[sent]} />);
+    expect(host.querySelector(".row-sender")!.textContent).toBe("To Ari Patel");
   });
 
   it("snaps back from a short drag, ignores a vertical one, and ignores a mouse", () => {
@@ -112,6 +143,16 @@ describe("swipe a row to mark it done", () => {
     pointer(el, "pointermove", 150, 160);
     expect(el.classList.contains("swiping")).toBe(false);
     pointer(el, "pointerup", 150, 160);
+
+    // A second finger landing mid-swipe neither takes over nor strands the row.
+    pointer(el, "pointerdown", 300, 100);
+    pointer(el, "pointermove", 250, 100);
+    const second = new MouseEvent("pointerdown", { bubbles: true, cancelable: true, clientX: 200, clientY: 100 });
+    Object.defineProperties(second, { pointerId: { value: 2 }, pointerType: { value: "touch" } });
+    act(() => { el.dispatchEvent(second); });
+    pointer(el, "pointerup", 250, 100);
+    expect(el.style.getPropertyValue("--swipe")).toBe("");
+    expect(el.classList.contains("swiping")).toBe(false);
 
     pointer(el, "pointerdown", 300, 100, "mouse");
     pointer(el, "pointermove", 100, 100, "mouse");

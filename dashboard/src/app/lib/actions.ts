@@ -18,6 +18,7 @@ export const BUCKET_LABEL: Record<ListBucket, string> = {
   screener: "Screener",
   feed: "Reading",
   paper_trail: "Receipts",
+  sent: "Sent",
   snoozed: "Snoozed",
   set_aside: "Snoozed",
   later: "Snoozed",
@@ -140,6 +141,8 @@ function originOf(row: Row): Bucket {
   if (own && own !== ("snoozed" as unknown as Bucket)) return own;
   const origin = list.value.origin;
   if (!origin || origin === "snoozed") return "set_aside";
+  // Sent is a place to look, not one a thread can be filed into.
+  if (origin === "sent") return "imbox";
   return origin;
 }
 
@@ -255,6 +258,14 @@ export function trashThreads(rows: Row[]) {
     release();
     reload();
   }, TRASH_UNDO_MS);
+}
+
+/** Sends every Trash still inside its undo window, and waits for them.
+    Sign-out must call this first: a move left on its timer fires after the
+    session is gone and is silently lost — or goes out under whoever signs in
+    next. */
+export async function flushPendingTrash(): Promise<void> {
+  await Promise.all([...pendingTrash].map((commit) => commit()));
 }
 
 if (typeof window !== "undefined") {

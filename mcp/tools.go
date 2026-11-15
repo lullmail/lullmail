@@ -99,18 +99,18 @@ func registerTools(s *mcp.Server, c *client) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "list_bucket",
 		Description: "List threads in a bucket view. Buckets: screener (new senders awaiting a decision), " +
-			"imbox (allowed in), paper_trail, feed, snoozed, set_aside, later. Pages of `limit` threads " +
+			"imbox (allowed in), paper_trail, feed, sent (mail the owner sent; rows carry `to`), snoozed, set_aside, later. Pages of `limit` threads " +
 			"(default 50, max 200): the answer carries rows, has_more, and next_cursor — pass next_cursor " +
 			"back as cursor to fetch the next page; pages stay stable while new mail arrives.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
-		Bucket string `json:"bucket" jsonschema:"screener|imbox|paper_trail|feed|snoozed|set_aside|later"`
+		Bucket string `json:"bucket" jsonschema:"screener|imbox|paper_trail|feed|sent|snoozed|set_aside|later"`
 		Limit  int    `json:"limit,omitempty" jsonschema:"page size 1-200; default 50"`
 		Cursor string `json:"cursor,omitempty" jsonschema:"next_cursor value from a previous page"`
 	}) (*mcp.CallToolResult, any, error) {
 		switch args.Bucket {
-		case "screener", "imbox", "paper_trail", "feed", "snoozed", "set_aside", "later":
+		case "screener", "imbox", "paper_trail", "feed", "sent", "snoozed", "set_aside", "later":
 		default:
-			return nil, nil, errArgs("bucket must be one of screener, imbox, paper_trail, feed, snoozed, set_aside, later")
+			return nil, nil, errArgs("bucket must be one of screener, imbox, paper_trail, feed, sent, snoozed, set_aside, later")
 		}
 		query := url.Values{}
 		if args.Limit > 0 {

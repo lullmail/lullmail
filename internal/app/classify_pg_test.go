@@ -2,7 +2,7 @@ package app
 
 // Real-PostgreSQL coverage for the sent-mail classification rule: a
 // message the provider filed only in the owner's Sent folder is
-// reference, never an Imbox arrival — even though the owner's own
+// filed under Sent, never an Imbox arrival — even though the owner's own
 // address is always a correspondent, which is what let machine-sent
 // mail (cold outreach, API sends) surface in the Imbox as if the owner
 // had written to themselves. Same skip contract as product_pg_test.go:
@@ -11,6 +11,9 @@ package app
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -82,8 +85,8 @@ func TestSentOnlyMailIsNeverTheImbox(t *testing.T) {
 		t.Fatalf("classify: %v", err)
 	}
 
-	if got := bucketOf(t, pg.db, "m-sent"); got != "paper_trail" {
-		t.Errorf("sent-only message bucketed %q; sent mail is reference, not the decision queue — want paper_trail", got)
+	if got := bucketOf(t, pg.db, "m-sent"); got != "sent" {
+		t.Errorf("sent-only message bucketed %q; sent mail has its own place — want sent", got)
 	}
 	if got := bucketOf(t, pg.db, "m-reply"); got != "imbox" {
 		t.Errorf("inbound reply bucketed %q; a correspondent's new mail belongs in the Imbox", got)
@@ -109,7 +112,7 @@ func TestSentOnlyMailSelfHealsOutOfTheImbox(t *testing.T) {
 	if err := pg.app.classifyUser(ctx, pg.uid); err != nil {
 		t.Fatalf("second classify: %v", err)
 	}
-	if got := bucketOf(t, pg.db, "m-sent"); got != "paper_trail" {
+	if got := bucketOf(t, pg.db, "m-sent"); got != "sent" {
 		t.Errorf("misfiled sent-only row still %q after a pass; the self-heal did not repair it", got)
 	}
 }
@@ -143,8 +146,8 @@ func TestOwnersMailOutsideTheInboxIsNeverTheImbox(t *testing.T) {
 	if err := pg.app.classifyUser(ctx, pg.uid); err != nil {
 		t.Fatalf("classify: %v", err)
 	}
-	if got := bucketOf(t, pg.db, "m-allonly"); got != "paper_trail" {
-		t.Errorf("owner's All Mail copy bucketed %q; want paper_trail", got)
+	if got := bucketOf(t, pg.db, "m-allonly"); got != "sent" {
+		t.Errorf("owner's All Mail copy bucketed %q; want sent", got)
 	}
 	if got := bucketOf(t, pg.db, "m-archived"); got != "imbox" {
 		t.Errorf("archived correspondent mail bucketed %q; want imbox", got)
@@ -156,7 +159,7 @@ func TestOwnersMailOutsideTheInboxIsNeverTheImbox(t *testing.T) {
 	if err := pg.app.classifyUser(ctx, pg.uid); err != nil {
 		t.Fatalf("second classify: %v", err)
 	}
-	if got := bucketOf(t, pg.db, "m-allonly"); got != "paper_trail" {
+	if got := bucketOf(t, pg.db, "m-allonly"); got != "sent" {
 		t.Errorf("misfiled All Mail copy still %q after a pass", got)
 	}
 	if got := bucketOf(t, pg.db, "m-selfcopy"); got != "imbox" {
@@ -169,5 +172,122 @@ func TestOwnersMailOutsideTheInboxIsNeverTheImbox(t *testing.T) {
 func TestProviderDraftsAreHiddenFromViews(t *testing.T) {
 	if got := discardedFilter("m"); !strings.Contains(got, "'drafts'") {
 		t.Fatalf("discardedFilter does not exclude drafts: %s", got)
+	}
+}
+
+// Sent mail is born read, moves out of Receipts on the first pass after an
+// upgrade (where it filed before 'sent' existed), stays put while snoozed
+// with its thread, and lists under /buckets/sent with the person written to.
+func TestSentMailHasItsOwnPlace(t *testing.T) {
+	pg := newProductPG(t)
+	ctx := context.Background()
+	seedClassifyFixture(t, pg.db, pg.uid)
+	if err := pg.app.classifyUser(ctx, pg.uid); err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	var read bool
+	if err := pg.db.QueryRow(`SELECT read_at IS NOT NULL FROM hey_messages WHERE message_id='m-sent'`).Scan(&read); err != nil || !read {
+		t.Fatalf("sent mail must be born read (read=%v err=%v)", read, err)
+	}
+
+	// The pre-'sent' world: filed under Receipts, unread.
+	mustClassifyExec(t, pg.db, `UPDATE hey_messages SET bucket='paper_trail', read_at=NULL WHERE message_id='m-sent'`)
+	if err := pg.app.classifyUser(ctx, pg.uid); err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if got := bucketOf(t, pg.db, "m-sent"); got != "sent" {
+		t.Errorf("sent mail left in %q after an upgrade pass; want sent", got)
+	}
+	if err := pg.db.QueryRow(`SELECT read_at IS NOT NULL FROM hey_messages WHERE message_id='m-sent'`).Scan(&read); err != nil || !read {
+		t.Errorf("migrated sent mail must not count as unread (read=%v err=%v)", read, err)
+	}
+
+	// Snoozed with its thread: the heal leaves it until it comes back.
+	mustClassifyExec(t, pg.db, `UPDATE hey_messages SET bucket='set_aside' WHERE message_id='m-sent'`)
+	if err := pg.app.classifyUser(ctx, pg.uid); err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if got := bucketOf(t, pg.db, "m-sent"); got != "set_aside" {
+		t.Errorf("snoozed sent mail moved to %q; a snooze outranks the filing rule", got)
+	}
+	mustClassifyExec(t, pg.db, `UPDATE hey_messages SET bucket='sent' WHERE message_id='m-sent'`)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/buckets/sent", nil)
+	req.SetPathValue("bucket", "sent")
+	w := httptest.NewRecorder()
+	pg.app.handleBucket(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("sent list: %d %s", w.Code, w.Body.String())
+	}
+	var page struct {
+		Rows []struct {
+			MessageID string `json:"message_id"`
+			To        string `json:"to"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Rows) != 1 || page.Rows[0].MessageID != "m-sent" || page.Rows[0].To != "rbeskau@rlelectrical.ca" {
+		t.Errorf("sent list = %+v; want the one sent thread with its recipient", page.Rows)
+	}
+}
+
+// A note to self classified while only its Sent copy had synced comes back
+// to the Imbox, unread, once the Inbox copy lands.
+func TestSentMailReturnsToTheImboxWhenItsInboxCopyArrives(t *testing.T) {
+	pg := newProductPG(t)
+	ctx := context.Background()
+	seedClassifyFixture(t, pg.db, pg.uid)
+	mustClassifyExec(t, pg.db, `DELETE FROM mail_message_mailboxes WHERE message_id='m-selfcopy' AND mailbox_id='mb-in'`)
+	if err := pg.app.classifyUser(ctx, pg.uid); err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if got := bucketOf(t, pg.db, "m-selfcopy"); got != "sent" {
+		t.Fatalf("Sent-only copy bucketed %q; want sent", got)
+	}
+	mustClassifyExec(t, pg.db, `INSERT INTO mail_message_mailboxes (account_id, message_id, mailbox_id) VALUES ('acct-1','m-selfcopy','mb-in')`)
+	if err := pg.app.classifyUser(ctx, pg.uid); err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	var bucket string
+	var read bool
+	if err := pg.db.QueryRow(`SELECT bucket, read_at IS NOT NULL FROM hey_messages WHERE message_id='m-selfcopy'`).Scan(&bucket, &read); err != nil {
+		t.Fatal(err)
+	}
+	if bucket != "imbox" || read {
+		t.Errorf("after its Inbox copy arrived: bucket=%q read=%v; want imbox, unread", bucket, read)
+	}
+}
+
+// A snoozed thread nobody else has written in is a follow-up reminder: when
+// the snooze returns it to the Imbox it must stay there, not be filed
+// straight back under Sent.
+func TestReturnedSnoozeOfTheOwnersOwnMailStaysInTheImbox(t *testing.T) {
+	pg := newProductPG(t)
+	ctx := context.Background()
+	seedClassifyFixture(t, pg.db, pg.uid)
+	mustClassifyExec(t, pg.db,
+		`INSERT INTO mail_messages (account_id, id, thread_id, subject, received_at, from_addrs, to_addrs)
+		 VALUES ('acct-1', 'm-nudge', 't-nudge', 's', now(), '[{"email":"tyler@dreamlucidmail.com"}]', '[{"email":"quiet@else.test"}]')`)
+	mustClassifyExec(t, pg.db, `INSERT INTO mail_message_mailboxes (account_id, message_id, mailbox_id) VALUES ('acct-1','m-nudge','mb-sent')`)
+	if err := pg.app.classifyUser(ctx, pg.uid); err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	// Snoozed, and its day has come.
+	mustClassifyExec(t, pg.db, `UPDATE hey_messages SET bucket='set_aside', set_aside_until=now() - interval '1 minute' WHERE message_id IN ('m-nudge','m-sent')`)
+	if err := pg.app.sweepSnoozed(ctx, pg.uid, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := pg.app.classifyUser(ctx, pg.uid); err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if got := bucketOf(t, pg.db, "m-nudge"); got != "imbox" {
+		t.Errorf("returned reminder bucketed %q; want imbox", got)
+	}
+	// A reply that came back with a thread someone else wrote in is still
+	// sent mail, not an arrival.
+	if got := bucketOf(t, pg.db, "m-sent"); got != "sent" {
+		t.Errorf("returned reply in an answered thread bucketed %q; want sent", got)
 	}
 }

@@ -147,3 +147,59 @@ func TestPasswordLockoutLocksAtThresholdAndExpires(t *testing.T) {
 		t.Fatal("failure after an expired lock immediately locked again")
 	}
 }
+
+// Unknown identifiers each hold their own failure state. One bucket shared
+// by all of them leaked which names exist: lock it with a garbage name, and
+// any name that still answers 401 afterwards is real.
+func TestUnknownIdentifiersLockIndependently(t *testing.T) {
+	a := &App{}
+	ghost, other := a.unknownPasswordLockKey("  Ghost@Example.test "), a.unknownPasswordLockKey("someone-else")
+	if ghost == other {
+		t.Fatalf("two unknown names share lock key %q", ghost)
+	}
+	if again := a.unknownPasswordLockKey("ghost@example.test"); again != ghost {
+		t.Fatalf("one name, two keys: %q vs %q", ghost, again)
+	}
+	if strings.Contains(ghost, "ghost") {
+		t.Fatalf("lock key %q carries what was typed", ghost)
+	}
+	for i := 0; i < passwordLockThreshold; i++ {
+		a.recordPasswordFailure(ghost)
+	}
+	if a.passwordLockRemaining(ghost) <= 0 {
+		t.Fatal("an unknown name did not lock at the threshold")
+	}
+	if a.passwordLockRemaining(other) > 0 {
+		t.Fatal("locking one unknown name locked another")
+	}
+}
+
+// Past the cap, unknown names fall back to one shared bucket rather than
+// growing attempt state without bound.
+func TestUnknownIdentifierLockStateIsCapped(t *testing.T) {
+	a := &App{pwFails: map[string]passwordFails{}}
+	now := time.Now()
+	for i := 0; i < unknownLockKeyCap; i++ {
+		a.pwFails[fmt.Sprintf("unk:%d", i)] = passwordFails{Count: 1, Window: now}
+	}
+	if got := a.unknownPasswordLockKey("one-more"); got != sharedUnknownLockKey {
+		t.Fatalf("over the cap got %q, want the shared bucket", got)
+	}
+}
+
+// An unknown name spends a TOTP budget shaped like a real account's.
+func TestUnknownIdentifierTOTPBudgetMatchesARealOne(t *testing.T) {
+	a := &App{}
+	for i := 0; i < maxTOTPWindowAttempts; i++ {
+		if ok, _ := a.reserveUnknownTOTPAttempt("ghost"); !ok {
+			t.Fatalf("attempt %d refused inside the budget", i+1)
+		}
+	}
+	ok, retry := a.reserveUnknownTOTPAttempt("Ghost ")
+	if ok || retry <= 0 || retry > totpBudgetWindow {
+		t.Fatalf("attempt past the budget: admitted=%v retry=%v", ok, retry)
+	}
+	if ok, _ := a.reserveUnknownTOTPAttempt("another"); !ok {
+		t.Fatal("one unknown name's budget spent another's")
+	}
+}

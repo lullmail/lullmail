@@ -4,8 +4,9 @@
 /** Storage buckets, as written to hey_messages.bucket. */
 export type Bucket = "imbox" | "screener" | "feed" | "paper_trail" | "set_aside" | "later";
 
-/** What the UI lists. "snoozed" is the union of set_aside and later. */
-export type ListBucket = Bucket | "snoozed";
+/** What the UI lists. "snoozed" is the union of set_aside and later; "sent" is
+    mail the owner sent — a place to look, never one to file into. */
+export type ListBucket = Bucket | "snoozed" | "sent";
 
 /** Shared row shape: /buckets/{b}, /search, /recent, /folder. */
 export interface Row {
@@ -24,6 +25,8 @@ export interface Row {
   attachment_state?: "unknown" | "absent" | "present";
   preview: string;
   bucket?: string;
+  /** Sent rows only: who it was written to, since the sender is always you. */
+  to?: string;
   thread_len?: number;
   /** Present on Snoozed rows: when a dated snooze returns. */
   snooze_until?: string;

@@ -29,6 +29,12 @@ const COPY: Record<ListBucket, { title: string; sub: string; emptyTitle: string;
     emptyTitle: "No receipts yet.",
     emptySub: "Order confirmations and notifications file themselves here. Search finds them when you need one.",
   },
+  sent: {
+    title: "Sent",
+    sub: "Everything you've written, newest first. Replies also stay with their thread.",
+    emptyTitle: "Nothing sent yet.",
+    emptySub: "Mail you send — from here or any other app on this mailbox — is kept here.",
+  },
   snoozed: {
     title: "Snoozed",
     sub: "Everything you put off. Dated ones come back on their day; the rest wait for someday.",
