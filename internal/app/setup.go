@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -402,13 +403,24 @@ func (a *App) prepareSetup() {
 		// else — no proxy log, no Referer. Without a known origin the host
 		// is left for the operator to fill in.
 		origin := strings.TrimRight(a.cfg.PublicURL, "/")
+		note := ""
 		if origin == "" {
-			origin = "http://<this server's address>"
+			// No origin is known until the first visit. localhost is right
+			// for the commonest case — Docker on the machine in front of
+			// you, port published as-is — and a link that can be clicked
+			// beats a placeholder that has to be edited every time.
+			port := "8080"
+			if _, p, err := net.SplitHostPort(a.cfg.Addr); err == nil && p != "" {
+				port = p
+			}
+			origin = "http://localhost:" + port
+			note = "  (Running on another machine, or behind a domain? Use that address in\n" +
+				"   place of " + origin + " and keep the #setup=… part.)\n\n"
 		}
 		log.Printf("\n=======================================================================\n"+
 			"  Lull Mail first-run setup\n"+
 			"  Open this one-time link in your browser:\n\n"+
-			"      %s/#setup=%s\n\n"+
+			"      %s/#setup=%s\n\n"+note+
 			"  Or open the site and paste the token:\n\n"+
 			"      %s\n\n"+
 			"  It expires in %s. Find it again later with:\n"+
