@@ -1111,15 +1111,45 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 
 /* Compose is a workspace, not a prompt: wide panel, tall body. */
 .compose-panel { width: min(880px, 94vw); max-width: min(880px, 94vw); }
-.compose-head-row { display: flex; align-items: center; gap: var(--sp-2); }
-.compose-from {
-  flex: 1; min-width: 0; font-size: var(--t-sm); color: var(--ink-2);
-  background: transparent; border: 1px dashed var(--line); border-radius: var(--r-sm);
-  padding: var(--sp-1) var(--sp-2);
+/* The address block: one hairline row per field, label in a fixed gutter so
+   every field starts on the same line. */
+.compose-fields { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+.compose-row {
+  display: flex; align-items: center; gap: var(--sp-3);
+  min-height: 44px; border-bottom: 1px solid var(--line);
 }
-.compose-from:focus { outline: none; border-color: var(--accent); border-style: solid; }
+.compose-row:focus-within { border-bottom-color: var(--line-strong); }
+.compose-label {
+  flex: none; width: 58px; font-size: var(--t-sm); font-weight: 620; color: var(--ink-3);
+}
+.compose-row:focus-within .compose-label { color: var(--ink-2); }
+.compose-from {
+  flex: 1; min-width: 0; height: 36px; padding: 0 var(--sp-5) 0 0;
+  border: 0; border-radius: var(--r-sm); background-color: transparent;
+  font: inherit; font-size: var(--t-md); color: var(--ink); cursor: pointer;
+}
+.compose-from:focus-visible { outline-offset: 0; }
+.compose-recipient { position: relative; flex: 1; min-width: 0; }
+.compose-cc-toggle {
+  flex: none; padding: 4px 9px; border-radius: var(--r-sm);
+  font-size: var(--t-sm); font-weight: 620; color: var(--ink-3);
+}
+.compose-cc-toggle:hover, .compose-cc-toggle.on { color: var(--ink); background: var(--hover); }
+.compose-suggest {
+  position: absolute; z-index: 5; left: calc(var(--sp-2) * -1); top: calc(100% + 4px);
+  min-width: min(360px, 100%); max-width: 100%; margin: 0; padding: 4px; list-style: none;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-md);
+  box-shadow: var(--shadow-3);
+}
+.compose-suggest li {
+  padding: 8px var(--sp-3); border-radius: var(--r-sm); cursor: pointer;
+  font-size: var(--t-base); color: var(--ink-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.compose-suggest li.active { background: var(--sel); color: var(--ink); }
+.compose-note { margin: 0; padding: 0 0 8px; font-size: var(--t-sm); color: var(--danger); }
 .compose-tool-i { font-style: italic; }
-.compose-files { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); padding: var(--sp-1) 0 0; }
+.compose-files { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); padding: 0 0 var(--sp-3); }
 .compose-file {
   display: inline-flex; align-items: center; gap: var(--sp-2);
   padding: var(--sp-1) var(--sp-2) var(--sp-1) var(--sp-3);
@@ -1152,27 +1182,51 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 .palette-row-note { font-size: var(--t-sm); color: var(--ink-3); flex: none; }
 .palette-empty { padding: var(--sp-6) var(--sp-4); color: var(--ink-3); text-align: center; }
 
-.compose-form { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-5) var(--sp-6) var(--sp-4); overflow-y: auto; }
+.compose-form { display: flex; flex-direction: column; gap: 0; padding: var(--sp-4) var(--sp-6) 0; overflow-y: auto; }
+/* The draft controls sit on the title's own line, at its right edge: one
+   header row, not a toolbar stacked on a heading. */
+.compose-panel { position: relative; }
 .compose-ring {
-  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
-  padding: var(--sp-2) var(--sp-3); color: var(--ink-3); font-size: var(--t-xs);
-  border-bottom: 1px solid var(--line);
+  position: absolute; z-index: 2; top: var(--sp-3); right: var(--sp-3);
+  display: flex; align-items: center; gap: var(--sp-1);
+  color: var(--ink-3); font-size: var(--t-xs);
 }
 .compose-ring-count { letter-spacing: 0.06em; display: inline-flex; align-items: center; gap: 4px; }
 .compose-ring .btn-icon { min-width: 30px; min-height: 30px; font-size: 18px; line-height: 1; color: var(--ink-2); }
-.compose-kicker { font-size: var(--t-sm); font-weight: 720; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-3); }
+.compose-kicker {
+  min-height: 36px; margin-bottom: var(--sp-3); padding-right: 220px;
+  display: flex; align-items: center;
+  font-family: var(--serif); font-size: 21px; font-weight: 680; letter-spacing: -0.018em; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .compose-form input, .compose-form textarea {
   width: 100%; border: none; background: transparent; color: var(--ink); padding: var(--sp-1) 0; outline: none;
+  font: inherit;
 }
+/* The label names the field; a placeholder repeating it is noise. It stays
+   in the markup for assistive tech. */
+.compose-fields .compose-row input::placeholder { color: transparent; }
 .compose-form input::placeholder, .compose-form textarea::placeholder { color: var(--ink-3); }
-.compose-to { font-size: var(--t-md); border-bottom: 1px solid var(--line) !important; padding-bottom: var(--sp-2) !important; }
-.compose-subject { font-family: var(--serif); font-size: 22px; font-weight: 680; letter-spacing: -0.018em; }
-.compose-body { flex: 1; min-height: 320px; resize: none; line-height: 1.62; font-size: var(--t-lg); }
-.compose-body.html-source { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: var(--t-sm); line-height: 1.5; }
-.compose-modes { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-1) 0 0; }
+.compose-to { font-size: var(--t-md); min-height: 36px; }
+.compose-subject { font-size: var(--t-md) !important; font-weight: 640 !important; min-height: 36px; }
+/* The body is prose, so it is set like the mail it will become — it used to
+   fall back to the browser's monospace textarea font. */
+.compose-body {
+  flex: 1; min-height: 300px; resize: none; padding: var(--sp-4) 0 var(--sp-3) !important;
+  font-family: var(--sans) !important; font-size: var(--t-lg) !important; line-height: 1.62 !important;
+}
+.compose-body.html-source { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important; font-size: var(--t-sm) !important; line-height: 1.5 !important; }
+.compose-modes {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
+  margin: 0 calc(var(--sp-3) * -1); padding: var(--sp-2) var(--sp-1);
+  border-top: 1px solid var(--line);
+}
+.compose-modes .btn { min-height: 32px; padding-inline: 10px; }
+.compose-modes .btn[aria-pressed="true"] { background: var(--raise); color: var(--ink); }
+.compose-modes-note { margin-left: var(--sp-2); }
 .compose-modes-note { font-size: var(--t-xs); color: var(--ink-3); }
 .compose-preview {
-  flex: 1; min-height: 220px; width: 100%; border: 1px solid var(--line);
+  flex: 1; min-height: 280px; width: 100%; margin: var(--sp-3) 0; border: 1px solid var(--line);
   border-radius: var(--r-md, 8px); background: #ffffff; color: #101010;
 }
 .compose-btns {
@@ -1180,6 +1234,9 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
   padding: var(--sp-3) var(--sp-6); border-top: 1px solid var(--line); background: var(--bg);
 }
 .compose-btns .hint { margin-right: auto; font-size: var(--t-sm); color: var(--ink-3); }
+/* A Send that cannot send yet is quiet, not a washed-out copy of the accent. */
+.compose-btns .btn-accent { min-width: 92px; justify-content: center; }
+.compose-btns .btn-accent:disabled { opacity: 1; background: var(--raise); color: var(--ink-3); }
 
 .shortcuts-body { padding: var(--sp-5) var(--sp-6) var(--sp-6); overflow-y: auto; }
 .shortcuts-title { margin: 0 0 var(--sp-4); font-family: var(--serif); font-size: 22px; font-weight: 700; letter-spacing: -0.018em; }
@@ -1744,13 +1801,14 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
     border: 0; border-radius: 0; box-shadow: none; animation: sheet-up 0.2s var(--ease);
     padding-top: env(safe-area-inset-top);
   }
-  .compose-ring { padding: var(--sp-1) var(--sp-2) var(--sp-1) calc(var(--edge) - 12px); min-height: 52px; }
-  .compose-ring .compose-close { order: -1; }
-  .compose-ring > .btn:first-of-type { margin-right: auto; }
-  .compose-form { flex: 1; min-height: 0; gap: var(--sp-1); padding: var(--sp-4) var(--edge) var(--sp-3); }
+  .compose-ring { top: calc(env(safe-area-inset-top, 0px) + var(--sp-2)); right: var(--sp-2); }
+  .compose-form { flex: 1; min-height: 0; padding: var(--sp-3) var(--edge) 0; }
+  .compose-kicker { min-height: 40px; padding-right: 168px; font-size: 19px; }
+  .compose-row { min-height: 48px; }
+  .compose-label { width: 52px; }
   .compose-form input, .compose-from { min-height: 44px; }
-  .compose-from { border-style: solid; padding-inline: var(--sp-3); border-radius: var(--r-md); }
   .compose-body { min-height: 140px; }
+  .compose-modes { margin-inline: calc(var(--edge) * -1); padding-inline: calc(var(--edge) - 10px); }
   .compose-btns {
     flex: none; padding: var(--sp-2) var(--edge) max(var(--sp-2), env(safe-area-inset-bottom));
   }
