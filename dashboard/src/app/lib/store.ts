@@ -227,8 +227,12 @@ export const accountsFailed = signal(false);
    The unified view is the product; the lens is a scope, not a mode switch.
    Empty string = every mailbox together (the default). */
 
-export interface AccountLite { id: string; address: string; mirror_account_id?: string; label?: string }
+export interface AccountLite { id: string; address: string; mirror_account_id?: string; label?: string; outreach?: boolean }
 export const accounts = signal<AccountLite[]>([]);
+
+/** True once any mailbox is marked outreach. The Outreach place is offered
+    only then: for everyone else it would be a permanently empty list. */
+export const hasOutreach = computed(() => accounts.value.some((a) => a.outreach));
 
 /** Which of the owner's mailboxes a message belongs to (its label, else its
     address), or null with only one mailbox, where it would be noise. Rows

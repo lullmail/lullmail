@@ -20,18 +20,21 @@ import (
 )
 
 type accountJSON struct {
-	ID              string  `json:"id"`
-	MirrorAccountID string  `json:"mirror_account_id"`
-	Provider        string  `json:"provider"`
-	Address         string  `json:"address"`
-	Label           string  `json:"label"`
-	BackfillDays    int     `json:"backfill_days"`
-	RetentionDays   int     `json:"retention_days"`
-	SyncEnabled     bool    `json:"sync_enabled"`
-	LastSyncAt      *string `json:"last_sync_at"`
-	LastError       *string `json:"last_error"`
-	MessageCount    int     `json:"message_count"`
-	ScreenerCount   int     `json:"screener_count"`
+	ID              string `json:"id"`
+	MirrorAccountID string `json:"mirror_account_id"`
+	Provider        string `json:"provider"`
+	Address         string `json:"address"`
+	Label           string `json:"label"`
+	BackfillDays    int    `json:"backfill_days"`
+	RetentionDays   int    `json:"retention_days"`
+	SyncEnabled     bool   `json:"sync_enabled"`
+	// Outreach marks a mailbox a machine sends from: its sent mail lists
+	// under Outreach rather than Sent.
+	Outreach      bool    `json:"outreach"`
+	LastSyncAt    *string `json:"last_sync_at"`
+	LastError     *string `json:"last_error"`
+	MessageCount  int     `json:"message_count"`
+	ScreenerCount int     `json:"screener_count"`
 
 	// Desired vs applied policy versions (audit 5 API-04): a client can
 	// tell a requested transition from one whose data work finished.
@@ -65,7 +68,7 @@ func (a *App) listAccountsJSON(w http.ResponseWriter, r *http.Request) {
 	// it — a polling client could not see a failed restoration job or
 	// tell desired from applied policy through this endpoint.
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT ea.id, ea.mirror_account_id, ea.provider, ea.address, ea.label, ea.backfill_days, ea.retention_days, ea.sync_enabled,
+		SELECT ea.id, ea.mirror_account_id, ea.provider, ea.address, ea.label, ea.backfill_days, ea.retention_days, ea.sync_enabled, ea.outreach,
 		       COALESCE(ea.last_sync_at::text,''), COALESCE(ea.last_error,''),
 		       (SELECT count(*) FROM mail_messages m WHERE m.account_id = ea.mirror_account_id),
 		       (SELECT count(*) FROM hey_messages h
@@ -90,7 +93,7 @@ func (a *App) listAccountsJSON(w http.ResponseWriter, r *http.Request) {
 		var jobState, jobError sql.NullString
 		var jobVersion sql.NullInt64
 		var jobFull sql.NullBool
-		if err := rows.Scan(&acc.ID, &acc.MirrorAccountID, &acc.Provider, &acc.Address, &acc.Label, &acc.BackfillDays, &acc.RetentionDays, &acc.SyncEnabled,
+		if err := rows.Scan(&acc.ID, &acc.MirrorAccountID, &acc.Provider, &acc.Address, &acc.Label, &acc.BackfillDays, &acc.RetentionDays, &acc.SyncEnabled, &acc.Outreach,
 			&lastSync, &lastErr, &acc.MessageCount, &acc.ScreenerCount,
 			&acc.PolicyVersion, &acc.AppliedPolicyVersion,
 			&jobState, &jobVersion, &jobFull, &jobError); err != nil {
@@ -319,7 +322,11 @@ func (a *App) handleAccountItem(w http.ResponseWriter, r *http.Request) {
 			a.updateSyncEnabled(w, r, id)
 			return
 		}
-		writeProblem(w, http.StatusBadRequest, "Unknown Op", "use ?op=sync, ?op=retention, ?op=backfill, or ?op=sync_enabled")
+		if r.URL.Query().Get("op") == "outreach" {
+			a.updateOutreach(w, r, id)
+			return
+		}
+		writeProblem(w, http.StatusBadRequest, "Unknown Op", "use ?op=sync, ?op=retention, ?op=backfill, ?op=sync_enabled, or ?op=outreach")
 	default:
 		writeProblem(w, http.StatusMethodNotAllowed, "Method Not Allowed", "use GET, DELETE, or POST with an ?op=")
 	}
@@ -339,7 +346,7 @@ func (a *App) getAccountJSON(w http.ResponseWriter, r *http.Request, id string) 
 	var acc accountJSON
 	var lastSync, lastErr string
 	err = a.db.QueryRowContext(r.Context(), `
-		SELECT ea.id, ea.mirror_account_id, ea.provider, ea.address, ea.label, ea.backfill_days, ea.retention_days, ea.sync_enabled,
+		SELECT ea.id, ea.mirror_account_id, ea.provider, ea.address, ea.label, ea.backfill_days, ea.retention_days, ea.sync_enabled, ea.outreach,
 		       COALESCE(ea.last_sync_at::text,''), COALESCE(ea.last_error,''),
 		       (SELECT count(*) FROM mail_messages m WHERE m.account_id = ea.mirror_account_id),
 		       (SELECT count(*) FROM hey_messages h
@@ -349,7 +356,7 @@ func (a *App) getAccountJSON(w http.ResponseWriter, r *http.Request, id string) 
 		       ea.policy_version, ea.applied_policy_version
 		FROM email_accounts ea
 		WHERE ea.user_id = $1 AND ea.id::text = $2`, uid, id).
-		Scan(&acc.ID, &acc.MirrorAccountID, &acc.Provider, &acc.Address, &acc.Label, &acc.BackfillDays, &acc.RetentionDays, &acc.SyncEnabled,
+		Scan(&acc.ID, &acc.MirrorAccountID, &acc.Provider, &acc.Address, &acc.Label, &acc.BackfillDays, &acc.RetentionDays, &acc.SyncEnabled, &acc.Outreach,
 			&lastSync, &lastErr, &acc.MessageCount, &acc.ScreenerCount,
 			&acc.PolicyVersion, &acc.AppliedPolicyVersion)
 	if err == sql.ErrNoRows {
@@ -453,6 +460,39 @@ func (a *App) updateSyncEnabled(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 	writeJSON(w, map[string]any{"sync_enabled": *req.Enabled})
+}
+
+// updateOutreach marks a mailbox as one a machine sends from. It changes
+// where that mailbox's sent mail is listed (Outreach, not Sent) and which of
+// its threads vouch for a sender (see classifyUser) — nothing at the
+// provider, and nothing already filed, so it is safe to flip either way.
+func (a *App) updateOutreach(w http.ResponseWriter, r *http.Request, id string) {
+	uid, err := a.userID(r.Context())
+	if err != nil {
+		writeProblem(w, 500, "Lookup Failed", err.Error())
+		return
+	}
+	var req struct {
+		Outreach *bool `json:"outreach"`
+	}
+	if err := decodeSettingsJSON(w, r, &req); err != nil {
+		writeSettingsDecodeError(w, err)
+		return
+	}
+	if req.Outreach == nil {
+		writeProblem(w, 422, "Missing Flag", "outreach is required and must be true or false")
+		return
+	}
+	result, err := a.db.ExecContext(r.Context(), `UPDATE email_accounts SET outreach=$1 WHERE id=$2 AND user_id=$3`, *req.Outreach, id, uid)
+	if err != nil {
+		writeProblem(w, 500, "Update Failed", err.Error())
+		return
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		writeProblem(w, 404, "Not Found", "no such account")
+		return
+	}
+	writeJSON(w, map[string]any{"outreach": *req.Outreach})
 }
 
 // updateBackfill sets how much history the product organizes. Zero means

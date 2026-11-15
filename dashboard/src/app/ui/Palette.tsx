@@ -3,7 +3,7 @@
 // the same place instead of two rival result views.
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api } from "../lib/api";
-import { accountQS, layout, palette, searchMail, toggleLayout } from "../lib/store";
+import { accountQS, hasOutreach, layout, palette, searchMail, toggleLayout } from "../lib/store";
 import { openThread } from "../lib/actions";
 import { navigate } from "../lib/router";
 import { fmtDate, splitFrom } from "../lib/fmt";
@@ -94,7 +94,8 @@ export function Palette() {
       return out;
     }
 
-    const jumps = JUMPS.filter(([label]) => !needle || label.toLowerCase().includes(needle));
+    const places: [string, string][] = hasOutreach.value ? JUMPS.flatMap((j) => j[1] === "/sent" ? [j, ["Outreach", "/outreach"] as [string, string]] : [j]) : JUMPS;
+    const jumps = places.filter(([label]) => !needle || label.toLowerCase().includes(needle));
     if (jumps.length) {
       out.push({
         title: "Go to",

@@ -19,7 +19,10 @@ RFC 4155) is a table-stakes feature, not a cancellation flow.
   sender rules; dated snoozes return to the Inbox on their day.
 - **Sent** — everything you have written, from here or any other client on
   the mailbox, in one place of its own. Sent mail never lands in the Inbox
-  or Receipts; replies also stay with their thread.
+  or Receipts; replies also stay with their thread. Mark a mailbox as
+  **Outreach** and what a tool sends from it is listed apart from what you
+  wrote yourself; on that mailbox only people it actually addressed skip the
+  Screener. A provider's "all mail" view is treated as storage, not a place.
 - **Board** — a personal kanban where the cards write themselves: unread
   Inbox mail is the to-do column, threads you answered are the waiting-on
   column, dated snoozes are the deferred pile. Pin anything; pins are
