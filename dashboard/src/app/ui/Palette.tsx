@@ -5,7 +5,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/ho
 import { api } from "../lib/api";
 import { accountQS, hasOutreach, layout, palette, searchMail, toggleLayout } from "../lib/store";
 import { openThread } from "../lib/actions";
-import { navigate } from "../lib/router";
+import { folderLabel, navigate } from "../lib/router";
 import { fmtDate, splitFrom } from "../lib/fmt";
 import type { Mailbox, Row } from "../lib/types";
 import { Icon } from "./Icon";
@@ -107,14 +107,14 @@ export function Palette() {
       });
     }
 
-    // Inbox has its own nav entry; the palette lists the other folders.
-    const folders = mailboxes.filter((m) => m.name !== "inbox" && (!needle || m.name.includes(needle)));
+    // Inbox and Sent have their own entries above; the palette lists the rest.
+    const folders = mailboxes.filter((m) => m.name !== "inbox" && m.role !== "inbox" && m.role !== "sent" && (!needle || m.name.includes(needle)));
     if (folders.length) {
       out.push({
         title: "Provider folders",
         items: folders.map((m) => ({
           key: "mb:" + m.name,
-          label: titleCase(m.name),
+          label: folderLabel(m.name),
           note: "browse",
           run: () => { setFolder(m.name); setQ(""); setCursor(0); },
         })),

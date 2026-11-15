@@ -46,9 +46,10 @@ const ROUTES: Record<string, Route> = {
 // is whatever the provider reports, so it cannot be known at build time.
 const FOLDER_PREFIX = "/folder/";
 
-/** "sent" -> "Sent", "[gmail]/all mail" -> "[Gmail]/All Mail". */
+/** "sent" -> "Sent", "[gmail]/starred" -> "Starred". A provider's namespace
+    prefix is its filing system, not part of the folder's name. */
 export function folderLabel(name: string): string {
-  return name.replace(/[\p{L}\p{N}]+/gu, (w) => w[0].toUpperCase() + w.slice(1));
+  return name.replace(/^\[[^\]]+\]\//, "").replace(/[\p{L}\p{N}]+/gu, (w) => w[0].toUpperCase() + w.slice(1));
 }
 
 export function folderPath(name: string): string {

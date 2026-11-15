@@ -281,7 +281,7 @@ func (a *App) handleFolder(w http.ResponseWriter, r *http.Request) {
 		JOIN mail_messages m ON m.account_id = mm.account_id AND m.id = mm.message_id
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
-		WHERE lower(mb.name) = lower($2)
+		WHERE (lower(mb.name) = lower($2) OR mb.role = NULLIF($3, ''))
 		  -- A provider's "all mail" view (Gmail's [Gmail]/All Mail) repeats
 		  -- every folder, the owner's sent mail and drafts included. Here it
 		  -- means all the mail that arrived: what the owner wrote has Sent
@@ -294,7 +294,33 @@ func (a *App) handleFolder(w http.ResponseWriter, r *http.Request) {
 		                   WHERE xm.account_id = m.account_id AND xm.message_id = m.id
 		                     AND xb.role IN ('sent', 'drafts'))))`+
 		accountClause(r)+`
-		ORDER BY m.account_id, m.thread_id, m.received_at DESC NULLS LAST`, uid, name)
+		ORDER BY m.account_id, m.thread_id, m.received_at DESC NULLS LAST`, uid, name, folderRole(name))
+}
+
+// folderRoleNames gives each well-known mailbox role one name. Fourteen
+// mailboxes do not agree on what to call the same thing — "Trash",
+// "[Gmail]/Trash", "Deleted Items"; "Junk", "[Gmail]/Spam" — and listing
+// each spelling made the folder list three times as long as the set of
+// places it described. Under its role name a folder view covers every
+// mailbox that has a folder with that role, whatever the provider calls it.
+var folderRoleNames = map[string]string{
+	"inbox": "inbox", "sent": "sent", "drafts": "drafts", "junk": "junk",
+	"trash": "trash", "archive": "archive", "all": "all mail",
+}
+
+// folderRole maps a requested folder name back to the role it stands for:
+// the canonical names above, plus "spam" for people who call junk that.
+func folderRole(name string) string {
+	n := strings.ToLower(strings.TrimSpace(name))
+	if n == "spam" {
+		return "junk"
+	}
+	for role, canonical := range folderRoleNames {
+		if n == canonical {
+			return role
+		}
+	}
+	return ""
 }
 
 // handleMailboxList: distinct provider mailbox names — the real folders the
@@ -306,13 +332,22 @@ func (a *App) handleMailboxList(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Lookup Failed", err.Error())
 		return
 	}
+	// One row per place, not per spelling: a folder with a well-known role is
+	// listed once under that role's name (see folderRoleNames); anything
+	// else keeps its own name.
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT DISTINCT ON (lower(mb.name)) lower(mb.name), mb.role
-		FROM mail_mailboxes mb
-		JOIN email_accounts ea ON ea.mirror_account_id = mb.account_id AND ea.user_id = $1
-		WHERE true`+
+		SELECT DISTINCT ON (place) place, role FROM (
+		  SELECT CASE COALESCE(mb.role,'')
+		           WHEN 'inbox' THEN 'inbox' WHEN 'sent' THEN 'sent' WHEN 'drafts' THEN 'drafts'
+		           WHEN 'junk' THEN 'junk' WHEN 'trash' THEN 'trash' WHEN 'archive' THEN 'archive'
+		           WHEN 'all' THEN 'all mail' ELSE lower(mb.name) END AS place,
+		         NULLIF(mb.role,'') AS role
+		  FROM mail_mailboxes mb
+		  JOIN email_accounts ea ON ea.mirror_account_id = mb.account_id AND ea.user_id = $1
+		  WHERE true`+
 		accountClause(r)+`
-		ORDER BY lower(mb.name)`, uid)
+		) f
+		ORDER BY place, role NULLS LAST`, uid)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return

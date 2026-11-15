@@ -406,3 +406,54 @@ func TestAllMailFolderListsArrivalsNotSentMail(t *testing.T) {
 		t.Errorf("the folder list dropped all mail: %s", w.Body.String())
 	}
 }
+
+// Fourteen mailboxes do not agree on what to call the same folder. The list
+// offers one row per kind, and that row's view covers every spelling.
+func TestFolderListIsOneRowPerRoleAndTheViewCoversEverySpelling(t *testing.T) {
+	pg := newProductPG(t)
+	seedClassifyFixture(t, pg.db, pg.uid)
+	mustClassifyExec(t, pg.db,
+		`INSERT INTO email_accounts (user_id, mirror_account_id, provider, address, cred_ciphertext, backfill_days)
+		 VALUES ($1, 'acct-2', 'imap', 'second@example.test', 'x', 0)`, pg.uid)
+	for _, mb := range [][4]string{
+		{"acct-1", "mb-gtrash", "[Gmail]/Trash", "trash"},
+		{"acct-2", "mb-trash", "Trash", "trash"},
+		{"acct-2", "mb-deleted", "Deleted Items", "trash"},
+		{"acct-1", "mb-spam", "[Gmail]/Spam", "junk"},
+		{"acct-2", "mb-junk", "Junk", "junk"},
+		{"acct-1", "mb-star", "[Gmail]/Starred", ""},
+	} {
+		mustClassifyExec(t, pg.db,
+			`INSERT INTO mail_mailboxes (account_id, id, name, role, native) VALUES ($1, $2, $3, NULLIF($4,''), $2)`,
+			mb[0], mb[1], mb[2], mb[3])
+	}
+	w := httptest.NewRecorder()
+	pg.app.handleMailboxList(w, httptest.NewRequest(http.MethodGet, "/api/mailboxes", nil))
+	var list []struct {
+		Name string  `json:"name"`
+		Role *string `json:"role"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	got := []string{}
+	for _, f := range list {
+		got = append(got, f.Name)
+	}
+	want := []string{"[gmail]/starred", "all mail", "inbox", "junk", "sent", "trash"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("folder list = %v\nwant        %v", got, want)
+	}
+
+	// One message in each account's differently named Trash.
+	for _, m := range [][3]string{{"acct-1", "m-bin1", "mb-gtrash"}, {"acct-2", "m-bin2", "mb-deleted"}} {
+		mustClassifyExec(t, pg.db,
+			`INSERT INTO mail_messages (account_id, id, thread_id, subject, received_at, from_addrs) VALUES ($1, $2, $2, 's', now(), '[{"email":"x@y.test"}]')`, m[0], m[1])
+		mustClassifyExec(t, pg.db, `INSERT INTO mail_message_mailboxes (account_id, message_id, mailbox_id) VALUES ($1, $2, $3)`, m[0], m[1], m[2])
+	}
+	fw := httptest.NewRecorder()
+	pg.app.handleFolder(fw, httptest.NewRequest(http.MethodGet, "/api/folder?name=trash", nil))
+	if body := fw.Body.String(); !strings.Contains(body, `"m-bin1"`) || !strings.Contains(body, `"m-bin2"`) {
+		t.Fatalf("the Trash view does not cover every mailbox's trash: %d %s", fw.Code, body)
+	}
+}

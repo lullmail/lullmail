@@ -37,6 +37,8 @@ describe("folderLabel", () => {
   it("capitalises each word without touching separators", () => {
     expect(folderLabel("sent")).toBe("Sent");
     expect(folderLabel("all mail")).toBe("All Mail");
-    expect(folderLabel("[gmail]/all mail")).toBe("[Gmail]/All Mail");
+    expect(folderLabel("[gmail]/all mail")).toBe("All Mail");
+    expect(folderLabel("[gmail]/starred")).toBe("Starred");
+    expect(folderLabel("projects/2026")).toBe("Projects/2026");
   });
 });
