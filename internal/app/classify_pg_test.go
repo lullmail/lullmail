@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -366,21 +367,42 @@ func TestOutreachThreadsDoNotVouchForStrangers(t *testing.T) {
 	}
 }
 
-// A provider's "all mail" view is its storage, not a place: it repeats every
-// folder, sent mail included, so the folder list leaves it out.
-func TestFolderListLeavesOutTheProvidersAllMailView(t *testing.T) {
+// A provider's "all mail" view repeats every folder, the owner's sent mail
+// included. In Lull it lists the mail that arrived: sent mail has its own
+// place, and the Sent folder itself still shows everything sent.
+func TestAllMailFolderListsArrivalsNotSentMail(t *testing.T) {
 	pg := newProductPG(t)
+	ctx := context.Background()
 	seedClassifyFixture(t, pg.db, pg.uid)
+	// The inbound reply is in All Mail too, as Gmail has it.
+	mustClassifyExec(t, pg.db, `INSERT INTO mail_message_mailboxes (account_id, message_id, mailbox_id) VALUES ('acct-1','m-reply','mb-all')`)
+	// A sent message Gmail has only under All Mail so far (Sent Mail has not
+	// synced), and not yet classified: nothing marks it but who wrote it.
+	if err := pg.app.classifyUser(ctx, pg.uid); err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	folder := func(name string) string {
+		t.Helper()
+		w := httptest.NewRecorder()
+		pg.app.handleFolder(w, httptest.NewRequest(http.MethodGet, "/api/folder?name="+url.QueryEscape(name), nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", name, w.Code, w.Body.String())
+		}
+		return w.Body.String()
+	}
+	all := folder("[Gmail]/All Mail")
+	if !strings.Contains(all, `"m-reply"`) {
+		t.Errorf("all mail lost a message that arrived: %s", all)
+	}
+	if strings.Contains(all, `"m-sent"`) {
+		t.Errorf("all mail lists the owner's sent mail: %s", all)
+	}
+	if sent := folder("[Gmail]/Sent Mail"); !strings.Contains(sent, `"m-sent"`) {
+		t.Errorf("the Sent folder itself must still list sent mail: %s", sent)
+	}
 	w := httptest.NewRecorder()
 	pg.app.handleMailboxList(w, httptest.NewRequest(http.MethodGet, "/api/mailboxes", nil))
-	if w.Code != http.StatusOK {
-		t.Fatalf("folder list: %d %s", w.Code, w.Body.String())
-	}
-	body := strings.ToLower(w.Body.String())
-	if strings.Contains(body, "all mail") {
-		t.Errorf("folder list offers the all-mail view: %s", body)
-	}
-	if !strings.Contains(body, "sent mail") || !strings.Contains(body, "inbox") {
-		t.Errorf("folder list lost a real folder: %s", body)
+	if !strings.Contains(strings.ToLower(w.Body.String()), "all mail") {
+		t.Errorf("the folder list dropped all mail: %s", w.Body.String())
 	}
 }

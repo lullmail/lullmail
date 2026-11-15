@@ -249,8 +249,8 @@ func (a *App) handleRecent(w http.ResponseWriter, r *http.Request) {
 	}
 	a.threadList(w, r, uid, 40, `
 		SELECT DISTINCT ON (m.account_id, m.thread_id)
-		       m.account_id, m.thread_id, m.id, m.subject, m.from_addrs, m.received_at,
-		       COALESCE(h.read_at IS NOT NULL, false), m.preview, COALESCE(h.bucket,'')
+		       m.account_id, m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at,
+		       COALESCE(h.read_at IS NOT NULL, false), COALESCE(m.preview,''), COALESCE(h.bucket,'')
 		FROM mail_messages m
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
@@ -274,14 +274,25 @@ func (a *App) handleFolder(w http.ResponseWriter, r *http.Request) {
 	}
 	a.threadList(w, r, uid, 100, `
 		SELECT DISTINCT ON (m.account_id, m.thread_id)
-		       m.account_id, m.thread_id, m.id, m.subject, m.from_addrs, m.received_at,
-		       COALESCE(h.read_at IS NOT NULL, false), m.preview, COALESCE(h.bucket,'')
+		       m.account_id, m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at,
+		       COALESCE(h.read_at IS NOT NULL, false), COALESCE(m.preview,''), COALESCE(h.bucket,'')
 		FROM mail_message_mailboxes mm
 		JOIN mail_mailboxes mb ON mb.account_id = mm.account_id AND mb.id = mm.mailbox_id
 		JOIN mail_messages m ON m.account_id = mm.account_id AND m.id = mm.message_id
 		JOIN email_accounts ea ON ea.mirror_account_id = m.account_id AND ea.user_id = $1
 		LEFT JOIN hey_messages h ON h.account_id = m.account_id AND h.message_id = m.id AND h.user_id = $1
-		WHERE lower(mb.name) = lower($2)`+
+		WHERE lower(mb.name) = lower($2)
+		  -- A provider's "all mail" view (Gmail's [Gmail]/All Mail) repeats
+		  -- every folder, the owner's sent mail and drafts included. Here it
+		  -- means all the mail that arrived: what the owner wrote has Sent
+		  -- (and Outreach), and listing it again under "all mail" is how sent
+		  -- mail kept turning up after it left the Inbox and Receipts.
+		  AND NOT (COALESCE(mb.role,'') = 'all' AND (
+		        COALESCE(h.bucket,'') = 'sent'
+		        OR EXISTS (SELECT 1 FROM mail_message_mailboxes xm
+		                   JOIN mail_mailboxes xb ON xb.account_id = xm.account_id AND xb.id = xm.mailbox_id
+		                   WHERE xm.account_id = m.account_id AND xm.message_id = m.id
+		                     AND xb.role IN ('sent', 'drafts'))))`+
 		accountClause(r)+`
 		ORDER BY m.account_id, m.thread_id, m.received_at DESC NULLS LAST`, uid, name)
 }
@@ -299,9 +310,7 @@ func (a *App) handleMailboxList(w http.ResponseWriter, r *http.Request) {
 		SELECT DISTINCT ON (lower(mb.name)) lower(mb.name), mb.role
 		FROM mail_mailboxes mb
 		JOIN email_accounts ea ON ea.mirror_account_id = mb.account_id AND ea.user_id = $1
-		-- A provider's "all mail" view (Gmail's [Gmail]/All Mail) is its
-		-- storage, not a place: it repeats every folder, sent mail included.
-		WHERE COALESCE(mb.role,'') <> 'all'`+
+		WHERE true`+
 		accountClause(r)+`
 		ORDER BY lower(mb.name)`, uid)
 	if err != nil {

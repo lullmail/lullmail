@@ -177,7 +177,7 @@ func (a *App) handleBoard(w http.ResponseWriter, r *http.Request) {
 		live := map[string]boardCard{}
 		liveQuery := `
 			SELECT DISTINCT ON (b.id)
-			       m.account_id, m.thread_id, m.id, m.subject, m.from_addrs, m.received_at, m.preview,
+			       m.account_id, m.thread_id, m.id, COALESCE(m.subject,''), COALESCE(m.from_addrs,'[]'), m.received_at, COALESCE(m.preview,''),
 			       CASE WHEN h.message_id IS NULL THEN NULL ELSE h.read_at IS NOT NULL END,
 			       COALESCE(h.bucket,''), h.set_aside_until
 			FROM board_cards b
