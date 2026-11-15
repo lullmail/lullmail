@@ -91,6 +91,10 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		return err
 	}
 
+	// On an outreach mailbox only the people actually addressed count: a
+	// thread there is a cold send, and "anyone sharing the thread" would
+	// vouch for the bounce and the auto-responder that answered it.
+	//
 	// Correspondents: people the owner has already exchanged mail with —
 	// explicit recipients of user-sent messages, plus anyone sharing a
 	// thread with one (the mirror's to_addrs is spotty on sent mail, but
@@ -163,6 +167,7 @@ func (a *App) classifyUser(ctx context.Context, uid string) error {
 		JOIN email_accounts ea ON ea.mirror_account_id = mine.account_id AND ea.user_id = $1
 		JOIN mail_messages other ON other.account_id = mine.account_id AND other.thread_id = mine.thread_id
 		WHERE mine.thread_id IS NOT NULL
+		  AND NOT ea.outreach
 		  AND lower(COALESCE(mine.from_addrs, '[]')::json->0->>'email') = lower(ea.address)` + sentMembership("mine") + `
 		  AND lower(COALESCE(other.from_addrs, '[]')::json->0->>'email') <> lower(ea.address)
 		  AND COALESCE(other.from_addrs, '') <> ''`); err != nil {
@@ -756,9 +761,26 @@ var bucketNames = map[string][]string{
 	"paper_trail": {"paper_trail"},
 	"feed":        {"feed"},
 	"sent":        {"sent"},
-	"snoozed":     {"set_aside", "later"},
-	"set_aside":   {"set_aside"},
-	"later":       {"later"},
+	// Not a storage value: sent mail from mailboxes marked outreach. "sent"
+	// lists the rest. See mailboxUseClause.
+	"outreach":  {"sent"},
+	"snoozed":   {"set_aside", "later"},
+	"set_aside": {"set_aside"},
+	"later":     {"later"},
+}
+
+// mailboxUseClause splits the one 'sent' storage bucket into its two lists by
+// what the mailbox is for: a machine sending on the owner's behalf from an
+// outreach mailbox is not the owner writing to someone, and a few hundred
+// cold sends bury the handful of messages the owner actually wrote.
+func mailboxUseClause(list string) string {
+	switch list {
+	case "sent":
+		return ` AND NOT ea.outreach`
+	case "outreach":
+		return ` AND ea.outreach`
+	}
+	return ""
 }
 
 // handleBucket lists threads for one bucket view: latest message per thread.
@@ -808,6 +830,7 @@ func (a *App) handleBucket(w http.ResponseWriter, r *http.Request) {
 		query += ` AND ea.id = $3`
 		args = append(args, account)
 	}
+	query += mailboxUseClause(r.PathValue("bucket"))
 	query += `
 	  AND m.id = (
 	    SELECT m2.id FROM hey_messages h2

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "preact/hooks";
-import { counts, moreSheet, screeningEnabled } from "../lib/store";
+import { counts, hasOutreach, moreSheet, screeningEnabled } from "../lib/store";
 import { path, routeFor } from "../lib/router";
 import { Icon, type IconName } from "./Icon";
 
@@ -26,6 +26,7 @@ const MORE: { title: string; items: [href: string, nav: string, label: string, s
   { title: "Mail", items: [
     ["/receipts", "paper_trail", "Receipts", "Orders, confirmations, notifications"],
     ["/sent", "sent", "Sent", "Everything you've written"],
+    ["/outreach", "outreach", "Outreach", "Sent from your outreach mailboxes"],
     ["/snoozed", "snoozed", "Snoozed", "Everything you put off"],
     ["/people", "people", "People", "Who you've decided about"],
     ["/outbox", "outbox", "Outbox", "Sends in progress"],
@@ -87,7 +88,7 @@ export function TabBar() {
             {MORE.map((group) => (
               <div class="sheet-group" key={group.title}>
                 <div class="sheet-title">{group.title}</div>
-                {group.items.map(([href, nav, label, sub]) => {
+                {group.items.filter((item) => item[1] !== "outreach" || hasOutreach.value).map(([href, nav, label, sub]) => {
                   const n = counts.value[nav as keyof typeof counts.value] || 0;
                   return (
                     <a class={"sheet-item" + (here === nav ? " active" : "")} href={href} key={nav}

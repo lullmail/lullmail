@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { layout, shortcuts, theme, toggleLayout } from "../lib/store";
+import { hasOutreach, layout, shortcuts, theme, toggleLayout } from "../lib/store";
 import { navigate } from "../lib/router";
 import { Icon } from "./Icon";
 
@@ -47,6 +47,12 @@ export function MoreMenu() {
             <Icon name="reply" size={14} />
             Sent
           </button>
+          {hasOutreach.value && (
+            <button class="menu-item" type="button" role="menuitem" onClick={pick(() => navigate("/outreach"))}>
+              <Icon name="arrow" size={14} />
+              Outreach
+            </button>
+          )}
           <button class="menu-item" type="button" role="menuitem" onClick={pick(() => navigate("/outbox"))}>
             <Icon name="arrow" size={14} />
             Outbox

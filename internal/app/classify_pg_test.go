@@ -291,3 +291,96 @@ func TestReturnedSnoozeOfTheOwnersOwnMailStaysInTheImbox(t *testing.T) {
 		t.Errorf("returned reply in an answered thread bucketed %q; want sent", got)
 	}
 }
+
+// A mailbox marked outreach is one a machine sends from. Its sent mail lists
+// under Outreach, not Sent, and flipping the flag re-sorts both at once
+// because nothing is stored differently.
+func TestOutreachMailboxSplitsTheSentList(t *testing.T) {
+	pg := newProductPG(t)
+	ctx := context.Background()
+	seedClassifyFixture(t, pg.db, pg.uid)
+	if err := pg.app.classifyUser(ctx, pg.uid); err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	list := func(name string) []string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/buckets/"+name, nil)
+		req.SetPathValue("bucket", name)
+		w := httptest.NewRecorder()
+		pg.app.handleBucket(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s list: %d %s", name, w.Code, w.Body.String())
+		}
+		var page struct {
+			Rows []struct {
+				MessageID string `json:"message_id"`
+			} `json:"rows"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+			t.Fatal(err)
+		}
+		ids := []string{}
+		for _, r := range page.Rows {
+			ids = append(ids, r.MessageID)
+		}
+		return ids
+	}
+	if sent, out := list("sent"), list("outreach"); len(sent) != 1 || sent[0] != "m-sent" || len(out) != 0 {
+		t.Fatalf("personal mailbox: sent=%v outreach=%v", sent, out)
+	}
+	mustClassifyExec(t, pg.db, `UPDATE email_accounts SET outreach = true WHERE mirror_account_id = 'acct-1'`)
+	if sent, out := list("sent"), list("outreach"); len(sent) != 0 || len(out) != 1 || out[0] != "m-sent" {
+		t.Fatalf("outreach mailbox: sent=%v outreach=%v", sent, out)
+	}
+}
+
+// On an outreach mailbox only the people actually addressed skip the
+// Screener. A stranger who merely shares the thread — the bounce, the
+// auto-responder — is not vouched for by a cold send.
+func TestOutreachThreadsDoNotVouchForStrangers(t *testing.T) {
+	for _, outreach := range []bool{false, true} {
+		pg := newProductPG(t)
+		ctx := context.Background()
+		seedClassifyFixture(t, pg.db, pg.uid)
+		mustClassifyExec(t, pg.db, `UPDATE email_accounts SET outreach = $1, created_at = now() - interval '1 day' WHERE mirror_account_id = 'acct-1'`, outreach)
+		for _, m := range [][2]string{{"m-bounce", "mailer-daemon@rlelectrical.ca"}, {"m-lead", "rbeskau@rlelectrical.ca"}} {
+			mustClassifyExec(t, pg.db,
+				`INSERT INTO mail_messages (account_id, id, thread_id, subject, received_at, from_addrs, to_addrs)
+				 VALUES ('acct-1', $1, 't1', 's', now(), $2, '[{"email":"tyler@dreamlucidmail.com"}]')`,
+				m[0], `[{"email":"`+m[1]+`"}]`)
+			mustClassifyExec(t, pg.db, `INSERT INTO mail_message_mailboxes (account_id, message_id, mailbox_id) VALUES ('acct-1', $1, 'mb-in')`, m[0])
+		}
+		if err := pg.app.classifyUser(ctx, pg.uid); err != nil {
+			t.Fatalf("classify: %v", err)
+		}
+		if got := bucketOf(t, pg.db, "m-lead"); got != "imbox" {
+			t.Errorf("outreach=%v: a reply from the person addressed bucketed %q; want imbox", outreach, got)
+		}
+		want := "imbox"
+		if outreach {
+			want = "screener"
+		}
+		if got := bucketOf(t, pg.db, "m-bounce"); got != want {
+			t.Errorf("outreach=%v: a stranger sharing the thread bucketed %q; want %s", outreach, got, want)
+		}
+	}
+}
+
+// A provider's "all mail" view is its storage, not a place: it repeats every
+// folder, sent mail included, so the folder list leaves it out.
+func TestFolderListLeavesOutTheProvidersAllMailView(t *testing.T) {
+	pg := newProductPG(t)
+	seedClassifyFixture(t, pg.db, pg.uid)
+	w := httptest.NewRecorder()
+	pg.app.handleMailboxList(w, httptest.NewRequest(http.MethodGet, "/api/mailboxes", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("folder list: %d %s", w.Code, w.Body.String())
+	}
+	body := strings.ToLower(w.Body.String())
+	if strings.Contains(body, "all mail") {
+		t.Errorf("folder list offers the all-mail view: %s", body)
+	}
+	if !strings.Contains(body, "sent mail") || !strings.Contains(body, "inbox") {
+		t.Errorf("folder list lost a real folder: %s", body)
+	}
+}

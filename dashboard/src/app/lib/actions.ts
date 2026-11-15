@@ -19,6 +19,7 @@ export const BUCKET_LABEL: Record<ListBucket, string> = {
   feed: "Reading",
   paper_trail: "Receipts",
   sent: "Sent",
+  outreach: "Outreach",
   snoozed: "Snoozed",
   set_aside: "Snoozed",
   later: "Snoozed",
@@ -142,7 +143,7 @@ function originOf(row: Row): Bucket {
   const origin = list.value.origin;
   if (!origin || origin === "snoozed") return "set_aside";
   // Sent is a place to look, not one a thread can be filed into.
-  if (origin === "sent") return "imbox";
+  if (origin === "sent" || origin === "outreach") return "imbox";
   return origin;
 }
 

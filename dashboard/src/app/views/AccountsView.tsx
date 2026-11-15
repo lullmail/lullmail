@@ -147,6 +147,16 @@ function AccountCard({ account, onChange }: { account: Account; onChange: () => 
     finally { setBusy(null); }
   };
 
+  const setOutreach = async (outreach: boolean) => {
+    setBusy("sync");
+    try {
+      await api("/accounts/" + encodeURIComponent(account.id) + "?op=outreach", { body: { outreach } });
+      showToast(outreach ? "Sent mail from this mailbox now lists under Outreach" : "Sent mail from this mailbox is back under Sent");
+      onChange(); refreshAccounts();
+    } catch (e) { showError(e instanceof Error ? e.message : "Could not change what this mailbox is for"); }
+    finally { setBusy(null); }
+  };
+
   const setSyncEnabled = async (enabled: boolean) => {
     setBusy("sync");
     try {
@@ -176,6 +186,7 @@ function AccountCard({ account, onChange }: { account: Account; onChange: () => 
             {account.screener_count > 0 && " · " + account.screener_count + " to screen"}
             {" · " + (account.backfill_days ? account.backfill_days + "-day history" : "all-history view")}
             {" · " + (account.retention_days ? account.retention_days + "-day local retention" : "kept locally")}
+            {account.outreach && " · outreach mailbox"}
           </span>
         )}
       </div>
@@ -197,6 +208,12 @@ function AccountCard({ account, onChange }: { account: Account; onChange: () => 
           <span>Local retention</span>
           <select disabled={!!busy} value={account.retention_days} onChange={(e) => setRetention(Number((e.target as HTMLSelectElement).value))}>
             <option value={0}>Forever</option><option value={30}>30 days</option><option value={90}>90 days</option><option value={365}>1 year</option><option value={1095}>3 years</option>
+          </select>
+        </label>
+        <label class="retention-control" title="Outreach: a tool sends from this mailbox for you. Its sent mail is listed under Outreach instead of Sent, and only people it actually wrote to skip the Screener.">
+          <span>Used for</span>
+          <select disabled={!!busy} value={account.outreach ? "outreach" : "personal"} onChange={(e) => setOutreach((e.target as HTMLSelectElement).value === "outreach")}>
+            <option value="personal">Your own mail</option><option value="outreach">Outreach</option>
           </select>
         </label>
         <label class="retention-control">

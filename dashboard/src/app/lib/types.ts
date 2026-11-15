@@ -6,7 +6,7 @@ export type Bucket = "imbox" | "screener" | "feed" | "paper_trail" | "set_aside"
 
 /** What the UI lists. "snoozed" is the union of set_aside and later; "sent" is
     mail the owner sent — a place to look, never one to file into. */
-export type ListBucket = Bucket | "snoozed" | "sent";
+export type ListBucket = Bucket | "snoozed" | "sent" | "outreach";
 
 /** Shared row shape: /buckets/{b}, /search, /recent, /folder. */
 export interface Row {
@@ -151,6 +151,8 @@ export interface Account {
   backfill_days: number;
   retention_days: number;
   sync_enabled: boolean;
+  /** A mailbox a machine sends from: its sent mail lists under Outreach. */
+  outreach?: boolean;
   last_sync_at: string | null;
   last_error: string | null;
   message_count: number;

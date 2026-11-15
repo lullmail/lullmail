@@ -31,6 +31,7 @@ const ROUTES: Record<string, Route> = {
   "/reading": { kind: "bucket", bucket: "feed", nav: "feed", title: "Reading" },
   "/receipts": { kind: "bucket", bucket: "paper_trail", nav: "paper_trail", title: "Receipts" },
   "/sent": { kind: "bucket", bucket: "sent", nav: "sent", title: "Sent" },
+  "/outreach": { kind: "bucket", bucket: "outreach", nav: "outreach", title: "Outreach" },
   // One destination, two storage values: a dated snooze and a someday one.
   "/snoozed": { kind: "bucket", bucket: "snoozed", nav: "snoozed", title: "Snoozed" },
   "/people": { kind: "people", nav: "people", title: "People" },

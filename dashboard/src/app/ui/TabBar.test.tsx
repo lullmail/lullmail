@@ -2,7 +2,7 @@
 import { render } from "preact";
 import { act } from "preact/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { counts, moreSheet, overlayOpen, screeningEnabled } from "../lib/store";
+import { accounts, counts, moreSheet, overlayOpen, screeningEnabled } from "../lib/store";
 import { path } from "../lib/router";
 import { markDone, openThread } from "../lib/actions";
 import { setList } from "../lib/store";
@@ -64,6 +64,19 @@ describe("phone tab bar", () => {
     act(() => more.click());
     act(() => { path.value = "/notes"; });
     expect(host.querySelector("[role='dialog']")).toBeNull();
+  });
+
+  it("offers Outreach in the sheet only once a mailbox is marked for it", () => {
+    accounts.value = [{ id: "a", address: "me@example.test" }];
+    mount(<TabBar />);
+    const more = tabs().at(-1) as HTMLButtonElement;
+    act(() => more.click());
+    const labels = () => [...host.querySelectorAll(".sheet-item-label")].map((n) => n.textContent);
+    expect(labels()).toContain("Sent");
+    expect(labels()).not.toContain("Outreach");
+    act(() => { accounts.value = [{ id: "a", address: "me@example.test" }, { id: "b", address: "hello@example.test", outreach: true }]; });
+    expect(labels()).toContain("Outreach");
+    act(() => { accounts.value = []; });
   });
 
   it("counts as an overlay while open, keeps Tab inside, and closes when the current tab is tapped", () => {

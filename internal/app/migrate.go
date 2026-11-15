@@ -148,6 +148,12 @@ var productMigrations = []productMigration{
 	{Version: 11, Name: "message identity aliases", Statements: identityAliasStatements},
 	{Version: 12, Name: "agent token scopes", Statements: agentTokenScopeStatements},
 	{Version: 13, Name: "sent mail bucket", Statements: sentBucketStatements},
+	{Version: 14, Name: "outreach mailboxes", Statements: []string{
+		// A mailbox a machine sends from on the owner's behalf. Its sent mail
+		// lists under Outreach instead of Sent; nothing is stored differently,
+		// so flipping the flag re-sorts both lists at once.
+		`ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS outreach boolean NOT NULL DEFAULT false`,
+	}},
 }
 
 // sentBucketStatements admits 'sent' as a hey_messages.bucket value. Mail the

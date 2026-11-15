@@ -35,6 +35,12 @@ const COPY: Record<ListBucket, { title: string; sub: string; emptyTitle: string;
     emptyTitle: "Nothing sent yet.",
     emptySub: "Mail you send — from here or any other app on this mailbox — is kept here.",
   },
+  outreach: {
+    title: "Outreach",
+    sub: "Mail sent from your outreach mailboxes, kept apart from what you wrote yourself. Replies still reach your Inbox.",
+    emptyTitle: "No outreach yet.",
+    emptySub: "Mark a mailbox as Outreach in Settings → Mailboxes and everything sent from it is listed here instead of Sent.",
+  },
   snoozed: {
     title: "Snoozed",
     sub: "Everything you put off. Dated ones come back on their day; the rest wait for someday.",

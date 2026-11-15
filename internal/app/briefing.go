@@ -299,7 +299,9 @@ func (a *App) handleMailboxList(w http.ResponseWriter, r *http.Request) {
 		SELECT DISTINCT ON (lower(mb.name)) lower(mb.name), mb.role
 		FROM mail_mailboxes mb
 		JOIN email_accounts ea ON ea.mirror_account_id = mb.account_id AND ea.user_id = $1
-		WHERE true`+
+		-- A provider's "all mail" view (Gmail's [Gmail]/All Mail) is its
+		-- storage, not a place: it repeats every folder, sent mail included.
+		WHERE COALESCE(mb.role,'') <> 'all'`+
 		accountClause(r)+`
 		ORDER BY lower(mb.name)`, uid)
 	if err != nil {
