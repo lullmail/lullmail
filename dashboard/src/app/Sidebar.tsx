@@ -1,5 +1,6 @@
 import { computed, signal } from "@preact/signals";
-import { counts, hasOutreach, mailboxes, screeningEnabled } from "./lib/store";
+import { mailboxes } from "./lib/store";
+import { place, placeCount, placesIn } from "./lib/places";
 import { folderLabel, folderPath, path, routeFor } from "./lib/router";
 import { Icon } from "./ui/Icon";
 
@@ -19,22 +20,10 @@ import { Icon } from "./ui/Icon";
 //
 // The provider's own Inbox and Sent folders are not listed: the Inbox and
 // Sent above are those, sorted.
-type Place = [href: string, nav: string, label: string, count: "imbox" | "screener" | "feed" | "paper_trail" | null, title: string];
-
-const MAIL: Place[] = [
-  ["/", "imbox", "Inbox", "imbox", "Mail from senders you allowed"],
-  ["/screener", "screener", "Screener", "screener", "New senders waiting for your decision"],
-  ["/reading", "feed", "Reading", "feed", "Allowed mail you never have to answer"],
-  ["/receipts", "paper_trail", "Receipts", "paper_trail", "Confirmations and notifications"],
-  ["/snoozed", "snoozed", "Snoozed", null, "Everything you put off"],
-];
-
-const SENT: Place[] = [
-  ["/sent", "sent", "Sent", null, "Everything you've written"],
-  ["/outreach", "outreach", "Outreach", null, "Sent from your outreach mailboxes"],
-  ["/outbox", "outbox", "Outbox", null, "Sends in progress"],
-];
-
+//
+// Which places exist, what they are called and when a queue is worth a row
+// (the Screener, Snoozed and the Outbox only while they hold something) is
+// lib/places — this file only arranges them.
 const FOLDER_ORDER = ["drafts", "archive", "junk", "trash", "all mail"];
 
 const folders = computed(() => {
@@ -71,11 +60,6 @@ function Item({ href, nav, label, count, here, title, urgent }: {
 
 export function Sidebar() {
   const here = path.value ? routeFor(path.value).nav : "";
-  const c = counts.value;
-  // Undefined means /prefs has not answered yet; showing the Screener until it
-  // does matches the server's own default, so the rail never flickers a
-  // disappearing entry.
-  const screening = screeningEnabled.value !== false;
   const list = folders.value;
   // Sitting in a folder keeps the group open, however it was left.
   const open = foldersOpen.value || here.startsWith("folder:");
@@ -86,14 +70,14 @@ export function Sidebar() {
         <Item href="/today" nav="today" label="Today" here={here} />
 
         <div class="side-label">Mail</div>
-        {MAIL.filter(([, nav]) => screening || nav !== "screener").map(([href, nav, label, key, title]) => (
-          <Item key={nav} href={href} nav={nav} label={label} title={title} here={here}
-            urgent={nav === "screener"} count={key ? c[key] : undefined} />
+        {placesIn("mail", here).map((p) => (
+          <Item key={p.nav} href={p.href} nav={p.nav} label={p.label} title={p.sub} here={here}
+            urgent={p.nav === "screener"} count={placeCount(p)} />
         ))}
 
         <div class="side-label">Sent</div>
-        {SENT.filter(([, nav]) => nav !== "outreach" || hasOutreach.value).map(([href, nav, label, , title]) => (
-          <Item key={nav} href={href} nav={nav} label={label} title={title} here={here} />
+        {placesIn("sent", here).map((p) => (
+          <Item key={p.nav} href={p.href} nav={p.nav} label={p.label} title={p.sub} here={here} />
         ))}
 
         {list.length > 0 && (
@@ -114,7 +98,7 @@ export function Sidebar() {
         )}
 
         <div class="side-label">People</div>
-        <Item href="/people" nav="people" label="People" here={here} />
+        <Item href="/people" nav="people" label={place("people").label} title={place("people").sub} here={here} />
       </nav>
     </aside>
   );

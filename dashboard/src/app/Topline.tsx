@@ -5,38 +5,23 @@ import { accountFilter, accounts, counts, draftStack, openCompose, palette, setA
 import { path, routeFor } from "./lib/router";
 import { Icon } from "./ui/Icon";
 import { MoreMenu } from "./ui/MoreMenu";
+import { type Place, placeCount, placesIn } from "./lib/places";
 
 // The topline in two groups with a hairline rule: the day's surfaces on the
 // left of it (Today, Calendar, Board, Notes — one click, always), the mail's
 // places on the right (Inbox, Reading, and the Screener only while senders
 // wait — a queue, not a place, so its badge sets it apart). In Classic the
 // nav moves into the sidebar and this line keeps only the wordmark.
-type NavItem = [string, string, string, keyof typeof COUNTABLE | null];
-const COUNTABLE = { imbox: 1, screener: 1, feed: 1 } as const;
-
-const DAY: NavItem[] = [
-  ["/today", "today", "Today", null],
-  ["/calendar", "calendar", "Calendar", null],
-  ["/board", "board", "Board", null],
-  ["/notes", "notes", "Notes", null],
-];
-
-const MAIL: NavItem[] = [
-  ["/", "imbox", "Inbox", "imbox"],
-  ["/reading", "feed", "Reading", "feed"],
-];
-
-function NavLink({ item, here }: { item: NavItem; here: string }) {
-  const [href, key, label, countKey] = item;
-  const n = countKey ? counts.value[countKey] || 0 : 0;
-  const active = here === key;
+function NavLink({ item, here }: { item: Place; here: string }) {
+  const n = placeCount(item);
+  const active = here === item.nav;
   return (
-    <a href={href} class={"nav-item" + (active ? " active" : "")} aria-current={active ? "page" : undefined}>
-      {label}
+    <a href={item.href} class={"nav-item" + (active ? " active" : "")} aria-current={active ? "page" : undefined}>
+      {item.label}
       {/* The Screener is the only to-do, so it is the only badge. The rest carry
           a plain numeral, because "where did my mail go" needs an answer. */}
       {n > 0 && (
-        key === "screener"
+        item.nav === "screener"
           ? <span class="nav-count">{n}</span>
           : <span class="nav-n">{n}</span>
       )}
@@ -167,14 +152,12 @@ export function Topline({ classic = false }: { classic?: boolean }) {
             clock on the wall, not a drawer. The mail places join them only
             in document mode; Classic keeps those in the sidebar. */}
         <nav class="nav" ref={navRef} aria-label="Primary">
-          {DAY.map((item) => <NavLink key={item[1]} item={item} here={here} />)}
+          {placesIn("day", here).filter((p) => p.primary).map((p) => <NavLink key={p.nav} item={p} here={here} />)}
           {!classic && (
             <>
               <span class="nav-rule" />
-              {MAIL.map((item) => <NavLink key={item[1]} item={item} here={here} />)}
-              {(screenerWaiting > 0 || here === "screener") && (
-                <NavLink item={["/screener", "screener", "Screener", "screener"]} here={here} />
-              )}
+              {/* Inbox, Reading, and the Screener only while senders wait. */}
+              {placesIn("mail", here).filter((p) => p.primary).map((p) => <NavLink key={p.nav} item={p} here={here} />)}
             </>
           )}
         </nav>
@@ -191,7 +174,7 @@ export function Topline({ classic = false }: { classic?: boolean }) {
             onClick={() => { palette.value = true; }}>
             <Icon name="search" size={16} />
           </button>
-          <MoreMenu />
+          <MoreMenu classic={classic} />
           {/* The text label is hidden on phones, so the name must not depend on it. */}
           <button class="btn btn-accent" type="button"
             aria-label={draftStack.value.length > 0 ? "Compose, " + draftStack.value.length + (draftStack.value.length === 1 ? " draft open" : " drafts open") : "Compose"}

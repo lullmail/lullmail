@@ -1,12 +1,13 @@
 import { useState } from "preact/hooks";
 import { download } from "../lib/api";
-import { closeReader, mailboxName, openCompose, reader, readerRow, showError } from "../lib/store";
+import { accounts, closeReader, mailboxName, openCompose, reader, readerRow, showError } from "../lib/store";
 import { BUCKET_LABEL, loadMessageBody, loadOlderMessages, markDone, markRead, moveTo, pinThreads, snooze, trashThreads } from "../lib/actions";
 import type { Bucket, ListBucket, Message, Row } from "../lib/types";
 import { countOf, fmtFull, splitFrom } from "../lib/fmt";
 import { Avatar } from "../ui/bits";
 import { Icon } from "../ui/Icon";
 import { SnoozeMenu } from "../ui/SnoozeMenu";
+import { SenderMenu } from "../ui/SenderMenu";
 import { MessageBody } from "./Body";
 import { Attachments } from "./Attachments";
 
@@ -76,6 +77,11 @@ function Bar({ row }: { row: Row }) {
   const messages = reader.value.messages;
   const last = messages[messages.length - 1];
 
+  // Whose mail this is: the latest message somebody else wrote. A thread of
+  // only the owner's own mail has no sender to decide about.
+  const own = new Set(accounts.value.map((a) => a.address.toLowerCase()));
+  const theirs = [...messages].reverse().map((m) => splitFrom(m.from)).find((who) => who.email && !own.has(who.email.toLowerCase()));
+
   const reply = () => {
     // The server computed the default recipients from the stored envelope
     // (Reply-To honored, own sent mail followed up to its recipients —
@@ -129,6 +135,7 @@ function Bar({ row }: { row: Row }) {
               {BUCKET_LABEL[b]}
             </button>
           ))}
+        {theirs && <SenderMenu sender={theirs.email} name={theirs.name} rows={[row]} />}
         <button class="btn btn-ghost btn-sm" type="button" title="Mark this thread unread" onClick={() => markRead([row], false)}>Unread</button>
       </div>
     </div>

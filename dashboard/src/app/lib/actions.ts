@@ -497,6 +497,57 @@ export async function decide(sender: string, allow: boolean, route: Bucket | "bl
   }
 }
 
+/** Where a sender's mail goes today, or null when no rule lets them in.
+ *  Asked fresh each time: it is the answer the menu ticks and the undo
+ *  restores, and a stale one would do both wrongly. */
+export async function senderRoute(sender: string): Promise<Bucket | null> {
+  const key = sender.trim().toLowerCase();
+  const people = await api<{ sender: string; route: string; allowed: boolean }[]>("/people", { fresh: true });
+  const found = people.find((p) => p.sender.toLowerCase() === key);
+  return found && found.allowed ? found.route as Bucket : null;
+}
+
+/** "Always send this sender to …", said from the open message.
+ *
+ *  A rule alone decides only where their NEXT mail lands, which from inside a
+ *  thread reads as nothing having happened — so the thread in hand moves with
+ *  it. One toast, one undo: the rule goes back to what it was (or away, if
+ *  there was none) and the thread goes back where it came from. `was` is what
+ *  senderRoute answered when the menu opened; undefined means it never did,
+ *  and then the undo leaves the rule alone rather than guess. */
+export async function routeSender(sender: string, name: string, to: Bucket, rows: Row[], was: Bucket | null | undefined) {
+  const key = sender.trim().toLowerCase();
+  if (!key) return;
+  try {
+    await api("/screener/decide", { body: { sender: key, allow: true, route: to } });
+  } catch (e) {
+    fail(e, "Could not save that rule");
+    return;
+  }
+  // Sent mail is a place to look, never one to file from: it stays put.
+  const moving = rows.filter((r) => r.bucket !== to && r.bucket !== "sent" && r.bucket !== "outreach");
+  const before = new Map(moving.map((r) => [r.account + "\0" + r.message_id, snoozeUndoState(r)] as const));
+  let done: Row[] = [];
+  if (moving.length) {
+    const { changed, failed, queued } = await actManySettled(moving, to);
+    done = settleMutation(changed, failed, queued, "move").done;
+    if (done.some((r) => r.thread_id === reader.value.threadId && r.account === reader.value.account)) closeReader();
+  } else {
+    afterMutation();
+  }
+  const undo = async () => {
+    try {
+      if (was) await api("/screener/decide", { body: { sender: key, allow: true, route: was } });
+      else if (was === null) await api("/screener/undecide", { body: { sender: key } });
+    } catch (e) {
+      fail(e, "Could not put that rule back");
+    }
+    if (done.length) await restore(done.map((row) => ({ row, ...before.get(row.account + "\0" + row.message_id)! })));
+    else afterMutation();
+  };
+  showToast("Mail from " + (name || key) + " now goes to " + BUCKET_LABEL[to], undo);
+}
+
 /** Returns a sender to the Screener — the undo for `decide`, and the unblock on People. */
 export async function undecide(sender: string, quiet = false) {
   try {
@@ -704,11 +755,18 @@ async function submitMail(input: SendInput, idempotencyKey: string): Promise<Sen
   // The server itself says this send may have gone out. That is a stronger
   // unresolved signal than a lost acknowledgment: the draft keeps its key so
   // an edited re-send has to confirm before a possible second copy.
+  // The Outbox has a row in the nav only while it holds something, and a
+  // send that is waiting, in doubt or stopped is something. Said locally —
+  // the send path makes no extra request — and the next count refresh
+  // replaces it with the server's own number.
+  const holdsOutbox = () => { counts.value = { ...counts.value, outbox: Math.max(1, counts.value.outbox || 0) }; };
   if (res.status === "ambiguous") {
+    holdsOutbox();
     showError("This send may already have reached the recipient. Check Outbox and Sent before sending again.");
     return "ambiguous";
   }
   if (res.status === "failed" || res.status === "cancelled") {
+    if (res.status === "failed") holdsOutbox();
     showError("This submission was not sent. Its saved copy is in Outbox; this draft has been kept.");
     return "kept";
   }
@@ -718,6 +776,7 @@ async function submitMail(input: SendInput, idempotencyKey: string): Promise<Sen
     return "accepted";
   }
   undoSeconds.value = window;
+  holdsOutbox();
   const queued = res.queued;
   showToast(
     `Sending in ${window}s`,

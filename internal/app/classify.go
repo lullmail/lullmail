@@ -399,10 +399,25 @@ func (a *App) handleCounts(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
 		return
 	}
+	// Sends that are not finished business: still inside their undo window,
+	// going out, or stopped short. A send that went through is not counted,
+	// so the number is "does the Outbox hold anything I should look at".
+	var outbox int64
+	outboxQuery := `
+		SELECT count(*) FROM outbox_jobs j
+		JOIN email_accounts ea ON ea.mirror_account_id = j.account_id AND ea.user_id = j.user_id
+		WHERE j.user_id = $1 AND j.state IN ('pending','submitting','failed','ambiguous')`
+	if len(countsArgs) == 2 {
+		outboxQuery += ` AND ea.id = $2`
+	}
+	if err := a.db.QueryRowContext(r.Context(), outboxQuery, countsArgs...).Scan(&outbox); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query Failed", err.Error())
+		return
+	}
 	writeJSON(w, map[string]any{
 		"imbox": int(imbox), "screener": int(screener), "feed": int(feed),
 		"paper_trail": int(paper), "set_aside": int(aside), "later": int(later),
-		"snoozed": int(aside + later),
+		"snoozed": int(aside + later), "outbox": int(outbox),
 	})
 }
 

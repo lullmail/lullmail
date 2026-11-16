@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { hasOutreach, layout, shortcuts, theme, toggleLayout } from "../lib/store";
-import { navigate } from "../lib/router";
+import { layout, shortcuts, theme, toggleLayout } from "../lib/store";
+import { navigate, path, routeFor } from "../lib/router";
+import { PLACES, placeOffered } from "../lib/places";
 import { Icon } from "./Icon";
 
 /** Two unlabelled glyphs sitting side by side is a guessing game. One button,
     and everything behind it says what it does in words. */
-export function MoreMenu() {
+export function MoreMenu({ classic = false }: { classic?: boolean }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -28,6 +29,13 @@ export function MoreMenu() {
     return () => { clearTimeout(t); document.removeEventListener("click", away); document.removeEventListener("keydown", key); };
   }, [open]);
 
+  // The places the bar beside this button does not show. In the document
+  // layout that is every mail place past Inbox and Reading; Classic has the
+  // sidebar for those, so the menu stays about settings there.
+  const here = path.value ? routeFor(path.value).nav : "";
+  const places = classic ? [] : PLACES.filter((p) =>
+    (p.group === "mail" || p.group === "sent" || p.group === "people") && !p.primary && placeOffered(p, here));
+
   const pick = (fn: () => void) => () => { setOpen(false); fn(); };
   const themeLabel = theme.value.charAt(0).toUpperCase() + theme.value.slice(1);
 
@@ -43,20 +51,13 @@ export function MoreMenu() {
       </button>
       {open && (
         <div class="menu menu-right" role="menu">
-          <button class="menu-item" type="button" role="menuitem" onClick={pick(() => navigate("/sent"))}>
-            <Icon name="reply" size={14} />
-            Sent
-          </button>
-          {hasOutreach.value && (
-            <button class="menu-item" type="button" role="menuitem" onClick={pick(() => navigate("/outreach"))}>
-              <Icon name="arrow" size={14} />
-              Outreach
+          {places.map((p) => (
+            <button class="menu-item" type="button" role="menuitem" key={p.nav} onClick={pick(() => navigate(p.href))}>
+              <Icon name={p.icon} size={14} />
+              {p.label}
             </button>
-          )}
-          <button class="menu-item" type="button" role="menuitem" onClick={pick(() => navigate("/outbox"))}>
-            <Icon name="arrow" size={14} />
-            Outbox
-          </button>
+          ))}
+          {places.length > 0 && <div class="menu-rule" />}
           <button class="menu-item" type="button" role="menuitem" onClick={pick(() => navigate("/settings/appearance"))}>
             <Icon name={theme.value === "dark" ? "sun" : "moon"} size={14} />
             Appearance<span class="note">{themeLabel}</span>

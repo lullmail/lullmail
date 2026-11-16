@@ -1033,12 +1033,12 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 .thread-bar-move { flex: none; font-size: var(--t-xs); font-weight: 650; color: var(--ink-3); letter-spacing: 0.02em; }
 /* The key chips are coaching, not controls: they go first when the bar is
    tight (the Classic reading pane, a narrow window), then the filing label. */
-@container (max-width: 860px) { .thread-bar-in .kbd { display: none; } }
-@container (max-width: 760px) { .thread-bar-move { display: none; } }
+@container (max-width: 990px) { .thread-bar-in .kbd { display: none; } }
+@container (max-width: 850px) { .thread-bar-move { display: none; } }
 /* Tighter still (a narrow Classic pane): the four icon verbs keep their
    glyph and lose their word. The word stays in the accessibility tree —
    visually hidden, not removed — so the buttons never go nameless. */
-@container (max-width: 700px) {
+@container (max-width: 790px) {
   .thread-bar-in .btn-ghost .lbl {
     position: absolute; width: 1px; height: 1px; overflow: hidden;
     clip-path: inset(50%); white-space: nowrap;
@@ -1047,7 +1047,7 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 }
 /* The pane can be dragged down to 300px; past this point one row is not
    possible, and a second row beats a clipped button. */
-@container (max-width: 470px) { .thread-bar-in { flex-wrap: wrap; } }
+@container (max-width: 590px) { .thread-bar-in { flex-wrap: wrap; } }
 
 .msg-text { white-space: pre-wrap; }
 .quote {
@@ -1256,6 +1256,16 @@ mark.hit { background: var(--accent-soft); color: var(--accent); border-radius: 
 }
 .menu-item:hover { background: var(--hover); color: var(--ink); }
 .menu-item .note { margin-left: auto; font-size: var(--t-sm); color: var(--ink-3); }
+/* A menu that has to say what it is about before it offers anything. */
+.menu-head {
+  padding: var(--sp-2) var(--sp-3) var(--sp-2); margin-bottom: var(--sp-1);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--t-sm); line-height: 1.4; color: var(--ink-3);
+}
+.menu-head b { font-weight: 650; color: var(--ink); }
+.menu-head-sub { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--t-xs); }
+.menu-up-right { bottom: 100%; right: 0; margin-bottom: 6px; width: 264px; }
+.menu-item .note svg { color: var(--accent); }
 
 /* ---- gate ---- */
 

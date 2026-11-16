@@ -525,7 +525,7 @@ func registerTools(s *mcp.Server, c *client) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_counts",
-		Description: "Per-bucket counts (inbox, reading, screener, snoozed) for the nav badges.",
+		Description: "Per-bucket counts (inbox, reading, screener, snoozed) for the nav badges, plus `outbox`: sends still going out or stopped short.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
 		AccountID string `json:"account_id,omitempty" jsonschema:"limit to one mailbox; default all"`
 	}) (*mcp.CallToolResult, any, error) {
