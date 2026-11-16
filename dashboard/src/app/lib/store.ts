@@ -336,10 +336,11 @@ export const screeningEnabled = signal<boolean | undefined>(undefined);
 export interface Mailbox { name: string; role?: string | null }
 export const mailboxes = signal<Mailbox[]>([]);
 
-/** Unread that actually competes for attention — snoozed mail is chosen, not owed. */
+/** Unread that actually competes for attention — snoozed mail is chosen, not
+ *  owed, and receipts file themselves: nobody clears a pile of confirmations. */
 export const attentionTotal = computed(() => {
   const c = counts.value;
-  return (c.imbox || 0) + (c.feed || 0) + (c.paper_trail || 0);
+  return (c.imbox || 0) + (c.feed || 0);
 });
 
 /* ---- toast, with an optional single undo ---- */

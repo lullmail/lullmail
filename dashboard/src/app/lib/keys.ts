@@ -8,20 +8,9 @@ import { closeCompose, compose, composeOpen, cursor, checked, clearChecked, focu
 import { decide, loadReplySeed, markDone, moveTo, openThread, pinThreads, trashThreads } from "./actions";
 import { offlineOwner } from "./offline";
 import { navigate } from "./router";
+import { GOTO } from "./places";
 import { splitFrom } from "./fmt";
 
-const GOTO: Record<string, string> = {
-  t: "/today",
-  b: "/board",
-  d: "/calendar",
-  n: "/notes",
-  i: "/",
-  s: "/screener",
-  r: "/reading",
-  c: "/receipts",
-  z: "/snoozed",
-  p: "/people",
-};
 
 export function isTyping(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;

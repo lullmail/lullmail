@@ -1,39 +1,23 @@
 import { useEffect, useRef } from "preact/hooks";
-import { counts, hasOutreach, moreSheet, screeningEnabled } from "../lib/store";
+import { moreSheet, screeningEnabled } from "../lib/store";
 import { path, routeFor } from "../lib/router";
-import { Icon, type IconName } from "./Icon";
+import { PLACES, type PlaceGroup, placeCount, placeOffered } from "../lib/places";
+import { Icon } from "./Icon";
 
 // The phone shell. A header row of text links cannot hold eight places at
 // 390px — it scrolled sideways and hid half of them — so on a phone the
 // places move to the thumb: four tabs that are always one tap away, and a
 // sheet for the rest. CSS shows this only at phone widths; wider windows
 // keep the topline nav and never see it.
-type Tab = [href: string, nav: string, label: string, icon: IconName];
+// The tabs are a fixed four so the bar never reshuffles under the thumb;
+// the sheet is everything else, and there the queues come and go like they
+// do in the sidebar. Which places exist is lib/places.
+const TABS = PLACES.filter((p) => p.tab);
 
-const TABS: Tab[] = [
-  ["/today", "today", "Today", "sun"],
-  ["/", "imbox", "Inbox", "inbox"],
-  ["/screener", "screener", "Screener", "shield"],
-  ["/reading", "feed", "Reading", "book"],
-];
-
-const MORE: { title: string; items: [href: string, nav: string, label: string, sub: string][] }[] = [
-  { title: "Your day", items: [
-    ["/board", "board", "Board", "What needs you, what you're waiting on"],
-    ["/calendar", "calendar", "Calendar", "When snoozed mail comes back"],
-    ["/notes", "notes", "Notes", "Thoughts, not tasks"],
-  ] },
-  { title: "Mail", items: [
-    ["/receipts", "paper_trail", "Receipts", "Orders, confirmations, notifications"],
-    ["/sent", "sent", "Sent", "Everything you've written"],
-    ["/outreach", "outreach", "Outreach", "Sent from your outreach mailboxes"],
-    ["/snoozed", "snoozed", "Snoozed", "Everything you put off"],
-    ["/people", "people", "People", "Who you've decided about"],
-    ["/outbox", "outbox", "Outbox", "Sends in progress"],
-  ] },
-  { title: "Lull Mail", items: [
-    ["/settings", "settings", "Settings", "Mailboxes, appearance, security"],
-  ] },
+const SHEET: { title: string; groups: PlaceGroup[] }[] = [
+  { title: "Your day", groups: ["day"] },
+  { title: "Mail", groups: ["mail", "sent", "people"] },
+  { title: "Lull Mail", groups: ["app"] },
 ];
 
 export function TabBar() {
@@ -46,8 +30,8 @@ export function TabBar() {
   const moreRef = useRef<HTMLButtonElement>(null);
   // The Screener tab stays put while screening is on, so the bar never
   // reshuffles under the thumb; with screening off it would be a dead end.
-  const tabs = TABS.filter((t) => t[1] !== "screener" || screeningEnabled.value !== false || here === "screener");
-  const inTabs = tabs.some((t) => t[1] === here);
+  const tabs = TABS.filter((t) => t.nav !== "screener" || screeningEnabled.value !== false || here === "screener");
+  const inTabs = tabs.some((t) => t.nav === here);
 
   // Any navigation — a sheet link, the back gesture — puts the sheet away.
   useEffect(() => { setOpen(false); }, [path.value]);
@@ -85,31 +69,32 @@ export function TabBar() {
           <div class="sheet" id="more-places" role="dialog" aria-modal="true" aria-label="More places" ref={sheetRef}
             onClick={(ev) => ev.stopPropagation()}>
             <div class="sheet-grip" aria-hidden="true" />
-            {MORE.map((group) => (
-              <div class="sheet-group" key={group.title}>
-                <div class="sheet-title">{group.title}</div>
-                {group.items.filter((item) => item[1] !== "outreach" || hasOutreach.value).map(([href, nav, label, sub]) => {
-                  const n = counts.value[nav as keyof typeof counts.value] || 0;
-                  return (
-                    <a class={"sheet-item" + (here === nav ? " active" : "")} href={href} key={nav}
-                      aria-current={here === nav ? "page" : undefined} onClick={() => setOpen(false)}>
+            {SHEET.map((group) => {
+              const items = PLACES.filter((p) => group.groups.includes(p.group) && !p.tab && placeOffered(p, here));
+              if (!items.length) return null;
+              return (
+                <div class="sheet-group" key={group.title}>
+                  <div class="sheet-title">{group.title}</div>
+                  {items.map((p) => (
+                    <a class={"sheet-item" + (here === p.nav ? " active" : "")} href={p.href} key={p.nav}
+                      aria-current={here === p.nav ? "page" : undefined} onClick={() => setOpen(false)}>
                       <span class="sheet-item-main">
-                        <span class="sheet-item-label">{label}</span>
-                        <span class="sheet-item-sub">{sub}</span>
+                        <span class="sheet-item-label">{p.label}</span>
+                        <span class="sheet-item-sub">{p.sub}</span>
                       </span>
-                      {n > 0 && <span class="sheet-item-n">{n}</span>}
                       <Icon name="chevron" size={14} />
                     </a>
-                  );
-                })}
-              </div>
-            ))}
+                  ))}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
       <nav class="tabbar" aria-label="Places">
-        {tabs.map(([href, nav, label, icon]) => {
-          const n = counts.value[nav as keyof typeof counts.value] || 0;
+        {tabs.map((p) => {
+          const { href, nav, label, icon } = p;
+          const n = placeCount(p);
           const active = here === nav && !open;
           return (
             <a class={"tab" + (active ? " active" : "")} href={href} key={nav} aria-current={active ? "page" : undefined}

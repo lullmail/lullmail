@@ -6,6 +6,7 @@ import { api } from "../lib/api";
 import { accountQS, hasOutreach, layout, palette, searchMail, toggleLayout } from "../lib/store";
 import { openThread } from "../lib/actions";
 import { folderLabel, navigate } from "../lib/router";
+import { PLACES } from "../lib/places";
 import { fmtDate, splitFrom } from "../lib/fmt";
 import type { Mailbox, Row } from "../lib/types";
 import { Icon } from "./Icon";
@@ -18,20 +19,9 @@ interface Item {
   run: () => void;
 }
 
-const JUMPS: [string, string][] = [
-  ["Today", "/today"],
-  ["Outbox", "/outbox"],
-  ["Board", "/board"],
-  ["Calendar", "/calendar"],
-  ["Notes", "/notes"],
-  ["Inbox", "/"],
-  ["Screener", "/screener"],
-  ["Reading", "/reading"],
-  // Not in the nav — this is how you actually reach receipts.
-  ["Receipts", "/receipts"],
-  ["Sent", "/sent"],
-  ["Snoozed", "/snoozed"],
-  ["People", "/people"],
+// Every place, whether or not the nav is showing it right now: a queue that
+// is empty has no row in the sidebar, and this is how you still get there.
+const SETTINGS_JUMPS: [string, string][] = [
   ["Accounts", "/settings/accounts"],
   ["Security", "/settings/security"],
 ];
@@ -94,7 +84,10 @@ export function Palette() {
       return out;
     }
 
-    const places: [string, string][] = hasOutreach.value ? JUMPS.flatMap((j) => j[1] === "/sent" ? [j, ["Outreach", "/outreach"] as [string, string]] : [j]) : JUMPS;
+    const places: [string, string][] = [
+      ...PLACES.filter((p) => p.nav !== "outreach" || hasOutreach.value).map((p) => [p.label, p.href] as [string, string]),
+      ...SETTINGS_JUMPS,
+    ];
     const jumps = places.filter(([label]) => !needle || label.toLowerCase().includes(needle));
     if (jumps.length) {
       out.push({

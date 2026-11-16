@@ -164,6 +164,7 @@ export interface Mailbox {
   role?: string;
 }
 
-export type Counts = Partial<Record<ListBucket, number>>;
+/** Unread per list, plus `outbox`: sends still going out or stopped short. */
+export type Counts = Partial<Record<ListBucket | "outbox", number>>;
 
 export interface ThreadPage { rows: Message[]; has_more: boolean; next_cursor?: string }
